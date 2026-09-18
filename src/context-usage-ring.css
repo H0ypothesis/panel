@@ -1,0 +1,77 @@
+.card-footer-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+  margin-left: 8px;
+}
+.context-usage-ring {
+  --context-usage-color: var(--text-accent-strong);
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 30px;
+  width: 30px;
+  height: 30px;
+  border-radius: 50%;
+  color: var(--context-usage-color);
+  cursor: help;
+  user-select: none;
+}
+.context-usage-ring.warning {
+  --context-usage-color: var(--warning);
+}
+.context-usage-ring.danger {
+  --context-usage-color: var(--error);
+}
+.context-usage-ring.unknown {
+  --context-usage-color: var(--text-muted);
+}
+.context-usage-ring:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 2px;
+}
+.context-usage-ring > svg {
+  width: 30px;
+  height: 30px;
+  overflow: visible;
+}
+.context-usage-track,
+.context-usage-fill {
+  fill: none;
+  stroke-width: 2.5;
+}
+.context-usage-track {
+  stroke: var(--line-strong);
+}
+.context-usage-fill {
+  stroke: currentColor;
+  stroke-linecap: butt;
+  transition:
+    stroke-dashoffset 0.25s ease,
+    stroke 0.2s ease;
+}
+.context-usage-ring.unknown .context-usage-track {
+  stroke: var(--text-faint);
+  stroke-dasharray: 2.5 2.5;
+}
+.context-usage-value {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  font-size: 8px;
+  font-weight: 600;
+  line-height: 1;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.3px;
+}
+.context-usage-value.compact {
+  font-size: 6.5px;
+}
+@media (prefers-reduced-motion: reduce) {
+  .context-usage-fill {
+    transition: none;
+  }
+}

@@ -1,0 +1,280 @@
+.react-flow__panel.canvas-git-history {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  max-height: calc(100% - 90px);
+  pointer-events: none;
+}
+.git-history-panel {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  width: min(292px, calc(100cqw - 42px));
+  max-width: calc(100vw - 42px);
+  color: var(--text-body);
+  pointer-events: none;
+}
+.git-history-panel.is-collapsed {
+  width: max-content;
+}
+.git-history-toggle {
+  display: flex;
+  flex-shrink: 0;
+  align-items: center;
+  gap: 7px;
+  width: 100%;
+  min-height: 34px;
+  padding: 7px 10px;
+  border: 1px solid var(--line-strong);
+  border-radius: 7px;
+  background: var(--canvas-control-background);
+  box-shadow: 0 2px 8px var(--shadow-soft);
+  color: var(--text-heading);
+  font-size: 11px;
+  text-align: left;
+  pointer-events: auto;
+}
+.is-expanded .git-history-toggle {
+  border-bottom-right-radius: 0;
+  border-bottom-left-radius: 0;
+}
+.git-history-toggle:hover {
+  background: var(--surface-hover);
+}
+.git-history-toggle > svg:last-child {
+  margin-left: auto;
+  color: var(--text-secondary);
+}
+.git-history-count {
+  min-width: 18px;
+  padding: 1px 4px;
+  border-radius: 4px;
+  color: var(--text-accent-strong);
+  background: var(--surface-muted);
+  font-size: 9px;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+}
+.git-history-content {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  overflow: hidden;
+  max-height: 472px;
+  margin-top: -1px;
+  border: 1px solid var(--line-strong);
+  border-radius: 0 0 7px 7px;
+  background: var(--canvas-control-background);
+  box-shadow: 0 5px 14px var(--shadow-card);
+  pointer-events: auto;
+}
+.git-history-content[hidden] {
+  display: none;
+}
+.git-history-description {
+  display: flex;
+  flex-shrink: 0;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 9px 11px;
+  color: var(--text-secondary);
+  font-size: 9px;
+  border-bottom: 1px solid var(--line-subtle);
+}
+.git-history-list {
+  flex: 1 1 auto;
+  min-height: 0;
+  padding: 0;
+  margin: 0;
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  list-style: none;
+  scrollbar-width: thin;
+  scrollbar-color: var(--scrollbar-thumb) transparent;
+}
+.git-history-list > li + li {
+  border-top: 1px solid var(--line-subtle);
+}
+.git-history-entry {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  width: 100%;
+  padding: 11px;
+  color: var(--text-body);
+  text-align: left;
+}
+.git-history-entry:hover:not(:disabled) {
+  background: var(--surface-hover);
+}
+.git-history-toggle:focus-visible,
+.git-history-entry:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: -3px;
+}
+.git-history-entry:disabled {
+  cursor: default;
+  opacity: 0.72;
+}
+.git-history-entry-meta {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+  color: var(--text-secondary);
+  font-size: 9px;
+  font-variant-numeric: tabular-nums;
+}
+.git-history-tool {
+  overflow: hidden;
+  max-width: 72px;
+  padding: 1px 5px;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  color: var(--text-accent-strong);
+  background: var(--surface-subtle);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.git-history-entry-meta time {
+  white-space: nowrap;
+}
+.git-history-entry-meta > code {
+  margin-left: auto;
+  font-size: 9px;
+}
+.git-history-summary,
+.git-history-error {
+  display: -webkit-box;
+  overflow: hidden;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  overflow-wrap: anywhere;
+  font-size: 11px;
+  line-height: 1.5;
+}
+.git-history-summary {
+  color: var(--text-heading);
+  font-weight: 500;
+}
+.git-history-files {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  width: 100%;
+}
+.git-history-file {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+  font-size: 10px;
+}
+.git-history-file-status {
+  flex: 0 0 15px;
+  border-radius: 3px;
+  font-size: 9px;
+  line-height: 16px;
+  text-align: center;
+  font-weight: 600;
+}
+.git-history-file-status.added {
+  color: var(--success);
+  background: var(--success-background);
+}
+.git-history-file-status.modified {
+  color: var(--warning);
+  background: var(--warning-background);
+}
+.git-history-file-status.deleted {
+  color: var(--error);
+  background: var(--error-background);
+}
+.git-history-file > code {
+  overflow: hidden;
+  min-width: 0;
+  font-size: 10px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.git-history-more-files {
+  padding-left: 22px;
+  color: var(--text-secondary);
+  font-size: 9px;
+}
+.git-history-error {
+  color: var(--warning);
+  font-size: 10px;
+}
+.git-history-recording,
+.git-history-recovered {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--text-secondary);
+  font-size: 10px;
+}
+.git-history-footer {
+  flex-shrink: 0;
+  margin: 0;
+  padding: 8px 11px;
+  border-top: 1px solid var(--line-subtle);
+  color: var(--text-secondary);
+  font-size: 9px;
+  text-align: center;
+}
+.git-history-node {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  padding-top: 3px;
+  color: var(--text-accent-strong);
+  font-size: 10px;
+}
+.git-history-node > span {
+  overflow: hidden;
+  min-width: 0;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.git-history-node > svg {
+  flex-shrink: 0;
+  margin-left: auto;
+}
+.git-history-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 9px;
+  overflow: auto;
+  min-height: 0;
+  padding: 21px 19px;
+  color: var(--text-muted);
+  text-align: center;
+}
+.git-history-empty strong {
+  color: var(--text-secondary);
+  font-size: 11px;
+  font-weight: 500;
+}
+.git-history-empty p {
+  margin: 0;
+  font-size: 10px;
+  line-height: 1.7;
+}
+@container (max-width: 540px) {
+  .git-history-toggle {
+    width: max-content;
+    margin-left: auto;
+  }
+  .is-expanded .git-history-toggle {
+    border-radius: 7px;
+  }
+  .git-history-content {
+    max-height: 382px;
+    margin-top: 128px;
+    border-radius: 7px;
+  }
+}

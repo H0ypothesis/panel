@@ -1076,14 +1076,21 @@ button {
   margin-left: 8px;
   line-height: 1.3;
 }
-.react-flow__minimap {
+.react-flow__minimap.canvas-minimap {
+  top: 44px;
+  bottom: auto;
   background: var(--minimap-background);
   border: 1px solid var(--line-strong);
   border-radius: 6px;
   overflow: hidden;
-  width: 140px;
-  height: 95px;
-  bottom: 33px !important;
+  box-shadow: 0 2px 8px var(--shadow-soft);
+}
+.canvas-minimap .react-flow__minimap-svg {
+  display: block;
+  cursor: grab;
+}
+.canvas-minimap .react-flow__minimap-svg:active {
+  cursor: grabbing;
 }
 .empty-canvas-note {
   position: absolute;
@@ -1270,6 +1277,23 @@ button {
   min-width: 0;
   text-overflow: ellipsis;
 }
+.card-model-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.model-context-capacity {
+  flex-shrink: 0;
+  white-space: nowrap;
+  color: var(--text-secondary);
+  font-size: 0.9em;
+  font-variant-numeric: tabular-nums;
+}
+.card-model .model-symbol,
+.card-model .footer-dot,
+.card-thinking {
+  flex-shrink: 0;
+}
 .card-directory {
   display: flex;
   align-items: center;
@@ -1311,20 +1335,56 @@ button {
   color: var(--text-faint);
   margin: 0 1px;
 }
-.node-branch {
-  width: 24px;
-  height: 24px;
-  flex-shrink: 0;
-  margin-left: 8px;
+.card-branch-button {
+  position: absolute;
+  top: 50%;
+  right: 0;
+  transform: translate(50%, -50%);
+  z-index: 4;
+  width: 38px;
+  height: 38px;
+  padding: 0;
   display: grid;
   place-items: center;
-  border-radius: 5px;
-  color: var(--text-secondary);
-  background: var(--surface-subtle);
+  border-radius: 50%;
+  color: var(--branch);
+  background: transparent;
+  cursor: pointer;
 }
-.node-branch:hover {
-  color: var(--text-accent-strong);
-  background: var(--surface-hover);
+.card-branch-circle {
+  display: grid;
+  place-items: center;
+  width: 30px;
+  height: 30px;
+  border: 1.5px solid var(--branch);
+  border-radius: 50%;
+  background: var(--card-background);
+  box-shadow: 0 2px 7px var(--shadow-soft);
+  opacity: 0;
+  transform: scale(0.35);
+  transition:
+    opacity 0.15s ease,
+    transform 0.15s ease;
+}
+.card-branch-button:hover .card-branch-circle,
+.card-branch-button:focus-visible .card-branch-circle {
+  opacity: 1;
+  transform: scale(1);
+}
+.card-branch-button:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 2px;
+}
+@media (hover: none) {
+  .card-branch-circle {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .card-branch-circle {
+    transition: none;
+  }
 }
 .root-card {
   background: var(--root-card-background);
@@ -2330,6 +2390,27 @@ button {
   background: var(--inline-code-background);
   padding: 1px 3px;
   border-radius: 2px;
+}
+.desktop-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 10px;
+}
+.desktop-actions button {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 7px 10px;
+  border: 1px solid var(--line-strong);
+  border-radius: 5px;
+  background: var(--surface);
+  color: var(--text-secondary);
+  font-size: 10px;
+}
+.desktop-actions button:hover:not(:disabled) {
+  background: var(--surface-hover);
 }
 .settings-note {
   font-size: 8px;

@@ -123,7 +123,26 @@ export interface Workspace {
   workingDirectory?: string;
   approvalMode?: ApprovalMode;
   safetyModel?: string;
+  gitHistory?: GitHistoryEntry[];
   nodes: TurnNode[];
+}
+
+export interface GitHistoryEntry {
+  id: string;
+  nodeId: string;
+  nodeRevision: number;
+  nodePrompt: string;
+  toolCallId: string;
+  toolName: string;
+  workingDirectory: string;
+  createdAt: number;
+  summary: string;
+  status: "recording" | "completed" | "failed";
+  files: { path: string; status: "added" | "modified" | "deleted" }[];
+  commit?: string;
+  parentCommit?: string;
+  error?: string;
+  interrupted?: boolean;
 }
 
 export interface AppState {

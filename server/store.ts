@@ -3,7 +3,13 @@ import { randomUUID } from "node:crypto";
 import { mkdir, readFile, realpath, rename, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import type { Message } from "@earendil-works/pi-ai";
-import type { AppState, TurnNode, Workspace } from "../shared/types.ts";
+import type {
+  AppState,
+  GitHistoryEntry,
+  TurnNode,
+  Workspace,
+} from "../shared/types.ts";
+import { GitSnapshots, type GitBaseline } from "./git-snapshots.ts";
 import { exampleWorkspace } from "./seed.ts";
 import {
   prepareTemporaryDirectory,
@@ -20,6 +26,7 @@ export interface StoredRun extends TurnNode {
 }
 export interface StoredWorkspace extends Omit<Workspace, "nodes"> {
   nodes: StoredNode[];
+  pendingGitSnapshots?: { historyId: string; baseline: GitBaseline }[];
 }
 interface Database {
   version: 1;
@@ -33,6 +40,7 @@ export class Store extends EventEmitter {
   storageError?: string;
   private writes: Promise<void> = Promise.resolve();
   private directory: string;
+  private snapshots?: GitSnapshots;
 
   constructor(directory: string) {
     super();
@@ -79,6 +87,23 @@ export class Store extends EventEmitter {
             }
           }
         }
+        for (const pending of workspace.pendingGitSnapshots ?? []) {
+          const entry = workspace.gitHistory?.find(
+            (item) => item.id === pending.historyId,
+          );
+          if (!entry) continue;
+          entry.interrupted = true;
+          await this.finishGitSnapshot(workspace, entry, pending.baseline);
+        }
+        workspace.pendingGitSnapshots = [];
+        for (const entry of workspace.gitHistory ?? []) {
+          if (entry.status === "recording") {
+            entry.status = "failed";
+            entry.error =
+              "服务重启中断了快照保存，缺少可恢复的基线；文件操作未重放。";
+            entry.interrupted = true;
+          }
+        }
       }
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
@@ -92,15 +117,58 @@ export class Store extends EventEmitter {
       instanceId: this.instanceId,
       revision: this.data.revision,
       storageError: this.storageError,
-      workspaces: this.data.workspaces.map((workspace) => ({
-        ...workspace,
-        temporaryDirectory: this.temporaryDirectory(workspace),
-        nodes: workspace.nodes.map(
-          ({ messages: _messages, previousRuns: _previousRuns, ...node }) =>
-            node,
-        ),
-      })),
+      workspaces: this.data.workspaces.map(
+        ({ pendingGitSnapshots: _pending, ...workspace }) => ({
+          ...workspace,
+          temporaryDirectory: this.temporaryDirectory(workspace),
+          nodes: workspace.nodes.map(
+            ({ messages: _messages, previousRuns: _previousRuns, ...node }) =>
+              node,
+          ),
+        }),
+      ),
     };
+  }
+
+  get gitSnapshots(): GitSnapshots {
+    return (this.snapshots ??= new GitSnapshots(this.directory));
+  }
+
+  async finishGitSnapshot(
+    workspace: StoredWorkspace,
+    entry: GitHistoryEntry,
+    baseline?: GitBaseline,
+  ) {
+    try {
+      if (!baseline) {
+        entry.status = "failed";
+        entry.error ??= "未能创建操作前快照，文件更新可能已执行。";
+        return;
+      }
+      const result = await this.gitSnapshots.capture(
+        baseline,
+        `Panel ${entry.toolName}: ${entry.nodeId} (revision ${entry.nodeRevision}, tool ${entry.toolCallId})`,
+      );
+      if (!result) {
+        workspace.gitHistory = workspace.gitHistory?.filter(
+          (item) => item.id !== entry.id,
+        );
+        return;
+      }
+      Object.assign(entry, result, {
+        status: "completed",
+        summary: entry.interrupted
+          ? `服务中断后恢复 · ${result.files.length} 个文件`
+          : `${entry.toolName === "write" ? "写入" : entry.toolName === "edit" ? "编辑" : "命令更新"} · ${result.files.length} 个文件`,
+      });
+    } catch (error) {
+      entry.status = "failed";
+      entry.error = `Git 快照保存失败，文件更新可能已执行：${error instanceof Error ? error.message : "未知错误"}`;
+    } finally {
+      workspace.pendingGitSnapshots = workspace.pendingGitSnapshots?.filter(
+        (item) => item.historyId !== entry.id,
+      );
+    }
   }
 
   workspace(id: string) {

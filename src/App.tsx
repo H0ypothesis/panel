@@ -71,7 +71,11 @@ import {
   WorkbenchControls,
 } from "./WorkspaceControls";
 import { useTheme, type ThemePreference } from "./useTheme";
+import { estimatePathContextTokens } from "../shared/context-usage";
+import { formatContextWindow } from "./model-context";
+import type { CanvasBranchDraft } from "./branch-draft";
 import { BrandHint } from "./BrandHint";
+import { getDesktopBridge, onDesktopAction } from "./desktop";
 import {
   NodeActionsDialog,
   subtreeIds,
@@ -142,6 +146,16 @@ export function App() {
   const [config, setConfig] = useState<RunConfig>({ ...DEFAULT_CONFIG });
   const configSelection = useRef({ nodeId: "", revision: -1, resolved: false });
   const [submitting, setSubmitting] = useState(false);
+  const submissionLock = useRef(false);
+  const [canvasDrafts, setCanvasDrafts] = useState<
+    Record<string, CanvasBranchDraft>
+  >({});
+  const [canvasDraftParents, setCanvasDraftParents] = useState<
+    Record<string, string>
+  >({});
+  const [canvasSubmittingId, setCanvasSubmittingId] = useState<string | null>(
+    null,
+  );
   const [nodeAction, setNodeAction] = useState<NodeActionTarget | null>(null);
   const [sidebar, setSidebar] = useState(window.innerWidth > 1000);
   const [headingCollapsed, setHeadingCollapsed] = useState(
@@ -228,6 +242,40 @@ export function App() {
   const workspace =
     state?.workspaces.find((item) => item.id === workspaceId) ??
     state?.workspaces[0];
+  const currentWorkspaceId = useRef(workspace?.id);
+  currentWorkspaceId.current = workspace?.id;
+  const canvasDraftKey = `${workspace?.id}:${workspace ? canvasDraftParents[workspace.id] : ""}`;
+  const canvasDraft = canvasDrafts[canvasDraftKey] ?? null;
+  const canvasParent = workspace?.nodes.find(
+    (node) => node.id === canvasDraft?.parentId,
+  );
+  const canvasModel = models.find(
+    (item) => item.id === canvasDraft?.config.model,
+  );
+  const canvasDraftBlockedReason = !canvasDraft
+    ? ""
+    : !canvasParent
+      ? "来源节点已删除，请取消草稿后重新选择节点。"
+      : canvasParent.contextStale ||
+          (canvasParent.revision ?? 0) !== canvasDraft.parentRevision
+        ? "来源上下文已更新，请点击来源节点的加号重新确认。"
+        : canvasParent.status !== "root" && canvasParent.status !== "completed"
+          ? "请等待来源节点完成后再生成分支。"
+          : !online
+            ? "连接已断开，恢复连接后可继续生成。"
+            : directoryDirty || directoryBusy
+              ? "请先完成工作目录设置。"
+              : changingApproval
+                ? "正在保存审批设置，请稍候。"
+                : submitting && canvasSubmittingId !== canvasDraft.id
+                  ? "另一条问题正在提交，请稍候。"
+                  : !canvasModel?.available
+                    ? "请选择一个已连接的模型。"
+                    : !canvasModel.thinkingLevels.includes(
+                          canvasDraft.config.thinking,
+                        )
+                      ? "请选择该模型支持的思考深度。"
+                      : "";
   const selected =
     workspace?.nodes.find((node) => node.id === selectedId) ??
     workspace?.nodes[0];
@@ -357,6 +405,21 @@ export function App() {
     document.addEventListener("keydown", handle);
     return () => document.removeEventListener("keydown", handle);
   }, [modal, closeSidebar, nodeAction]);
+  useEffect(
+    () =>
+      onDesktopAction((action) => {
+        if (!state || modal || nodeAction) return;
+        setExportOpen(false);
+        if (action === "new-workspace") {
+          setSearchOpen(false);
+          setModal("new");
+        } else {
+          setSearchOpen(true);
+          requestAnimationFrame(() => searchRef.current?.focus());
+        }
+      }),
+    [state, modal, nodeAction],
+  );
 
   const select = useCallback((id: string) => {
     setSelectedId(id);
@@ -364,11 +427,158 @@ export function App() {
   }, []);
   const branch = useCallback(
     (id: string) => {
+      if (!workspace || submissionLock.current) return;
+      const source = workspace.nodes.find((node) => node.id === id);
+      if (
+        !source ||
+        source.contextStale ||
+        (source.status !== "root" && source.status !== "completed")
+      )
+        return;
+      const key = `${workspace.id}:${id}`;
+      const initial =
+        id === selected?.id
+          ? config
+          : source.status === "root"
+            ? {
+                model: defaultModelId ?? DEFAULT_CONFIG.model,
+                thinking: defaultThinking ?? DEFAULT_CONFIG.thinking,
+              }
+            : source.config;
+      const initialModel = models.find((item) => item.id === initial.model);
+      const siblings = workspace.nodes.filter((node) => node.parentId === id);
+      const colors = ["sage", "violet", "blue", "amber"] as const;
+      setCanvasDrafts((current) => {
+        const existing = current[key];
+        return {
+          ...current,
+          [key]: {
+            id: existing?.id ?? `draft-${crypto.randomUUID()}`,
+            workspaceId: workspace.id,
+            parentId: id,
+            parentRevision: source.revision ?? 0,
+            parentTitle: source.prompt,
+            parentPosition: { ...source.position },
+            color:
+              source.status === "root"
+                ? colors[siblings.length % colors.length]
+                : source.color,
+            text: existing?.text ?? "",
+            config: existing?.config ?? {
+              ...initial,
+              thinking: initialModel?.thinkingLevels.includes(initial.thinking)
+                ? initial.thinking
+                : (initialModel?.thinkingLevels[0] ?? initial.thinking),
+            },
+            requestId:
+              existing && existing.parentRevision === (source.revision ?? 0)
+                ? existing.requestId
+                : crypto.randomUUID(),
+            error: "",
+            focusVersion: (existing?.focusVersion ?? 0) + 1,
+          },
+        };
+      });
+      setCanvasDraftParents((current) => ({ ...current, [workspace.id]: id }));
       select(id);
-      requestAnimationFrame(() => inputRef.current?.focus());
     },
-    [select],
+    [
+      workspace,
+      selected?.id,
+      config,
+      defaultModelId,
+      defaultThinking,
+      models,
+      select,
+    ],
   );
+  const changeCanvasDraft = (
+    change: Partial<Pick<CanvasBranchDraft, "text" | "config">>,
+  ) => {
+    if (!canvasDraft || canvasSubmittingId === canvasDraft.id) return;
+    setCanvasDrafts((current) => ({
+      ...current,
+      [canvasDraftKey]: {
+        ...current[canvasDraftKey],
+        ...change,
+        requestId: crypto.randomUUID(),
+        error: "",
+      },
+    }));
+  };
+  const cancelCanvasDraft = () => {
+    if (!canvasDraft || canvasSubmittingId === canvasDraft.id) return;
+    setCanvasDrafts((current) => {
+      const next = { ...current };
+      delete next[canvasDraftKey];
+      return next;
+    });
+    if (canvasParent) {
+      select(canvasParent.id);
+      setFocus((current) => ({
+        id: canvasParent.id,
+        version: current.version + 1,
+      }));
+    }
+  };
+  const sendCanvasDraft = async () => {
+    if (
+      !canvasDraft ||
+      !canvasDraft.text.trim() ||
+      canvasDraftBlockedReason ||
+      submissionLock.current
+    )
+      return;
+    const submitted = canvasDraft;
+    const key = canvasDraftKey;
+    submissionLock.current = true;
+    setSubmitting(true);
+    setCanvasSubmittingId(submitted.id);
+    try {
+      const result = await api<MutationResult>(
+        `/workspaces/${submitted.workspaceId}/nodes`,
+        {
+          parentId: submitted.parentId,
+          prompt: submitted.text,
+          config: submitted.config,
+          requestId: submitted.requestId,
+        },
+      );
+      apply(result.state);
+      setCanvasDrafts((current) => {
+        if (current[key]?.requestId !== submitted.requestId) return current;
+        const next = { ...current };
+        delete next[key];
+        return next;
+      });
+      if (currentWorkspaceId.current === submitted.workspaceId) {
+        select(result.nodeId!);
+        setFocus((current) => ({
+          id: result.nodeId!,
+          version: current.version + 1,
+        }));
+      }
+    } catch (reason) {
+      setCanvasDrafts((current) =>
+        current[key]?.requestId === submitted.requestId
+          ? {
+              ...current,
+              [key]: {
+                ...current[key],
+                error:
+                  reason instanceof Error
+                    ? reason.message
+                    : "生成失败，请重试。",
+              },
+            }
+          : current,
+      );
+    } finally {
+      submissionLock.current = false;
+      setSubmitting(false);
+      setCanvasSubmittingId(null);
+    }
+  };
   const locate = (id: string) => {
     select(id);
     setFocus((current) => ({ id, version: current.version + 1 }));
@@ -413,6 +623,9 @@ export function App() {
       !draft.trim() ||
       !canBranch ||
       submitting ||
+      submissionLock.current ||
+      !online ||
+      !model?.available ||
       directoryDirty ||
       directoryBusy ||
       changingApproval
@@ -421,6 +634,7 @@ export function App() {
     const key = draftKey;
     const submittedText = draft;
     const requestId = drafts[key]?.requestId ?? crypto.randomUUID();
+    submissionLock.current = true;
     setSubmitting(true);
     try {
       const result = await api<MutationResult>(
@@ -433,14 +647,17 @@ export function App() {
           ? { ...current, [key]: { text: "", requestId: crypto.randomUUID() } }
           : current,
       );
-      select(result.nodeId!);
-      setFocus((current) => ({
-        id: result.nodeId!,
-        version: current.version + 1,
-      }));
+      if (currentWorkspaceId.current === workspace.id) {
+        select(result.nodeId!);
+        setFocus((current) => ({
+          id: result.nodeId!,
+          version: current.version + 1,
+        }));
+      }
     } catch (reason) {
       fail(reason);
     } finally {
+      submissionLock.current = false;
       setSubmitting(false);
     }
   };
@@ -599,12 +816,7 @@ export function App() {
     (node) => node.id === selected.id,
   );
   const contextNodes = canBranch ? path : path.slice(0, -1);
-  const contextEstimate = Math.ceil(
-    contextNodes.reduce(
-      (sum, node) => sum + node.prompt.length + node.response.length,
-      0,
-    ) * 1.2,
-  );
+  const contextEstimate = estimatePathContextTokens(contextNodes);
 
   return (
     <div className={`workbench ${sidebar ? "" : "sidebar-hidden"}`}>
@@ -927,9 +1139,18 @@ export function App() {
               workspace={workspace}
               selectedId={selected.id}
               models={models}
+              rootModelId={config.model}
               colorMode={colorMode}
               onSelect={select}
               onBranch={branch}
+              branchDisabled={submitting}
+              draft={canvasDraft}
+              draftBusy={canvasSubmittingId === canvasDraft?.id}
+              draftBlockedReason={canvasDraftBlockedReason}
+              onDraftTextChange={(text) => changeCanvasDraft({ text })}
+              onDraftConfigChange={(config) => changeCanvasDraft({ config })}
+              onDraftSubmit={() => void sendCanvasDraft()}
+              onDraftCancel={cancelCanvasDraft}
               onEdit={(id) => openNodeAction("edit", id)}
               onDelete={(id) => openNodeAction("delete", id)}
               nodeActionsDisabled={
@@ -954,11 +1175,11 @@ export function App() {
               focusId={focus.id}
               focusVersion={focus.version}
             />
-            {workspace.nodes.length === 1 && (
+            {workspace.nodes.length === 1 && !canvasDraft && (
               <div className="empty-canvas-note">
                 <GitBranch size={18} />
                 <b>每一个好问题，都可以是新的起点。</b>
-                <span>在右侧写下第一个问题，开始你的探索。</span>
+                <span>点击起点右侧的加号，写下第一个问题。</span>
               </div>
             )}
             <div className="canvas-footer">
@@ -1088,6 +1309,17 @@ export function App() {
                         {selectedModel?.name ??
                           selected.config.model.split("/").at(-1)}
                       </b>
+                      <span
+                        className="model-context-capacity"
+                        title={
+                          selectedModel?.contextWindow &&
+                          selectedModel.contextWindow > 0
+                            ? `上下文容量：${selectedModel.contextWindow.toLocaleString("zh-CN")} tokens`
+                            : "上下文容量未知"
+                        }
+                      >
+                        {formatContextWindow(selectedModel?.contextWindow)}
+                      </span>
                       {selected.config.model.startsWith("demo/") && (
                         <span className="demo-badge">演示</span>
                       )}
@@ -1611,6 +1843,7 @@ function Settings({
   models: ModelOption[];
   webCapabilities: WebCapabilities | null;
 }) {
+  const desktop = getDesktopBridge();
   const providers = [
     ...new Set(
       models.filter((model) => !model.demo).map((model) => model.provider),
@@ -1671,12 +1904,20 @@ function Settings({
       })}
       <div className="setup-guide">
         <b>在本机配置</b>
-        <p>
-          将项目中的 <code>.env.example</code> 复制为 <code>.env</code>
-          ，填入供应商 API Key，然后重启 <code>npm run dev</code>
-          。已配置的模型可在输入框下方选择。
-        </p>
+        {desktop ? (
+          <p>
+            打开模型配置，在 <code>.env</code> 中填入供应商 API Key。 保存后，从
+            macOS 的 Panel 菜单重启本地服务。 已配置的模型可在输入框下方选择。
+          </p>
+        ) : (
+          <p>
+            将项目中的 <code>.env.example</code> 复制为 <code>.env</code>
+            ，填入供应商 API Key，然后重启 <code>npm run dev</code>
+            。已配置的模型可在输入框下方选择。
+          </p>
+        )}
         <p>密钥只由本地服务读取，不会保存到浏览器或随探索导出。</p>
+        {desktop && <DesktopSettingsActions />}
       </div>
       <section className="web-settings" aria-label="联网工具连接状态">
         <h3>联网工具</h3>
@@ -1744,9 +1985,15 @@ function Settings({
         <div className="setup-guide">
           <b>搜索默认可用</b>
           <p>
-            默认通过 Exa MCP 搜索，无需搜索密钥。如需使用 Exa API，可在项目
-            <code>.env</code> 中设置 <code>EXA_API_KEY</code>，然后重启
-            <code>npm run dev</code>。
+            默认通过 Exa MCP 搜索，无需搜索密钥。如需使用 Exa API，可在
+            <code>.env</code> 中设置 <code>EXA_API_KEY</code>，然后
+            {desktop ? (
+              "从 macOS 的 Panel 菜单重启本地服务。"
+            ) : (
+              <>
+                重启 <code>npm run dev</code>。
+              </>
+            )}
           </p>
           <p>
             联网请求沿用顶部审批模式。请求批准时逐次确认；自动审批时先由所选安全模型审核。
@@ -1759,6 +2006,71 @@ function Settings({
         <span className="tiny-green-dot" /> 当前工作台运行在本机 · 同时支持 3
         个运行任务
       </div>
+    </>
+  );
+}
+
+function DesktopSettingsActions() {
+  const [busy, setBusy] = useState<"settings" | "data" | null>(null);
+  const [error, setError] = useState("");
+  const mounted = useRef(false);
+  const pending = useRef(false);
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+    };
+  }, []);
+  const open = async (target: "settings" | "data") => {
+    const desktop = getDesktopBridge();
+    if (!desktop || pending.current) return;
+    pending.current = true;
+    setBusy(target);
+    setError("");
+    try {
+      if (target === "settings") await desktop.openSettings();
+      else await desktop.openDataDirectory();
+    } catch (reason) {
+      if (mounted.current)
+        setError(reason instanceof Error ? reason.message : "无法打开本地文件");
+    } finally {
+      pending.current = false;
+      if (mounted.current) setBusy(null);
+    }
+  };
+  return (
+    <>
+      <div className="desktop-actions">
+        <button
+          type="button"
+          disabled={busy !== null}
+          onClick={() => void open("settings")}
+        >
+          {busy === "settings" ? (
+            <LoaderCircle size={13} className="spin" />
+          ) : (
+            <Settings2 size={13} />
+          )}
+          打开模型配置
+        </button>
+        <button
+          type="button"
+          disabled={busy !== null}
+          onClick={() => void open("data")}
+        >
+          {busy === "data" ? (
+            <LoaderCircle size={13} className="spin" />
+          ) : (
+            <FileText size={13} />
+          )}
+          打开应用数据文件夹
+        </button>
+      </div>
+      {error && (
+        <p className="inline-error" role="alert">
+          {error}
+        </p>
+      )}
     </>
   );
 }

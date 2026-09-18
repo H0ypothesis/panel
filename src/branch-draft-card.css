@@ -1,0 +1,153 @@
+.graph-container.has-branch-draft .canvas-minimap,
+.graph-container.has-branch-draft .canvas-git-history {
+  display: none;
+}
+
+.branch-draft-card {
+  --draft-accent: var(--branch-green);
+  box-sizing: border-box;
+  position: relative;
+  display: grid;
+  grid-template-rows: 22px 16px minmax(0, 1fr) 30px 32px 30px;
+  gap: 8px;
+  width: 320px;
+  height: 300px;
+  padding: 14px;
+  border: 1px dashed var(--draft-accent);
+  border-radius: 10px;
+  background: var(--card-background);
+  box-shadow: 0 3px 12px var(--shadow-card);
+  color: var(--text-heading);
+  cursor: default;
+}
+.branch-draft-card.color-violet {
+  --draft-accent: var(--branch-purple);
+}
+.branch-draft-card.color-blue {
+  --draft-accent: var(--branch-blue);
+}
+.branch-draft-card.color-amber {
+  --draft-accent: var(--branch-orange);
+}
+.branch-draft-card:focus-within {
+  box-shadow:
+    0 0 0 3px color-mix(in srgb, var(--draft-accent) 13%, transparent),
+    0 3px 12px var(--shadow-card);
+}
+.branch-draft-topline,
+.branch-draft-topline > strong,
+.branch-draft-footer,
+.branch-draft-submit {
+  display: flex;
+  align-items: center;
+}
+.branch-draft-topline,
+.branch-draft-footer {
+  justify-content: space-between;
+  min-width: 0;
+}
+.branch-draft-topline > strong {
+  gap: 6px;
+  color: var(--draft-accent);
+  font-size: 11px;
+  font-weight: 600;
+}
+.branch-draft-cancel {
+  display: grid;
+  place-items: center;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border-radius: 5px;
+  color: var(--text-muted);
+}
+.branch-draft-cancel:hover:not(:disabled) {
+  color: var(--text-heading);
+  background: var(--surface-hover);
+}
+.branch-draft-parent {
+  min-width: 0;
+  margin: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  font-size: 10px;
+  line-height: 16px;
+  color: var(--text-muted);
+}
+.branch-draft-input {
+  display: block;
+  min-width: 0;
+  min-height: 0;
+  width: 100%;
+  height: 100%;
+  resize: none;
+  border: 1px solid var(--line-strong);
+  border-radius: 7px;
+  padding: 9px 10px;
+  background: var(--composer-background);
+  color: var(--text-control);
+  font-size: 12px;
+  line-height: 1.7;
+  overscroll-behavior: contain;
+}
+.branch-draft-input::placeholder {
+  color: var(--text-placeholder);
+}
+.branch-draft-input:focus {
+  border-color: var(--focus-ring);
+  box-shadow: 0 0 0 2px var(--focus-halo);
+  outline: none;
+}
+.branch-draft-input:disabled {
+  opacity: 0.6;
+}
+.branch-draft-card .model-controls {
+  min-width: 0;
+  margin: 0;
+}
+.branch-draft-feedback {
+  min-width: 0;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-wrap: anywhere;
+  font-size: 10px;
+  line-height: 16px;
+  color: var(--error);
+  overscroll-behavior: contain;
+}
+.branch-draft-feedback.has-message {
+  padding: 0 3px;
+}
+.branch-draft-footer > span {
+  color: var(--text-muted);
+  font-size: 9px;
+  white-space: nowrap;
+}
+.branch-draft-submit {
+  justify-content: center;
+  gap: 5px;
+  height: 30px;
+  padding: 0 10px;
+  border-radius: 6px;
+  background: var(--primary-background);
+  color: var(--primary-foreground);
+  font-size: 11px;
+  white-space: nowrap;
+}
+.branch-draft-submit:hover:not(:disabled) {
+  background: var(--primary-hover);
+}
+.branch-draft-submit:disabled {
+  opacity: 1;
+  background: var(--surface-disabled);
+  color: var(--text-disabled);
+}
+.branch-draft-card .react-flow__handle {
+  width: 7px;
+  height: 7px;
+  min-width: 7px;
+  min-height: 7px;
+  background: var(--surface);
+  border: 1.5px solid var(--draft-accent);
+}

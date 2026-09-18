@@ -1,5 +1,11 @@
 import { randomUUID } from "node:crypto";
-import type { ApprovalMode, RunConfig, ToolCall } from "../shared/types.ts";
+import type {
+  ApprovalMode,
+  GitHistoryEntry,
+  RunConfig,
+  ToolCall,
+} from "../shared/types.ts";
+import type { GitBaseline } from "./git-snapshots.ts";
 import { buildContext, estimateTokens } from "./context.ts";
 import { safeError, type Runtime } from "./runtime.ts";
 import type { StoredNode, StoredRun, StoredWorkspace } from "./store.ts";
@@ -579,6 +585,8 @@ export class Scheduler {
   ): Promise<T> {
     const call = node.toolCalls?.find((item) => item.id === input.id);
     let consumedHere = false;
+    let historyEntry: GitHistoryEntry | undefined;
+    let baseline: GitBaseline | undefined;
     try {
       while (this.settingsChanges.has(workspace.id))
         await this.settingsChanges.get(workspace.id);
@@ -605,6 +613,40 @@ export class Scheduler {
       // Consumption is synchronous and final. Failed persistence or interrupted
       // dispatch cannot restore/replay this grant, including after a restart.
       await this.store.save();
+      if (
+        node.execution?.workingDirectory &&
+        ["write", "edit", "bash"].includes(input.name)
+      ) {
+        historyEntry = {
+          id: randomUUID(),
+          nodeId: node.id,
+          nodeRevision: node.revision ?? 0,
+          nodePrompt: node.prompt,
+          toolCallId: input.id,
+          toolName: input.name,
+          workingDirectory: node.execution.workingDirectory,
+          createdAt: Date.now(),
+          summary: "正在记录文件更新",
+          status: "recording",
+          files: [],
+        };
+        try {
+          baseline = await this.store.gitSnapshots.prepare(
+            workspace.id,
+            node.execution.workingDirectory,
+          );
+        } catch (error) {
+          historyEntry.error = `操作前 Git 快照失败：${safeError(error)}`;
+        }
+        (workspace.gitHistory ??= []).push(historyEntry);
+        if (baseline)
+          (workspace.pendingGitSnapshots ??= []).push({
+            historyId: historyEntry.id,
+            baseline,
+          });
+        this.store.touch(workspace);
+        await this.store.save();
+      }
       while (this.settingsChanges.has(workspace.id))
         await this.settingsChanges.get(workspace.id);
       signal.throwIfAborted();
@@ -622,8 +664,29 @@ export class Scheduler {
           "执行前审批设置已改变、授权过期或保存失败，未执行工具。",
         );
       // No await between the final check and dispatch into the Pi tool adapter.
-      return execute();
+      if (!historyEntry) return execute();
+      const entry = historyEntry;
+      return (async () => {
+        try {
+          return await execute();
+        } finally {
+          // Snapshot even when a command failed or was cancelled after writing.
+          // Do not let a snapshot failure replace the original tool outcome.
+          await this.store.finishGitSnapshot(workspace, entry, baseline);
+          this.store.touch(workspace);
+          await this.store.save().catch(() => {});
+        }
+      })();
     } catch (error) {
+      if (historyEntry) {
+        const historyId = historyEntry.id;
+        workspace.gitHistory = workspace.gitHistory?.filter(
+          (entry) => entry.id !== historyId,
+        );
+        workspace.pendingGitSnapshots = workspace.pendingGitSnapshots?.filter(
+          (entry) => entry.historyId !== historyId,
+        );
+      }
       // A duplicate dispatch must not overwrite the audit/status of the first
       // dispatch that already owns the consumed grant.
       if (

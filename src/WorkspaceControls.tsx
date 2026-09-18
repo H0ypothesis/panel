@@ -17,6 +17,14 @@ import {
   type Workspace,
 } from "../shared/types";
 import { ApprovalModeSwitch, DirectoryField } from "./CodingControls";
+import { formatContextWindow } from "./model-context";
+
+function modelContextTitle(model: ModelOption | undefined): string {
+  const capacity = model?.contextWindow;
+  if (capacity == null || !Number.isFinite(capacity) || capacity <= 0)
+    return "上下文容量未知";
+  return `上下文容量：${capacity.toLocaleString("zh-CN", { maximumFractionDigits: 20 })} tokens`;
+}
 
 function DirectoryDialog({
   children,
@@ -250,8 +258,13 @@ const modelOptions = (items: ModelOption[]) =>
       {items
         .filter((model) => model.provider === provider)
         .map((model) => (
-          <option key={model.id} value={model.id} disabled={!model.available}>
-            {model.name}
+          <option
+            key={model.id}
+            value={model.id}
+            disabled={!model.available}
+            title={modelContextTitle(model)}
+          >
+            {model.name} · {formatContextWindow(model.contextWindow)}
             {model.demo ? " · 演示" : !model.available ? " · 未连接" : ""}
           </option>
         ))}
@@ -276,10 +289,14 @@ export function ComposerModelControls({
       role="group"
       aria-label="本轮模型与思考设置"
     >
-      <label className="model-select" title="执行模型">
+      <label
+        className="model-select"
+        title={`执行模型：${selectedModel?.name ?? config.model} · ${modelContextTitle(selectedModel)}`}
+      >
         <span className="pi-small">π</span>
         <select
           aria-label="选择模型"
+          title={`${selectedModel?.name ?? config.model} · ${modelContextTitle(selectedModel)}`}
           value={config.model}
           disabled={disabled}
           onChange={(event) => {
@@ -299,7 +316,7 @@ export function ComposerModelControls({
         >
           {!selectedModel && (
             <option value={config.model} disabled>
-              {config.model} · 不可用
+              {config.model} · 未知 · 不可用
             </option>
           )}
           {modelOptions(models)}
@@ -351,6 +368,9 @@ export function WorkbenchControls({
   safetyModelRequired?: boolean;
 }) {
   const safetyOptions = models.filter((model) => !model.demo);
+  const selectedSafetyModel = safetyOptions.find(
+    (model) => model.id === safetyModel,
+  );
   const safetyRef = useRef<HTMLSelectElement>(null);
   useEffect(() => {
     if (safetyModelRequired) safetyRef.current?.focus();
@@ -374,7 +394,7 @@ export function WorkbenchControls({
             aria-describedby={
               safetyModelRequired ? "safety-model-required-hint" : undefined
             }
-            title="独立审核每次工具调用，通过后才执行；审核产生额外模型用量。"
+            title={`${selectedSafetyModel?.name ?? "安全模型"} · ${modelContextTitle(selectedSafetyModel)}。独立审核每次工具调用，通过后才执行；审核产生额外模型用量。`}
             value={safetyModel}
             disabled={disabled || approvalBusy}
             onChange={(event) => onSafetyModelChange(event.target.value)}
@@ -385,7 +405,7 @@ export function WorkbenchControls({
             {safetyModel &&
               !safetyOptions.some((model) => model.id === safetyModel) && (
                 <option value={safetyModel} disabled>
-                  {safetyModel} · 不可用
+                  {safetyModel} · 未知 · 不可用
                 </option>
               )}
             {modelOptions(safetyOptions)}

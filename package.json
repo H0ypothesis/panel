@@ -10,7 +10,10 @@
     "test:core": "tsx --test server/*.test.ts",
     "build": "vite build",
     "format": "prettier --write src server shared vite.config.ts tsconfig*.json package.json docs/PRD.md README.md",
-    "start": "NODE_ENV=production tsx server/index.ts"
+    "start": "NODE_ENV=production tsx server/index.ts",
+    "desktop:bundle": "node scripts/bundle-desktop.mjs",
+    "build:mac": "npm run build && npm run desktop:bundle && node scripts/build-mac.mjs",
+    "test:desktop": "node scripts/test-desktop.mjs"
   },
   "dependencies": {
     "@earendil-works/chord": "file:./pi/packages/chord",
@@ -33,6 +36,7 @@
     "prettier": "3.6.2",
     "tsx": "4.22.1",
     "typescript": "5.9.3",
-    "vite": "7.3.6"
+    "vite": "7.3.6",
+    "esbuild": "0.28.2"
   }
 }

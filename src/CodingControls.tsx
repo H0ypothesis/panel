@@ -18,6 +18,7 @@ import {
 } from "lucide-react";
 import type { ApprovalMode, ToolCall } from "../shared/types";
 import { api } from "./api";
+import { getDesktopBridge } from "./desktop";
 
 export function ApprovalModeSwitch({
   mode,
@@ -82,6 +83,13 @@ export function DirectoryField({
   const [listing, setListing] = useState<DirectoryListing | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  const [nativeBusy, setNativeBusy] = useState(false);
+  const [nativeError, setNativeError] = useState("");
+  const desktop = getDesktopBridge();
+  const nativeRequest = useRef(0);
+  const nativePending = useRef(false);
+  const selectionAllowed = useRef(!disabled);
+  selectionAllowed.current = !disabled;
   const request = useRef(0);
   const initialValue = useRef(value);
   const browse = useCallback(async (path?: string) => {
@@ -102,8 +110,44 @@ export function DirectoryField({
     }
   }, []);
   useEffect(() => {
-    if (autoBrowse) void browse(initialValue.current.trim() || undefined);
-  }, [autoBrowse, browse]);
+    if (autoBrowse && !desktop)
+      void browse(initialValue.current.trim() || undefined);
+  }, [autoBrowse, browse, desktop]);
+  useEffect(
+    () => () => {
+      request.current += 1;
+      nativeRequest.current += 1;
+    },
+    [],
+  );
+  const chooseNativeDirectory = async () => {
+    if (!desktop || disabled || nativePending.current) return;
+    const current = ++nativeRequest.current;
+    nativePending.current = true;
+    setNativeBusy(true);
+    setNativeError("");
+    try {
+      const path = await desktop.chooseDirectory();
+      if (current !== nativeRequest.current || !selectionAllowed.current)
+        return;
+      if (path !== null) {
+        onChange(path);
+        setOpen(false);
+      }
+    } catch (reason) {
+      if (current === nativeRequest.current)
+        setNativeError(
+          reason instanceof Error
+            ? reason.message
+            : "无法打开 Mac 文件夹选择器",
+        );
+    } finally {
+      if (current === nativeRequest.current) {
+        nativePending.current = false;
+        setNativeBusy(false);
+      }
+    }
+  };
 
   return (
     <div className="directory-field">
@@ -115,7 +159,7 @@ export function DirectoryField({
         <input
           id={id}
           value={value}
-          disabled={disabled}
+          disabled={disabled || nativeBusy}
           placeholder="输入本机文件夹的绝对路径"
           onChange={(event) => onChange(event.target.value)}
           autoComplete="off"
@@ -128,7 +172,7 @@ export function DirectoryField({
             className="icon-button"
             aria-label="清除自选目录，恢复临时目录"
             title="清除自选目录，确认后恢复临时目录"
-            disabled={disabled}
+            disabled={disabled || nativeBusy}
             onClick={() => onChange("")}
           >
             <X size={13} />
@@ -137,7 +181,7 @@ export function DirectoryField({
         <button
           type="button"
           className="directory-browse-button"
-          disabled={disabled}
+          disabled={disabled || nativeBusy}
           onClick={() => {
             if (open) setOpen(false);
             else void browse(value.trim() || undefined);
@@ -149,6 +193,27 @@ export function DirectoryField({
           <ChevronDown size={12} />
         </button>
       </div>
+      {desktop && (
+        <div className="desktop-actions">
+          <button
+            type="button"
+            disabled={disabled || nativeBusy}
+            onClick={() => void chooseNativeDirectory()}
+          >
+            {nativeBusy ? (
+              <LoaderCircle size={13} className="spin" />
+            ) : (
+              <FolderOpen size={13} />
+            )}
+            {nativeBusy ? "正在选择文件夹…" : "从 Mac 选择文件夹"}
+          </button>
+        </div>
+      )}
+      {nativeError && (
+        <p className="inline-error" role="alert">
+          {nativeError}
+        </p>
+      )}
       {open && !disabled && (
         <div
           id={`${id}-browser`}

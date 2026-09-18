@@ -70,7 +70,10 @@ const runInWorker: PiWebRunner = async (job, signal) => {
     );
     signal?.throwIfAborted();
     return await new Promise<PiWebResult>((resolve, reject) => {
-      const child = fork(new URL("./pi-web-worker.ts", import.meta.url), [], {
+      const worker = import.meta.url.endsWith(".mjs")
+        ? "./pi-web-worker.mjs"
+        : "./pi-web-worker.ts";
+      const child = fork(new URL(worker, import.meta.url), [], {
         cwd: directory,
         env: piWebEnvironment(directory, job),
         execArgv: ["--import", import.meta.resolve("tsx")],

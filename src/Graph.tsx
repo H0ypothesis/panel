@@ -12,6 +12,7 @@ import {
   type Node,
   type NodeProps,
   type NodeChange,
+  type Edge,
 } from "@xyflow/react";
 import {
   ArrowUpRight,
@@ -39,8 +40,18 @@ import {
   type TurnNode,
   type Workspace,
   type ModelOption,
+  type RunConfig,
 } from "../shared/types";
 import { readPreference, savePreference } from "./api";
+import {
+  buildContextUsageMap,
+  type ContextUsage,
+} from "../shared/context-usage";
+import { ContextUsageRing } from "./ContextUsageRing";
+import { formatContextWindow } from "./model-context";
+import { GitHistoryPanel } from "./GitHistoryPanel";
+import { BranchDraftCard, type BranchDraftNode } from "./BranchDraftCard";
+import { branchDraftPosition, type CanvasBranchDraft } from "./branch-draft";
 
 type CardData = {
   turn: TurnNode;
@@ -48,16 +59,19 @@ type CardData = {
   active: boolean;
   inPath: boolean;
   modelName: string;
+  contextUsage: ContextUsage;
   workingDirectory?: string;
   temporaryDirectory?: string;
   chooseDirectory: () => void;
   directoryDisabled: boolean;
   branch: (id: string) => void;
+  branchDisabled: boolean;
   edit: (id: string) => void;
   delete: (id: string) => void;
   actionsDisabled: boolean;
 };
-type GraphNode = Node<CardData, "turn">;
+type TurnGraphNode = Node<CardData, "turn">;
+type GraphNode = TurnGraphNode | BranchDraftNode;
 const colors = {
   sage: "var(--branch-green)",
   violet: "var(--branch-purple)",
@@ -82,7 +96,7 @@ function plainText(markdown: string) {
     .trim();
 }
 
-const TurnCard = memo(function TurnCard({ data }: NodeProps<GraphNode>) {
+const TurnCard = memo(function TurnCard({ data }: NodeProps<TurnGraphNode>) {
   const { turn, index, active, inPath, modelName, branch } = data;
   const root = turn.status === "root";
   const pendingApproval = turn.toolCalls?.some(
@@ -218,38 +232,77 @@ const TurnCard = memo(function TurnCard({ data }: NodeProps<GraphNode>) {
         ) : (
           <span className="card-model">
             <span className="model-symbol">π</span>
-            {modelName}
+            <span className="card-model-name" title={modelName}>
+              {modelName}
+            </span>
+            <span
+              className="model-context-capacity"
+              title={
+                data.contextUsage.limit === null
+                  ? "上下文容量未知"
+                  : `上下文容量：${data.contextUsage.limit.toLocaleString("zh-CN")} tokens`
+              }
+            >
+              {formatContextWindow(data.contextUsage.limit)}
+            </span>
             <span className="footer-dot">·</span>
-            {thinkingLabels[turn.config.thinking]}
+            <span className="card-thinking">
+              {thinkingLabels[turn.config.thinking]}
+            </span>
           </span>
         )}
-        {(root || (turn.status === "completed" && !turn.contextStale)) && (
-          <button
-            className="node-branch nodrag"
-            onClick={(event) => {
-              event.stopPropagation();
-              branch(turn.id);
-            }}
-            title="从这里创建分支"
-            aria-label={`从「${turn.prompt}」创建分支`}
-          >
-            <Plus size={15} />
-          </button>
-        )}
+        <div className="card-footer-actions">
+          <ContextUsageRing
+            usage={data.contextUsage}
+            modelName={root ? `${modelName}（当前输入框模型）` : modelName}
+          />
+        </div>
       </div>
       <Handle type="source" position={Position.Right} />
+      {(root || (turn.status === "completed" && !turn.contextStale)) && (
+        <button
+          type="button"
+          className="card-branch-button nodrag nopan"
+          disabled={data.branchDisabled}
+          onPointerDown={(event) => event.stopPropagation()}
+          onKeyDown={(event) => event.stopPropagation()}
+          onClick={(event) => {
+            event.stopPropagation();
+            branch(turn.id);
+          }}
+          title={
+            data.branchDisabled
+              ? "问题正在提交，请稍候"
+              : "沿当前分支增加新问题"
+          }
+          aria-label={`从「${turn.prompt}」创建分支`}
+        >
+          <span className="card-branch-circle">
+            <Plus size={17} />
+          </span>
+        </button>
+      )}
     </div>
   );
 });
-const nodeTypes = { turn: TurnCard };
+const nodeTypes = { turn: TurnCard, branchDraft: BranchDraftCard };
 
 interface Props {
   colorMode: "light" | "dark";
   workspace: Workspace;
   selectedId: string;
   models: ModelOption[];
+  rootModelId: string;
   onSelect: (id: string) => void;
   onBranch: (id: string) => void;
+  branchDisabled: boolean;
+  draft: CanvasBranchDraft | null;
+  draftBusy: boolean;
+  draftBlockedReason: string;
+  onDraftTextChange: (text: string) => void;
+  onDraftConfigChange: (config: RunConfig) => void;
+  onDraftSubmit: () => void;
+  onDraftCancel: () => void;
   onEdit: (id: string) => void;
   onDelete: (id: string) => void;
   nodeActionsDisabled: boolean;
@@ -265,8 +318,17 @@ export function Graph({
   workspace,
   selectedId,
   models,
+  rootModelId,
   onSelect,
   onBranch,
+  branchDisabled,
+  draft,
+  draftBusy,
+  draftBlockedReason,
+  onDraftTextChange,
+  onDraftConfigChange,
+  onDraftSubmit,
+  onDraftCancel,
   onEdit,
   onDelete,
   nodeActionsDisabled,
@@ -278,7 +340,24 @@ export function Graph({
 }: Props) {
   const flow = useReactFlow<GraphNode>();
   const [zoom, setZoom] = useState(1);
-  const [showMap, setShowMap] = useState(false);
+  const [showMap, setShowMap] = useState(true);
+  const draftParent = workspace.nodes.find(
+    (node) => node.id === draft?.parentId,
+  );
+  const draftPosition = useMemo(
+    () =>
+      draft
+        ? branchDraftPosition(
+            workspace.nodes,
+            draftParent?.position ?? draft.parentPosition,
+          )
+        : null,
+    [workspace.nodes, draft?.id, draftParent?.position],
+  );
+  const contextUsage = useMemo(
+    () => buildContextUsageMap(workspace.nodes, models, rootModelId),
+    [workspace.nodes, models, rootModelId],
+  );
   const path = useMemo(
     () =>
       new Set(ancestorPath(workspace.nodes, selectedId).map((node) => node.id)),
@@ -298,37 +377,78 @@ export function Graph({
     return blocked;
   }, [workspace.nodes]);
   const derivedNodes = useMemo<GraphNode[]>(
-    () =>
-      workspace.nodes.map((turn, index) => ({
-        id: turn.id,
-        type: "turn",
-        position: turn.position,
-        selected: turn.id === selectedId,
-        data: {
-          turn,
-          index,
-          active: turn.id === selectedId,
-          inPath: path.has(turn.id),
-          branch: onBranch,
-          edit: onEdit,
-          delete: onDelete,
-          actionsDisabled:
-            nodeActionsDisabled || blockedNodeActions.has(turn.id),
-          chooseDirectory: onChooseDirectory,
-          directoryDisabled:
-            directoryDisabled ||
-            workspace.nodes.some(
-              (node) => node.status === "running" || node.status === "queued",
-            ),
-          workingDirectory:
-            turn.status === "root" ? workspace.workingDirectory : undefined,
-          temporaryDirectory:
-            turn.status === "root" ? workspace.temporaryDirectory : undefined,
-          modelName:
-            models.find((model) => model.id === turn.config.model)?.name ??
-            turn.config.model.split("/").at(-1)!,
-        },
-      })),
+    () => [
+      ...workspace.nodes.map(
+        (turn, index): TurnGraphNode => ({
+          id: turn.id,
+          type: "turn",
+          position: turn.position,
+          selected: turn.id === selectedId,
+          data: {
+            turn,
+            index,
+            active: turn.id === selectedId,
+            inPath: path.has(turn.id),
+            contextUsage: contextUsage.get(turn.id)!,
+            branch: onBranch,
+            branchDisabled,
+            edit: onEdit,
+            delete: onDelete,
+            actionsDisabled:
+              nodeActionsDisabled || blockedNodeActions.has(turn.id),
+            chooseDirectory: onChooseDirectory,
+            directoryDisabled:
+              directoryDisabled ||
+              workspace.nodes.some(
+                (node) => node.status === "running" || node.status === "queued",
+              ),
+            workingDirectory:
+              turn.status === "root" ? workspace.workingDirectory : undefined,
+            temporaryDirectory:
+              turn.status === "root" ? workspace.temporaryDirectory : undefined,
+            modelName:
+              models.find(
+                (model) =>
+                  model.id ===
+                  (turn.status === "root" ? rootModelId : turn.config.model),
+              )?.name ??
+              (turn.status === "root" ? rootModelId : turn.config.model)
+                .split("/")
+                .at(-1)!,
+          },
+        }),
+      ),
+      ...(draft && draftPosition
+        ? [
+            {
+              id: draft.id,
+              type: "branchDraft" as const,
+              position: draftPosition,
+              width: 320,
+              height: 300,
+              draggable: false,
+              selectable: false,
+              focusable: false,
+              zIndex: 10,
+              data: {
+                text: draft.text,
+                config: draft.config,
+                models,
+                parentTitle: draftParent?.prompt ?? draft.parentTitle,
+                color: draft.color,
+                busy: draftBusy,
+                blockedReason: draftBlockedReason,
+                error: draft.error,
+                focusVersion: draft.focusVersion,
+                onTextChange: onDraftTextChange,
+                onConfigChange: onDraftConfigChange,
+                onSubmit: onDraftSubmit,
+                onCancel: onDraftCancel,
+              },
+            },
+          ]
+        : []),
+    ],
     [
       workspace.nodes,
       workspace.workingDirectory,
@@ -336,6 +456,7 @@ export function Graph({
       selectedId,
       path,
       onBranch,
+      branchDisabled,
       onEdit,
       onDelete,
       nodeActionsDisabled,
@@ -343,6 +464,17 @@ export function Graph({
       onChooseDirectory,
       directoryDisabled,
       models,
+      rootModelId,
+      contextUsage,
+      draft,
+      draftPosition,
+      draftParent?.prompt,
+      draftBusy,
+      draftBlockedReason,
+      onDraftTextChange,
+      onDraftConfigChange,
+      onDraftSubmit,
+      onDraftCancel,
     ],
   );
   const [nodes, setNodes] = useState<GraphNode[]>(derivedNodes);
@@ -360,9 +492,9 @@ export function Graph({
       ),
     [derivedNodes],
   );
-  const edges = useMemo(
-    () =>
-      workspace.nodes
+  const edges = useMemo<Edge[]>(
+    () => [
+      ...workspace.nodes
         .filter((node) => node.parentId)
         .map((node) => ({
           id: `${node.parentId}-${node.id}`,
@@ -377,8 +509,40 @@ export function Graph({
             strokeWidth: path.has(node.id) ? 1.8 : 1.4,
           },
         })),
-    [workspace.nodes, path],
+      ...(draft && draftParent
+        ? [
+            {
+              id: `${draft.parentId}-${draft.id}`,
+              source: draft.parentId,
+              target: draft.id,
+              type: "default",
+              style: {
+                stroke: colors[draft.color],
+                strokeWidth: 1.8,
+                strokeDasharray: "5 5",
+              },
+            },
+          ]
+        : []),
+    ],
+    [
+      workspace.nodes,
+      path,
+      draft?.id,
+      draft?.parentId,
+      draft?.color,
+      draftParent?.id,
+    ],
   );
+  useEffect(() => {
+    if (!draft || !draftPosition) return;
+    void flow.setCenter(draftPosition.x + 160, draftPosition.y + 150, {
+      zoom: Math.max(0.8, Math.min(1, flow.getZoom())),
+      duration: window.matchMedia("(prefers-reduced-motion: reduce)").matches
+        ? 0
+        : 300,
+    });
+  }, [draft?.id, draft?.focusVersion]);
   useEffect(() => {
     if (!focusId) return;
     const node = workspace.nodes.find((item) => item.id === focusId);
@@ -399,7 +563,7 @@ export function Graph({
     );
   };
   return (
-    <div className="graph-container">
+    <div className={`graph-container${draft ? " has-branch-draft" : ""}`}>
       <ReactFlow<GraphNode>
         colorMode={colorMode}
         nodes={nodes}
@@ -408,8 +572,12 @@ export function Graph({
         onNodesChange={(changes: NodeChange<GraphNode>[]) =>
           setNodes((current) => applyNodeChanges(changes, current))
         }
-        onNodeClick={(_, node) => onSelect(node.id)}
-        onNodeDragStop={(_, node) => onPositions({ [node.id]: node.position })}
+        onNodeClick={(_, node) => {
+          if (node.type === "turn") onSelect(node.id);
+        }}
+        onNodeDragStop={(_, node) => {
+          if (node.type === "turn") onPositions({ [node.id]: node.position });
+        }}
         onInit={(instance) => {
           const saved = readPreference(`viewport:${workspace.id}`);
           try {
@@ -456,13 +624,32 @@ export function Graph({
             <span className="tiny-green-dot" />
             探索画布
           </span>
-          <small>{workspace.nodes.length} 个节点</small>
+          <small>
+            {workspace.nodes.length} 个节点{draft ? " · 1 个草稿" : ""}
+          </small>
         </Panel>
-        <Panel position="top-right">
-          <button className="layout-button" onClick={handleLayout}>
-            <LayoutGrid size={14} />
-            自动布局
-          </button>
+        <Panel position="top-right" className="canvas-git-history">
+          <GitHistoryPanel
+            entries={workspace.gitHistory ?? []}
+            nodeIds={workspace.nodes.map((node) => node.id)}
+            onLocate={(nodeId) => {
+              const node = flow.getNode(nodeId);
+              if (!node) return;
+              onSelect(nodeId);
+              void flow.setCenter(
+                node.position.x + (node.measured?.width ?? 282) / 2,
+                node.position.y + (node.measured?.height ?? 218) / 2,
+                {
+                  zoom: 0.95,
+                  duration: window.matchMedia(
+                    "(prefers-reduced-motion: reduce)",
+                  ).matches
+                    ? 0
+                    : 350,
+                },
+              );
+            }}
+          />
         </Panel>
         <Panel position="bottom-left" className="canvas-controls">
           <button
@@ -489,12 +676,23 @@ export function Graph({
             <Maximize size={14} />
           </button>
           <button
-            aria-label="切换小地图"
-            title="小地图"
+            aria-label="切换全局缩略视图"
+            disabled={Boolean(draft)}
+            aria-pressed={showMap}
+            title={showMap ? "隐藏全局缩略视图" : "显示全局缩略视图"}
             className={showMap ? "control-active" : ""}
-            onClick={() => setShowMap(!showMap)}
+            onClick={() => setShowMap((current) => !current)}
           >
             <Scan size={15} />
+          </button>
+          <i />
+          <button
+            type="button"
+            aria-label="自动布局"
+            title="自动布局"
+            onClick={handleLayout}
+          >
+            <LayoutGrid size={15} />
           </button>
         </Panel>
         <Panel position="bottom-right" className="canvas-hint">
@@ -510,10 +708,33 @@ export function Graph({
           )}
         </Panel>
         {showMap && (
-          <MiniMap
-            position="bottom-right"
-            nodeColor={(node) => colors[(node.data as CardData).turn.color]}
+          <MiniMap<GraphNode>
+            position="top-left"
+            className="canvas-minimap"
+            style={{ width: 168, height: 112 }}
+            ariaLabel="全局缩略视图：点击定位，拖动平移，滚轮缩放"
+            bgColor="var(--minimap-background)"
+            nodeColor={(node) =>
+              node.type === "branchDraft"
+                ? colors[(node as BranchDraftNode).data.color]
+                : colors[(node as TurnGraphNode).data.turn.color]
+            }
+            nodeStrokeColor={(node) =>
+              node.selected ? "var(--ink)" : "transparent"
+            }
+            nodeStrokeWidth={12}
             maskColor="var(--minimap-mask)"
+            maskStrokeColor="var(--text-accent)"
+            maskStrokeWidth={1.5}
+            onClick={(_, position) => {
+              void flow.setCenter(position.x, position.y, {
+                zoom: flow.getZoom(),
+                duration: window.matchMedia("(prefers-reduced-motion: reduce)")
+                  .matches
+                  ? 0
+                  : 200,
+              });
+            }}
             pannable
             zoomable
           />
