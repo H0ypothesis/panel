@@ -1,0 +1,8 @@
+node_modules/
+dist/
+.panel/
+.env
+.env.*
+!.env.example
+artifacts/
+.DS_Store

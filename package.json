@@ -1,0 +1,37 @@
+{
+  "name": "panel-agent-workbench",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "tsx server/index.ts",
+    "check": "tsc --noEmit && tsc --project tsconfig.server.json --noEmit",
+    "setup:pi": "node pi/packages/ai/scripts/generate-models.ts --strict --data-only",
+    "test:core": "tsx --test server/*.test.ts",
+    "build": "vite build",
+    "format": "prettier --write src server shared vite.config.ts tsconfig*.json package.json docs/PRD.md README.md",
+    "start": "NODE_ENV=production tsx server/index.ts"
+  },
+  "dependencies": {
+    "@earendil-works/chord": "file:./pi/packages/chord",
+    "@earendil-works/pi-agent-core": "file:./pi/packages/agent",
+    "@earendil-works/pi-ai": "file:./pi/packages/ai",
+    "@earendil-works/pi-telemetry": "file:./pi/packages/telemetry",
+    "@xyflow/react": "12.8.5",
+    "lucide-react": "0.468.0",
+    "react": "19.1.1",
+    "react-dom": "19.1.1",
+    "react-markdown": "10.1.0",
+    "remark-gfm": "4.0.1"
+  },
+  "devDependencies": {
+    "@types/node": "22.19.19",
+    "@types/react": "19.1.16",
+    "@types/react-dom": "19.1.9",
+    "@vitejs/plugin-react": "5.0.4",
+    "prettier": "3.6.2",
+    "tsx": "4.22.1",
+    "typescript": "5.9.3",
+    "vite": "7.3.6"
+  }
+}

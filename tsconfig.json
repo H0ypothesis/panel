@@ -1,0 +1,24 @@
+{
+  "compilerOptions": {
+    "target": "ES2023",
+    "lib": ["ES2023", "DOM", "DOM.Iterable"],
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "jsx": "react-jsx",
+    "strict": true,
+    "noEmit": true,
+    "skipLibCheck": true,
+    "allowImportingTsExtensions": true,
+    "resolveJsonModule": true,
+    "esModuleInterop": true,
+    "types": ["node", "vite/client"],
+    "paths": {
+      "@earendil-works/pi-ai": ["./pi/packages/ai/src/index.ts"],
+      "@earendil-works/pi-ai/*": ["./pi/packages/ai/src/*.ts"],
+      "@earendil-works/pi-telemetry": ["./pi/packages/telemetry/src/index.ts"],
+      "@earendil-works/pi-agent-core": ["./pi/packages/agent/src/agent.ts"],
+      "@earendil-works/chord": ["./pi/packages/chord/src/index.ts"]
+    }
+  },
+  "include": ["src", "shared", "vite.config.ts"]
+}
