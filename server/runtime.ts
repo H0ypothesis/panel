@@ -36,7 +36,7 @@ import { atriaProvider } from "./atria.ts";
 import { createPanelTools } from "./coding-tools.ts";
 import { reviewSafetyTool } from "./safety-review.ts";
 import { requestUsage } from "./request-context-usage.ts";
-import { createWebTools, type WebToolOptions } from "./web-tools.ts";
+import { createWebTools, isWebTool, type WebToolOptions } from "./web-tools.ts";
 
 export interface RunEnvironment {
   workingDirectory?: string;
@@ -82,11 +82,10 @@ function toolSources(result: unknown): ToolCall["sources"] {
         return false;
       }
     })
-    .slice(0, 20)
-    .map(({ title, url }) => ({ title: title.slice(0, 500), url }));
+    .map(({ title, url }) => ({ title, url }));
 }
 
-function toolText(result: unknown): string {
+function toolText(result: unknown, toolName: string): string {
   if (
     !result ||
     typeof result !== "object" ||
@@ -94,12 +93,12 @@ function toolText(result: unknown): string {
     !Array.isArray(result.content)
   )
     return "";
-  return result.content
+  const text = result.content
     .map((part: { type?: string; text?: string }) =>
       part.type === "text" ? (part.text ?? "") : "[图片]",
     )
-    .join("\n")
-    .slice(-20000);
+    .join("\n");
+  return isWebTool(toolName) ? text : text.slice(-20000);
 }
 
 export interface RunResult {
@@ -628,10 +627,10 @@ export class PiRuntime implements Runtime {
       if (event.type === "tool_execution_update") {
         execution?.onToolUpdate(event.toolCallId, {
           status: "running",
-          output: toolText(event.partialResult),
+          output: toolText(event.partialResult, event.toolName),
         });
       } else if (event.type === "tool_execution_end") {
-        const output = toolText(event.result);
+        const output = toolText(event.result, event.toolName);
         execution?.onToolUpdate(event.toolCallId, {
           status: event.isError ? "failed" : "completed",
           output,

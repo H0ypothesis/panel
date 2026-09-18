@@ -26,7 +26,6 @@ export type PiWebRunner = (
 export const PI_WEB_CONFIG = {
   workflow: "none",
   autoOpenBrowser: false,
-  fetch: { timeout: 30 },
   fetchRouting: { providers: ["http"], allowRemoteHostedProviders: false },
   ssrf: { allowRanges: [], trustEnvProxy: false },
   githubClone: { enabled: false },
@@ -34,7 +33,8 @@ export const PI_WEB_CONFIG = {
   youtube: { enabled: false },
   video: { enabled: false },
   image: { enabled: false },
-  pdf: { enabled: true, provider: "unpdf", maxSizeMB: 20, maxPages: 100 },
+  // Leave extraction size/page limits to the plugin defaults.
+  pdf: { enabled: true, provider: "unpdf" },
   allowBrowserCookies: false,
 };
 

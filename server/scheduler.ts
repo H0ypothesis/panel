@@ -25,6 +25,7 @@ import type {
 import { Store } from "./store.ts";
 import { directoriesOverlap, workingDirectory } from "./directories.ts";
 import { validateApprovalSettings } from "./approval-settings.ts";
+import { isWebTool } from "./web-tools.ts";
 import {
   FileOperationLocks,
   resolveFileOperationResource,
@@ -1976,7 +1977,10 @@ export class Scheduler {
                   return;
                 Object.assign(call, update, {
                   output: update.output
-                    ? safeError(update.output, 20000)
+                    ? safeError(
+                        update.output,
+                        isWebTool(call.name) ? Infinity : 20000,
+                      )
                     : call.output,
                   error: update.error ? safeError(update.error) : undefined,
                   finishedAt:

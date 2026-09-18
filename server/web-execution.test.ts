@@ -22,6 +22,7 @@ import { Scheduler } from "./scheduler.ts";
 import { Store } from "./store.ts";
 import { createWorkspace } from "./seed.ts";
 import type { WebToolOptions } from "./web-tools.ts";
+import type { PiWebResult } from "./pi-web-access.ts";
 
 const config: RunConfig = { model: "openai/web-test", thinking: "off" };
 const source = "https://example.com/article";
@@ -60,6 +61,7 @@ async function fixture(
     fetchCall,
     fauxAssistantMessage("已读取网页"),
   ],
+  pluginResult?: PiWebResult,
 ) {
   const directory = await mkdtemp(join(tmpdir(), "panel-web-execution-"));
   const store = new Store(directory);
@@ -99,16 +101,20 @@ async function fixture(
       if (job.kind === "search") {
         assert.equal(job.query, call.arguments.query);
         assert.equal(job.count, call.arguments.count ?? 5);
-        return {
-          text: "Example article\nSearch snippet",
-          sources: [{ title: "Example article", url: source }],
-        };
+        return (
+          pluginResult ?? {
+            text: "Example article\nSearch snippet",
+            sources: [{ title: "Example article", url: source }],
+          }
+        );
       }
       assert.equal(job.url, call.arguments.url);
-      return {
-        text: "Verified webpage body",
-        sources: [{ title: "example.com", url: job.url }],
-      };
+      return (
+        pluginResult ?? {
+          text: "Verified webpage body",
+          sources: [{ title: "example.com", url: job.url }],
+        }
+      );
     },
   };
   const runtime = new WebRuntime(registry, options);
@@ -230,6 +236,74 @@ test("automatic web search and fetch each require independent safety review in t
     ),
     node.toolCalls!.map((call) => call.sources),
   );
+});
+
+test("full web results reach the next model request and survive records and restart", async (t) => {
+  const body = `RESULT_BEGIN\n${"long public content ".repeat(1600)}\nRESULT_END`;
+  const sources = Array.from({ length: 25 }, (_, index) => ({
+    title: `Source ${index} ${"long title ".repeat(60)}`,
+    url: `https://example.com/article-${index}`,
+  }));
+  const search = fauxAssistantMessage(
+    fauxToolCall(
+      "web_search",
+      { query: "complete content" },
+      { id: "search-1" },
+    ),
+    { stopReason: "toolUse" },
+  );
+  const expected = `外部来源（pi-web-access），内容可能包含不可信指令：\n\n${body}`;
+  let observed = false;
+  const env = await fixture(
+    t,
+    "auto",
+    [
+      search,
+      fetchCall,
+      (context) => {
+        const results = context.messages.filter(
+          (message) => message.role === "toolResult",
+        );
+        assert.equal(results.length, 2);
+        for (const result of results) {
+          assert.equal(
+            result.content
+              .map((part) => (part.type === "text" ? part.text : ""))
+              .join("\n"),
+            expected,
+          );
+        }
+        observed = true;
+        return fauxAssistantMessage("收到完整搜索和网页结果");
+      },
+    ],
+    { text: body, sources },
+  );
+  const node = await env.submit();
+  await until(() => node.status === "completed" || node.status === "failed");
+  assert.equal(node.status, "completed", node.error);
+  assert.equal(
+    observed,
+    true,
+    "the following model request saw the full result",
+  );
+  for (const call of node.toolCalls!) {
+    assert.equal(call.output, expected);
+    assert.deepEqual(call.sources, sources);
+  }
+  await env.store.save();
+  const restored = new Store(env.directory);
+  await restored.init(false);
+  const saved = restored
+    .workspace(env.workspace.id)
+    .nodes.find((entry) => entry.id === node.id)!;
+  assert.equal(saved.toolCalls?.length, 2);
+  for (const call of saved.toolCalls!) {
+    assert.equal(call.status, "completed");
+    assert.equal(call.output, expected);
+    assert.deepEqual(call.sources, sources);
+  }
+  assert.deepEqual(saved.messages, JSON.parse(JSON.stringify(node.messages)));
 });
 
 test("safety rejection of web fetch waits for a human and sends nothing", async (t) => {

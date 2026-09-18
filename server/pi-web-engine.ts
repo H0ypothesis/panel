@@ -1,6 +1,6 @@
 import { createRequire } from "node:module";
 import { pathToFileURL } from "node:url";
-import { open, realpath } from "node:fs/promises";
+import { readFile, realpath } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, sep } from "node:path";
 import type { PiWebJob, PiWebResult } from "./pi-web-access.ts";
@@ -10,7 +10,6 @@ const require = createRequire(import.meta.url);
 const pluginModule = (name: string) =>
   import(pathToFileURL(require.resolve(`pi-web-access/${name}.ts`)).href);
 const freshness = { pd: "day", pw: "week", pm: "month", py: "year" };
-const MAX_CONTENT = 60_000;
 
 interface SearchResponse {
   answer: string;
@@ -51,14 +50,14 @@ export async function executePiWebJob(
       } catch {
         continue;
       }
-      const title = (item.title || url.hostname).slice(0, 500);
+      const title = item.title || url.hostname;
       sources.push({ title, url: url.href });
       blocks.push(
-        `${sources.length}. ${title}\n${url.href}\n${(item.snippet || "").slice(0, 2000)}`,
+        `${sources.length}. ${title}\n${url.href}\n${item.snippet || ""}`,
       );
     }
     return {
-      text: `Exa 搜索结果\n查询：${job.query}\n\n${blocks.length ? blocks.join("\n\n") : "没有找到匹配结果。"}${response.answer ? `\n\n搜索服务摘要：\n${response.answer.slice(0, 12000)}` : ""}`,
+      text: `Exa 搜索结果\n查询：${job.query}\n\n${blocks.length ? blocks.join("\n\n") : "没有找到匹配结果。"}${response.answer ? `\n\n搜索服务摘要：\n${response.answer}` : ""}`,
       sources,
     };
   }
@@ -66,7 +65,6 @@ export async function executePiWebJob(
   const { extractContent } = await pluginModule("extract");
   const page: ExtractedContent = await extractContent(url, signal, {
     mode: "readable",
-    timeoutMs: 30_000,
     ...(lookup ? { lookup } : {}),
   });
   const partial = page.error?.startsWith(
@@ -90,19 +88,12 @@ export async function executePiWebJob(
     const path = await realpath(pdf[1]);
     if (!path.startsWith(root + sep))
       throw new Error("PDF 提取路径超出了本次调用的临时目录。");
-    const file = await open(path, "r");
-    try {
-      const buffer = Buffer.alloc(MAX_CONTENT * 4 + 4);
-      const { bytesRead } = await file.read(buffer);
-      content = buffer.subarray(0, bytesRead).toString("utf8");
-    } finally {
-      await file.close();
-    }
+    content = await readFile(path, "utf8");
     content = `PDF 文本（原始 PDF 尚未保存到工作目录）：\n\n${content}`;
   }
-  const title = (page.title || new URL(url).hostname).slice(0, 500);
+  const title = page.title || new URL(url).hostname;
   return {
-    text: `标题：${title}\n来源：${url}\n${partial ? "提示：页面正文较短，提取内容可能不完整。\n" : ""}\n${content.slice(0, MAX_CONTENT)}${content.length > MAX_CONTENT ? "\n[正文已截断]" : ""}`,
+    text: `标题：${title}\n来源：${url}\n${partial ? "提示：页面正文较短，提取内容可能不完整。\n" : ""}\n${content}`,
     sources: [{ title, url }],
   };
 }

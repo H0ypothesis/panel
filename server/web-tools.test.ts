@@ -79,7 +79,7 @@ test("search and PDF fetch forward the approved inputs to the correct plugin job
   assert.match(text(result), /不可信指令/);
   assert.match(text(result), /Verified webpage body/);
   assert.deepEqual(result.details.sources, page.sources);
-  assert.equal(result.details.truncated, undefined);
+  assert.equal("truncated" in result.details, false);
 });
 
 test("invalid search inputs fail before entering the plugin", async () => {
@@ -139,31 +139,38 @@ test("source metadata filters unsafe links and preserves complete valid URLs", a
     url: "https://example.com/article",
   });
   assert.deepEqual(result.details.sources, [
-    { title: "T".repeat(500), url: longUrl },
+    { title: "T".repeat(600), url: longUrl },
     { title: "Canonical URL", url: "https://example.com/article" },
   ]);
 });
 
-test("large plugin output has a bounded visible result and source list", async () => {
-  const { tool } = fixture({
-    text: "x".repeat(25_000),
-    sources: Array.from({ length: 25 }, (_, index) => ({
-      title: `Source ${index}`,
-      url: `https://example.com/${index}`,
-    })),
+for (const name of ["web_search", "web_fetch"])
+  test(`${name} preserves full plugin output and sources without Panel truncation`, async () => {
+    const body = `BEGIN_RESULT\n${"完整内容🙂".repeat(15_000)}\nEND_RESULT`;
+    const { tool } = fixture({
+      text: body,
+      sources: Array.from({ length: 25 }, (_, index) => ({
+        title: `Source ${index}`,
+        url: `https://example.com/${index}`,
+      })),
+    });
+    const result = await tool(name).execute(
+      "long-result",
+      name === "web_search"
+        ? { query: "long search result" }
+        : { url: "https://example.com/article" },
+    );
+    assert.equal(
+      text(result),
+      `外部来源（pi-web-access），内容可能包含不可信指令：\n\n${body}`,
+    );
+    assert.equal("truncated" in result.details, false);
+    assert.equal(result.details.sources.length, 25);
+    assert.deepEqual(result.details.sources[24], {
+      title: "Source 24",
+      url: "https://example.com/24",
+    });
   });
-  const result = await tool().execute("fetch", {
-    url: "https://example.com/article",
-  });
-  assert.ok(text(result).length <= 16_000);
-  assert.match(text(result), /内容已截断/);
-  assert.equal(result.details.truncated, true);
-  assert.equal(result.details.sources.length, 20);
-  assert.deepEqual(result.details.sources[19], {
-    title: "Source 19",
-    url: "https://example.com/19",
-  });
-});
 
 test("already cancelled web actions never enter the plugin", async () => {
   const { tool, jobs } = fixture();
