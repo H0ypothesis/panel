@@ -27,6 +27,10 @@ import {
   Square,
   AlertCircle,
   LoaderCircle,
+  ShieldQuestion,
+  FolderOpen,
+  Pencil,
+  Trash2,
 } from "lucide-react";
 import {
   ancestorPath,
@@ -44,14 +48,21 @@ type CardData = {
   active: boolean;
   inPath: boolean;
   modelName: string;
+  workingDirectory?: string;
+  temporaryDirectory?: string;
+  chooseDirectory: () => void;
+  directoryDisabled: boolean;
   branch: (id: string) => void;
+  edit: (id: string) => void;
+  delete: (id: string) => void;
+  actionsDisabled: boolean;
 };
 type GraphNode = Node<CardData, "turn">;
 const colors = {
-  sage: "#71977f",
-  violet: "#a497be",
-  blue: "#83a2c4",
-  amber: "#c2a272",
+  sage: "var(--branch-green)",
+  violet: "var(--branch-purple)",
+  blue: "var(--branch-blue)",
+  amber: "var(--branch-orange)",
 };
 
 export const StatusIcon = ({ status }: { status: TurnNode["status"] }) => {
@@ -74,6 +85,10 @@ function plainText(markdown: string) {
 const TurnCard = memo(function TurnCard({ data }: NodeProps<GraphNode>) {
   const { turn, index, active, inPath, modelName, branch } = data;
   const root = turn.status === "root";
+  const pendingApproval = turn.toolCalls?.some(
+    (call) => call.status === "awaiting_approval",
+  );
+  const reviewing = turn.toolCalls?.some((call) => call.status === "reviewing");
   return (
     <div
       className={`turn-card ${root ? "root-card" : ""} color-${turn.color} ${active ? "active" : ""} ${inPath ? "in-path" : ""} status-${turn.status}`}
@@ -84,49 +99,131 @@ const TurnCard = memo(function TurnCard({ data }: NodeProps<GraphNode>) {
           {root ? <Sparkles size={13} /> : <span className="branch-dot" />}
           {root ? "探索起点" : `对话 ${String(index).padStart(2, "0")}`}
         </span>
-        <span
-          className={`card-status ${turn.status}`}
-          title={turn.status === "completed" ? "已完成" : undefined}
-        >
-          <StatusIcon status={turn.status} />
-          {turn.status === "running"
-            ? "生成中"
-            : turn.status === "queued"
-              ? "排队中"
-              : turn.status === "failed"
-                ? "失败"
-                : turn.status === "cancelled"
-                  ? "已停止"
-                  : ""}
-        </span>
+        <div className="card-topline-tools">
+          <span
+            className={`card-status ${turn.status} ${turn.contextStale ? "context-stale" : ""}`}
+            title={
+              turn.contextStale
+                ? "上游节点已修改，请编辑此节点并重新生成后再创建分支"
+                : turn.status === "completed"
+                  ? "已完成"
+                  : undefined
+            }
+          >
+            {turn.contextStale ? (
+              <AlertCircle size={12} />
+            ) : pendingApproval ? (
+              <ShieldQuestion size={12} />
+            ) : (
+              <StatusIcon status={turn.status} />
+            )}
+            {turn.contextStale
+              ? "上下文已更新"
+              : pendingApproval
+                ? "等待批准"
+                : reviewing
+                  ? "安全审核中"
+                  : turn.status === "running"
+                    ? "生成中"
+                    : turn.status === "queued"
+                      ? "排队中"
+                      : turn.status === "failed"
+                        ? "失败"
+                        : turn.status === "cancelled"
+                          ? "已停止"
+                          : ""}
+          </span>
+          {!root && (
+            <div className="card-node-actions nodrag nopan">
+              <button
+                type="button"
+                className="card-node-action nodrag nopan"
+                disabled={data.actionsDisabled}
+                aria-label={`编辑「${turn.prompt}」并重新生成`}
+                title={`编辑「${turn.prompt}」并重新生成`}
+                aria-haspopup="dialog"
+                onClick={(event) => {
+                  event.stopPropagation();
+                  data.edit(turn.id);
+                }}
+                onKeyDown={(event) => event.stopPropagation()}
+              >
+                <Pencil size={12} />
+              </button>
+              <button
+                type="button"
+                className="card-node-action delete nodrag nopan"
+                disabled={data.actionsDisabled}
+                aria-label={`删除「${turn.prompt}」`}
+                title={`删除「${turn.prompt}」`}
+                aria-haspopup="dialog"
+                onClick={(event) => {
+                  event.stopPropagation();
+                  data.delete(turn.id);
+                }}
+                onKeyDown={(event) => event.stopPropagation()}
+              >
+                <Trash2 size={12} />
+              </button>
+            </div>
+          )}
+        </div>
       </div>
       <h3>{turn.prompt}</h3>
       <p className="card-preview">
         {plainText(turn.response) ||
-          (turn.status === "failed"
-            ? turn.error
-            : turn.status === "queued"
-              ? "等待空闲的运行位置…"
-              : turn.status === "cancelled"
-                ? "这次探索已停止，原有分支依然保留。"
-                : "正在沿着这个方向思考…")}
+          (root
+            ? "从一个问题开始探索，文件默认保存在空间临时目录。"
+            : pendingApproval
+              ? "工具操作等待你的批准，点击查看审核理由与操作详情。"
+              : reviewing
+                ? "安全模型正在审核工具操作，通过前不会执行。"
+                : turn.status === "failed"
+                  ? turn.error
+                  : turn.status === "queued"
+                    ? "等待空闲的运行位置…"
+                    : turn.status === "cancelled"
+                      ? "这次探索已停止，原有分支依然保留。"
+                      : "正在沿着这个方向思考…")}
       </p>
       <div className="card-footer">
-        <span className="card-model">
-          {root ? (
-            <>
-              <GitBranch size={12} /> 从一个问题开始
-            </>
-          ) : (
-            <>
-              <span className="model-symbol">π</span>
-              {modelName}
-              <span className="footer-dot">·</span>
-              {thinkingLabels[turn.config.thinking]}
-            </>
-          )}
-        </span>
-        {(root || turn.status === "completed") && (
+        {root ? (
+          <button
+            type="button"
+            className="card-directory nodrag nopan"
+            disabled={data.directoryDisabled}
+            aria-label={
+              data.workingDirectory ? "更换本地项目" : "临时目录，选择本地项目"
+            }
+            aria-haspopup="dialog"
+            title={
+              data.directoryDisabled
+                ? "请等待连接恢复或当前操作完成；有运行或排队任务时不能更换目录"
+                : (data.workingDirectory ??
+                  data.temporaryDirectory ??
+                  "使用空间临时目录，也可选择本地项目")
+            }
+            onClick={(event) => {
+              event.stopPropagation();
+              data.chooseDirectory();
+            }}
+          >
+            <FolderOpen size={13} />
+            <span>
+              {data.workingDirectory?.split(/[\\/]/).filter(Boolean).at(-1) ??
+                (data.workingDirectory || "临时目录")}
+            </span>
+            <ArrowUpRight size={12} />
+          </button>
+        ) : (
+          <span className="card-model">
+            <span className="model-symbol">π</span>
+            {modelName}
+            <span className="footer-dot">·</span>
+            {thinkingLabels[turn.config.thinking]}
+          </span>
+        )}
+        {(root || (turn.status === "completed" && !turn.contextStale)) && (
           <button
             className="node-branch nodrag"
             onClick={(event) => {
@@ -147,22 +244,34 @@ const TurnCard = memo(function TurnCard({ data }: NodeProps<GraphNode>) {
 const nodeTypes = { turn: TurnCard };
 
 interface Props {
+  colorMode: "light" | "dark";
   workspace: Workspace;
   selectedId: string;
   models: ModelOption[];
   onSelect: (id: string) => void;
   onBranch: (id: string) => void;
+  onEdit: (id: string) => void;
+  onDelete: (id: string) => void;
+  nodeActionsDisabled: boolean;
+  onChooseDirectory: () => void;
+  directoryDisabled: boolean;
   onPositions: (positions: Record<string, { x: number; y: number }>) => void;
   focusId: string | null;
   focusVersion: number;
 }
 
 export function Graph({
+  colorMode,
   workspace,
   selectedId,
   models,
   onSelect,
   onBranch,
+  onEdit,
+  onDelete,
+  nodeActionsDisabled,
+  onChooseDirectory,
+  directoryDisabled,
   onPositions,
   focusId,
   focusVersion,
@@ -175,6 +284,19 @@ export function Graph({
       new Set(ancestorPath(workspace.nodes, selectedId).map((node) => node.id)),
     [workspace.nodes, selectedId],
   );
+  const blockedNodeActions = useMemo(() => {
+    const byId = new Map(workspace.nodes.map((node) => [node.id, node]));
+    const blocked = new Set<string>();
+    for (const turn of workspace.nodes) {
+      if (turn.status !== "running" && turn.status !== "queued") continue;
+      let node: TurnNode | undefined = turn;
+      while (node && !blocked.has(node.id)) {
+        blocked.add(node.id);
+        node = node.parentId ? byId.get(node.parentId) : undefined;
+      }
+    }
+    return blocked;
+  }, [workspace.nodes]);
   const derivedNodes = useMemo<GraphNode[]>(
     () =>
       workspace.nodes.map((turn, index) => ({
@@ -188,12 +310,40 @@ export function Graph({
           active: turn.id === selectedId,
           inPath: path.has(turn.id),
           branch: onBranch,
+          edit: onEdit,
+          delete: onDelete,
+          actionsDisabled:
+            nodeActionsDisabled || blockedNodeActions.has(turn.id),
+          chooseDirectory: onChooseDirectory,
+          directoryDisabled:
+            directoryDisabled ||
+            workspace.nodes.some(
+              (node) => node.status === "running" || node.status === "queued",
+            ),
+          workingDirectory:
+            turn.status === "root" ? workspace.workingDirectory : undefined,
+          temporaryDirectory:
+            turn.status === "root" ? workspace.temporaryDirectory : undefined,
           modelName:
             models.find((model) => model.id === turn.config.model)?.name ??
             turn.config.model.split("/").at(-1)!,
         },
       })),
-    [workspace.nodes, selectedId, path, onBranch, models],
+    [
+      workspace.nodes,
+      workspace.workingDirectory,
+      workspace.temporaryDirectory,
+      selectedId,
+      path,
+      onBranch,
+      onEdit,
+      onDelete,
+      nodeActionsDisabled,
+      blockedNodeActions,
+      onChooseDirectory,
+      directoryDisabled,
+      models,
+    ],
   );
   const [nodes, setNodes] = useState<GraphNode[]>(derivedNodes);
   useEffect(
@@ -221,7 +371,9 @@ export function Graph({
           type: "default",
           animated: node.status === "running",
           style: {
-            stroke: path.has(node.id) ? colors[node.color] : "#d7ddd7",
+            stroke: path.has(node.id)
+              ? colors[node.color]
+              : "var(--graph-edge)",
             strokeWidth: path.has(node.id) ? 1.8 : 1.4,
           },
         })),
@@ -249,6 +401,7 @@ export function Graph({
   return (
     <div className="graph-container">
       <ReactFlow<GraphNode>
+        colorMode={colorMode}
         nodes={nodes}
         edges={edges}
         nodeTypes={nodeTypes}
@@ -296,7 +449,7 @@ export function Graph({
           variant={BackgroundVariant.Dots}
           gap={22}
           size={1}
-          color="#ced5ce"
+          color="var(--graph-dot)"
         />
         <Panel position="top-left" className="canvas-heading">
           <span>
@@ -360,7 +513,7 @@ export function Graph({
           <MiniMap
             position="bottom-right"
             nodeColor={(node) => colors[(node.data as CardData).turn.color]}
-            maskColor="rgba(244,246,242,0.65)"
+            maskColor="var(--minimap-mask)"
             pannable
             zoomable
           />

@@ -13,6 +13,8 @@ export function buildContext(
   const messages: Message[] = [];
   for (const visible of path) {
     const node = workspace.nodes.find((item) => item.id === visible.id)!;
+    if (node.contextStale)
+      throw new Error("此路径包含已失效的上下文，请从最早失效的节点重新生成。");
     if (node.status !== "root" && node.status !== "completed")
       throw new Error("该节点尚未完成，请从其父节点创建分支。");
     if (node.status === "root") {

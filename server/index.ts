@@ -7,6 +7,7 @@ import { createApi } from "./api.ts";
 import { PiRuntime } from "./runtime.ts";
 import { Scheduler } from "./scheduler.ts";
 import { Store } from "./store.ts";
+import { waitForPiWebShutdown } from "./pi-web-access.ts";
 
 try {
   loadEnvFile();
@@ -92,6 +93,7 @@ server.listen(port, "127.0.0.1", () =>
 const shutdown = async () => {
   scheduler.shutdown();
   clearInterval(persistence);
+  await waitForPiWebShutdown();
   await store.save().catch(() => {});
   await vite?.close();
   server.closeAllConnections();

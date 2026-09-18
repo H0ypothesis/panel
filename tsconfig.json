@@ -16,8 +16,11 @@
       "@earendil-works/pi-ai": ["./pi/packages/ai/src/index.ts"],
       "@earendil-works/pi-ai/*": ["./pi/packages/ai/src/*.ts"],
       "@earendil-works/pi-telemetry": ["./pi/packages/telemetry/src/index.ts"],
-      "@earendil-works/pi-agent-core": ["./pi/packages/agent/src/agent.ts"],
-      "@earendil-works/chord": ["./pi/packages/chord/src/index.ts"]
+      "@earendil-works/pi-agent-core": ["./pi/packages/agent/src/index.ts"],
+      "@earendil-works/chord": ["./pi/packages/chord/src/index.ts"],
+      "@earendil-works/chord/context": [
+        "./pi/packages/chord/src/context/index.ts"
+      ]
     }
   },
   "include": ["src", "shared", "vite.config.ts"]

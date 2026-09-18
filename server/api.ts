@@ -1,9 +1,22 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
-import { ancestorPath, type RunConfig } from "../shared/types.ts";
+import {
+  ancestorPath,
+  type ApprovalMode,
+  type RunConfig,
+} from "../shared/types.ts";
 import { createWorkspace } from "./seed.ts";
 import { safeError, type Runtime } from "./runtime.ts";
-import { Scheduler } from "./scheduler.ts";
+import { NodeMutationConflict, Scheduler } from "./scheduler.ts";
 import { Store } from "./store.ts";
+import { listDirectories, workingDirectory } from "./directories.ts";
+import { validateApprovalSettings } from "./approval-settings.ts";
+import { webCapabilities } from "./web-tools.ts";
+
+function approvalMode(value: unknown): ApprovalMode {
+  if (value !== "ask" && value !== "auto")
+    throw new Error("审批模式必须是请求批准或自动审批。");
+  return value;
+}
 
 function json(response: ServerResponse, status: number, body: unknown) {
   response.writeHead(status, {
@@ -44,6 +57,30 @@ function field(
   )
     throw new Error(`${label}不能为空且最多 ${max} 个字符。`);
   return value.trim();
+}
+
+function expectedRevision(value: unknown): number {
+  if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0)
+    throw new Error("请提供有效的节点版本。");
+  return value;
+}
+
+function runInput(body: Record<string, unknown>) {
+  const config = body.config as Partial<RunConfig> | undefined;
+  if (
+    !config ||
+    typeof config.model !== "string" ||
+    typeof config.thinking !== "string"
+  )
+    throw new Error("请选择模型与思考强度。");
+  const requestId = field(body.requestId, "请求 ID", 80);
+  if (!/^[a-zA-Z0-9_-]{8,80}$/.test(requestId))
+    throw new Error("请求 ID 格式错误。");
+  return {
+    prompt: field(body.prompt, "问题", 20000),
+    config: config as RunConfig,
+    requestId,
+  };
 }
 
 export function createApi(
@@ -93,6 +130,14 @@ export function createApi(
         json(response, 200, store.snapshot());
       else if (request.method === "GET" && url.pathname === "/api/models")
         json(response, 200, runtime.models());
+      else if (request.method === "GET" && url.pathname === "/api/capabilities")
+        json(response, 200, webCapabilities());
+      else if (request.method === "GET" && url.pathname === "/api/directories")
+        json(
+          response,
+          200,
+          await listDirectories(url.searchParams.get("path")),
+        );
       else if (request.method === "GET" && url.pathname === "/api/events") {
         response.writeHead(200, {
           "Content-Type": "text/event-stream",
@@ -119,6 +164,26 @@ export function createApi(
           field(body.title, "标题", 80),
           field(body.description ?? "", "背景", 10000, true),
         );
+        workspace.approvalMode = approvalMode(body.approvalMode ?? "ask");
+        if (
+          body.safetyModel !== undefined &&
+          body.safetyModel !== null &&
+          body.safetyModel !== ""
+        )
+          workspace.safetyModel = field(body.safetyModel, "安全模型", 300);
+        validateApprovalSettings(
+          runtime,
+          workspace.approvalMode,
+          workspace.safetyModel,
+        );
+        if (
+          body.workingDirectory !== undefined &&
+          body.workingDirectory !== null &&
+          body.workingDirectory !== ""
+        )
+          workspace.workingDirectory = await workingDirectory(
+            body.workingDirectory,
+          );
         store.data.workspaces.unshift(workspace);
         store.touch(workspace);
         await store.save();
@@ -127,6 +192,68 @@ export function createApi(
           state: store.snapshot(),
         });
       } else {
+        const settings = url.pathname.match(/^\/api\/workspaces\/([^/]+)$/);
+        if (request.method === "PATCH" && settings) {
+          const workspace = store.workspace(settings[1]);
+          const body = await readJson(request);
+          const mode =
+            body.approvalMode !== undefined
+              ? approvalMode(body.approvalMode)
+              : undefined;
+          const directory =
+            body.workingDirectory === undefined
+              ? undefined
+              : body.workingDirectory === null || body.workingDirectory === ""
+                ? null
+                : await workingDirectory(body.workingDirectory);
+          await scheduler.configureWorkspace(workspace.id, {
+            workingDirectory: directory,
+            approvalMode: mode,
+            safetyModel:
+              body.safetyModel === undefined
+                ? undefined
+                : body.safetyModel === null || body.safetyModel === ""
+                  ? null
+                  : field(body.safetyModel, "安全模型", 300),
+          });
+          json(response, 200, store.snapshot());
+          return true;
+        }
+        const approval = url.pathname.match(
+          /^\/api\/workspaces\/([^/]+)\/nodes\/([^/]+)\/approvals\/([^/]+)$/,
+        );
+        if (request.method === "POST" && approval) {
+          const body = await readJson(request);
+          if (body.decision !== "approve" && body.decision !== "deny")
+            throw new Error("请选择批准或拒绝。");
+          await scheduler.approve(
+            decodeURIComponent(approval[1]),
+            decodeURIComponent(approval[2]),
+            decodeURIComponent(approval[3]),
+            body.decision,
+            body.expectedRevision === undefined
+              ? undefined
+              : expectedRevision(body.expectedRevision),
+          );
+          json(response, 200, store.snapshot());
+          return true;
+        }
+        const regenerate = url.pathname.match(
+          /^\/api\/workspaces\/([^/]+)\/nodes\/([^/]+)\/regenerate$/,
+        );
+        if (request.method === "POST" && regenerate) {
+          const body = await readJson(request);
+          const node = await scheduler.regenerate(
+            decodeURIComponent(regenerate[1]),
+            decodeURIComponent(regenerate[2]),
+            {
+              ...runInput(body),
+              expectedRevision: expectedRevision(body.expectedRevision),
+            },
+          );
+          json(response, 200, { nodeId: node.id, state: store.snapshot() });
+          return true;
+        }
         const match = url.pathname.match(
           /^\/api\/workspaces\/([^/]+)\/(nodes|layout|export)(?:\/([^/]+))?(?:\/(cancel))?$/,
         );
@@ -148,7 +275,7 @@ export function createApi(
                 .slice(1)
                 .map(
                   (node, i) =>
-                    `## ${i + 1}. ${node.prompt}\n\n模型：${node.config.model} · 思考强度：${node.config.thinking} · 状态：${node.status}\n\n${node.response || "（暂无回答）"}\n`,
+                    `## ${i + 1}. ${node.prompt}\n\n模型：${node.config.model} · 思考强度：${node.config.thinking} · 状态：${node.status}\n\n${node.contextStale ? "> 上游已更新，此回答基于修改前的上下文，需重新生成。\n\n" : ""}${node.response || "（暂无回答）"}\n`,
                 )
                 .join("\n---\n\n");
             response.writeHead(200, {
@@ -164,28 +291,38 @@ export function createApi(
             json(response, 200, {
               version: 1,
               exportedAt: new Date().toISOString(),
-              workspace,
+              workspace: store
+                .snapshot()
+                .workspaces.find((item) => item.id === workspace.id),
             });
           }
         } else if (request.method === "POST" && action === "nodes" && !nodeId) {
           const body = await readJson(request);
-          const config = body.config as Partial<RunConfig> | undefined;
-          if (
-            !config ||
-            typeof config.model !== "string" ||
-            typeof config.thinking !== "string"
-          )
-            throw new Error("请选择模型与思考强度。");
-          const requestId = field(body.requestId, "请求 ID", 80);
-          if (!/^[a-zA-Z0-9_-]{8,80}$/.test(requestId))
-            throw new Error("请求 ID 格式错误。");
           const node = await scheduler.submit(workspaceId, {
+            ...runInput(body),
             parentId: field(body.parentId, "父节点", 80),
-            prompt: field(body.prompt, "问题", 20000),
-            config: config as RunConfig,
-            requestId,
           });
           json(response, 201, { nodeId: node.id, state: store.snapshot() });
+        } else if (
+          request.method === "DELETE" &&
+          action === "nodes" &&
+          nodeId &&
+          !suffix
+        ) {
+          const body = await readJson(request);
+          if (
+            !Array.isArray(body.expectedNodeIds) ||
+            !body.expectedNodeIds.length
+          )
+            throw new Error("请提供确认删除的节点范围。");
+          const expectedNodeIds = body.expectedNodeIds.map((id) =>
+            field(id, "节点 ID", 80),
+          );
+          await scheduler.deleteNode(workspaceId, nodeId, {
+            expectedRevision: expectedRevision(body.expectedRevision),
+            expectedNodeIds,
+          });
+          json(response, 200, store.snapshot());
         } else if (
           request.method === "POST" &&
           action === "nodes" &&
@@ -224,14 +361,19 @@ export function createApi(
               throw new Error("节点或坐标无效。");
             return { node, position: { x: position.x, y: position.y } };
           });
-          for (const update of updates) update.node.position = update.position;
-          store.touch(workspace);
-          await store.save();
+          await scheduler.updatePositions(
+            workspaceId,
+            Object.fromEntries(
+              updates.map((update) => [update.node.id, update.position]),
+            ),
+          );
           json(response, 200, store.snapshot());
         } else json(response, 404, { error: "接口不存在。" });
       }
     } catch (error) {
-      json(response, 400, { error: safeError(error) });
+      json(response, error instanceof NodeMutationConflict ? 409 : 400, {
+        error: safeError(error),
+      });
     }
     return true;
   };

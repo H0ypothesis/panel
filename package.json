@@ -19,6 +19,7 @@
     "@earendil-works/pi-telemetry": "file:./pi/packages/telemetry",
     "@xyflow/react": "12.8.5",
     "lucide-react": "0.468.0",
+    "pi-web-access": "0.29.0",
     "react": "19.1.1",
     "react-dom": "19.1.1",
     "react-markdown": "10.1.0",

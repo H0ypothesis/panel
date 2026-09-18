@@ -1,0 +1,86 @@
+.node-action-dialog {
+  position: fixed;
+  inset: 0;
+  margin: auto;
+  height: fit-content;
+  width: 520px;
+  max-width: calc(100vw - 32px);
+  color: var(--text-primary);
+}
+.node-action-dialog::backdrop {
+  background: var(--backdrop);
+  backdrop-filter: blur(5px);
+}
+.node-action-dialog .form-label {
+  margin-bottom: 12px;
+}
+.node-action-dialog .form-label textarea {
+  min-height: 160px;
+  height: 190px;
+  font-size: 13px;
+}
+.node-action-dialog .model-controls {
+  margin-bottom: 14px;
+}
+.node-action-note {
+  color: var(--text-muted);
+  font-size: 11px;
+  line-height: 1.8;
+  margin: 14px 0 0;
+}
+.node-action-buttons {
+  display: flex;
+  gap: 10px;
+  margin-top: 26px;
+}
+.node-action-buttons .primary-button {
+  margin: 0;
+  width: auto;
+  flex: 1;
+}
+.node-action-buttons .primary-button > svg {
+  margin: 0;
+}
+.node-action-cancel {
+  border: 1px solid var(--line-strong);
+  border-radius: 6px;
+  padding: 0 24px;
+  font-size: 12px;
+  color: var(--text-secondary);
+  background: var(--surface);
+}
+.node-action-cancel:hover {
+  background: var(--surface-muted);
+}
+.node-delete-preview {
+  padding: 14px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-muted);
+  color: var(--text-secondary);
+  font-size: 13px;
+  line-height: 1.8;
+  max-height: 150px;
+  overflow: auto;
+  overflow-wrap: anywhere;
+}
+.node-action-dialog .node-delete-icon {
+  color: #bf5d54;
+}
+.node-action-dialog .node-delete-confirm {
+  background: #a7463e;
+  color: #fff;
+}
+.node-action-dialog .node-delete-confirm:hover {
+  background: #933b34;
+}
+.context-stale-notice {
+  border: 1px solid var(--line-strong);
+  border-radius: 8px;
+  padding: 10px 12px;
+  margin: 14px 0;
+  font-size: 11px;
+  line-height: 1.8;
+  color: var(--text-secondary);
+  background: var(--surface-muted);
+}

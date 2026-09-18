@@ -3,7 +3,31 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <meta name="theme-color" content="#f6f7f5" />
+    <meta name="theme-color" content="#f5f6f3" />
+    <script>
+      // Apply the saved theme before the app and its styles load.
+      (() => {
+        let preference;
+        try {
+          preference = localStorage.getItem("panel:theme");
+        } catch {
+          // System preference still works when browser storage is unavailable.
+        }
+        const dark =
+          preference === "dark" ||
+          (preference !== "light" &&
+            window.matchMedia("(prefers-color-scheme: dark)").matches);
+        const theme = dark ? "dark" : "light";
+        document.documentElement.dataset.theme = theme;
+        document.documentElement.style.colorScheme = theme;
+        document.documentElement.style.backgroundColor = dark
+          ? "#151b18"
+          : "#f5f6f3";
+        document
+          .querySelector('meta[name="theme-color"]')
+          .setAttribute("content", dark ? "#151b18" : "#f5f6f3");
+      })();
+    </script>
     <title>Panel · 让思考自由生长</title>
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
   </head>

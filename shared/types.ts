@@ -14,6 +14,68 @@ export type RunStatus =
   | "failed"
   | "cancelled";
 export type BranchColor = "sage" | "violet" | "blue" | "amber";
+export type ApprovalMode = "ask" | "auto";
+
+export interface SafetyReviewRequest {
+  model: string;
+  workingDirectory?: string;
+  workspaceTitle: string;
+  workspaceDescription: string;
+  userRequest: string;
+  ancestry: { prompt: string; response: string }[];
+  recentTools?: {
+    name: string;
+    arguments: Record<string, unknown>;
+    status: string;
+    output?: string;
+  }[];
+  tool: Pick<ToolCall, "id" | "name" | "arguments">;
+}
+
+export interface SafetyReviewResult {
+  decision: "approve" | "deny";
+  reason: string;
+}
+
+export interface SafetyReview {
+  model: string;
+  decision: "reviewing" | "approve" | "deny" | "error" | "cancelled";
+  reason: string;
+  startedAt: number;
+  finishedAt?: number;
+}
+
+export interface ToolCall {
+  id: string;
+  name: string;
+  arguments: Record<string, unknown>;
+  status:
+    | "reviewing"
+    | "awaiting_approval"
+    | "running"
+    | "completed"
+    | "failed"
+    | "denied"
+    | "cancelled";
+  output?: string;
+  error?: string;
+  sources?: { title: string; url: string }[];
+  approval?: "auto" | "policy" | "safety_model" | "approved" | "denied";
+  safetyReview?: SafetyReview;
+  // Audit metadata only. Live, single-use authorizations exist solely in memory.
+  authorization?: {
+    id: string;
+    actionHash: string;
+    policyVersion: string;
+    issuedAt: number;
+    expiresAt: number;
+    consumedAt?: number;
+    invalidatedAt?: number;
+    invalidationReason?: string;
+  };
+  startedAt: number;
+  finishedAt?: number;
+}
 
 export interface RunConfig {
   model: string;
@@ -22,6 +84,10 @@ export interface RunConfig {
 
 export interface TurnNode {
   id: string;
+  /** In-place regeneration revision; legacy nodes start at zero. */
+  revision?: number;
+  /** An ancestor was regenerated; this answer must be regenerated before reuse. */
+  contextStale?: boolean;
   parentId: string | null;
   prompt: string;
   response: string;
@@ -34,8 +100,14 @@ export interface TurnNode {
   startedAt?: number;
   finishedAt?: number;
   error?: string;
-  usage?: { input: number; output: number; total: number; cost: number };
+  usage?: { input: number; output: number; total: number; cost?: number };
   requestId?: string;
+  execution?: {
+    workingDirectory?: string;
+    approvalMode: ApprovalMode;
+    safetyModel?: string;
+  };
+  toolCalls?: ToolCall[];
 }
 
 export interface Workspace {
@@ -45,6 +117,12 @@ export interface Workspace {
   createdAt: number;
   updatedAt: number;
   example: boolean;
+  /** Server-derived, stable default directory named after this workspace's ID. */
+  temporaryDirectory?: string;
+  /** Explicit user-selected directory; otherwise temporaryDirectory is used. */
+  workingDirectory?: string;
+  approvalMode?: ApprovalMode;
+  safetyModel?: string;
   nodes: TurnNode[];
 }
 
@@ -62,9 +140,21 @@ export interface ModelOption {
   providerName: string;
   available: boolean;
   demo: boolean;
+  default?: boolean;
   thinkingLevels: ThinkingLevel[];
   contextWindow: number;
   envVar?: string;
+}
+
+export interface WebCapabilities {
+  webFetch: boolean;
+  webSearch: boolean;
+  searchProvider: "Exa API" | "Exa MCP";
+  searchKeyEnv: "EXA_API_KEY";
+  searchKeyRequired: false;
+  plugin: "pi-web-access";
+  pluginVersion: "0.29.0";
+  pdfRead: boolean;
 }
 
 export const thinkingLabels: Record<ThinkingLevel, string> = {
