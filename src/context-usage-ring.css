@@ -5,6 +5,45 @@
   flex-shrink: 0;
   margin-left: 8px;
 }
+.card-context-summary {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  justify-content: center;
+  gap: 2px;
+  padding: 2px 0 2px 3px;
+  border: 0;
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: 8px;
+  line-height: 1.25;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.card-context-summary > span {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+}
+.card-context-summary > small {
+  font-size: 8px;
+  font-variant-numeric: tabular-nums;
+}
+.card-context-summary.compacted,
+.card-context-summary.compacting {
+  color: var(--text-accent-strong);
+}
+.card-context-summary.failed {
+  color: var(--error);
+}
+.card-context-summary.cancelled {
+  color: var(--warning);
+}
+.card-context-summary:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 2px;
+  border-radius: 3px;
+}
 .context-usage-ring {
   --context-usage-color: var(--text-accent-strong);
   position: relative;
@@ -16,7 +55,7 @@
   height: 30px;
   border-radius: 50%;
   color: var(--context-usage-color);
-  cursor: help;
+  cursor: default;
   user-select: none;
 }
 .context-usage-ring.warning {

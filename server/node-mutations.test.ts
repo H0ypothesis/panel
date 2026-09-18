@@ -462,7 +462,7 @@ test("an approval from an old revision cannot approve a reused tool ID in a rege
   await e.finish("needs tool");
 });
 
-test("node mutation API validates versions and subtree confirmation and exports no hidden run history", async (t) => {
+test("node mutation API hides transcripts in snapshots and preserves them in explicit JSON exports", async (t) => {
   const e = await setup(t);
   const api = createApi(e.store, e.runtime, e.scheduler);
   const call = async (method: string, path: string, body?: unknown) => {
@@ -515,10 +515,16 @@ test("node mutation API validates versions and subtree confirmation and exports 
   );
   const exported = await call("GET", "/export");
   assert.equal(exported.status, 200);
-  assert.doesNotMatch(
-    exported.output,
-    /previousRuns|"messages"|OLD_TRANSCRIPT/,
+  const exportedNode = JSON.parse(exported.output).workspace.nodes.find(
+    (node: StoredNode) => node.id === e.a.id,
   );
+  const currentNode = e.store
+    .workspace(e.workspace.id)
+    .nodes.find((node) => node.id === e.a.id)!;
+  assert.deepEqual(exportedNode.messages, currentNode.messages);
+  assert.deepEqual(exportedNode.previousRuns, currentNode.previousRuns);
+  assert.match(JSON.stringify(exportedNode.previousRuns), /OLD_TRANSCRIPT/);
+  assert.doesNotMatch(exported.output, /preparationRequest/);
   const stale = await call("DELETE", `/nodes/${e.a.id}`, {
     expectedRevision: 0,
     expectedNodeIds: [e.a.id, e.b.id, e.c.id],

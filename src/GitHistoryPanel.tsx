@@ -6,6 +6,7 @@ import {
   GitCommitHorizontal,
   History,
   LoaderCircle,
+  RotateCcw,
 } from "lucide-react";
 import type { GitHistoryEntry } from "../shared/types";
 import "./git-history.css";
@@ -43,7 +44,7 @@ export function GitHistoryPanel({
   nodeIds: string[];
   onLocate: (nodeId: string) => void;
 }) {
-  const [expanded, setExpanded] = useState(true);
+  const [expanded, setExpanded] = useState(false);
   const contentId = useId();
   const toggleRef = useRef<HTMLButtonElement>(null);
   const availableNodes = useMemo(() => new Set(nodeIds), [nodeIds]);
@@ -189,6 +190,15 @@ export function GitHistoryPanel({
                       {entry.interrupted && (
                         <span className="git-history-recovered">
                           中断后恢复的记录
+                        </span>
+                      )}
+                      {entry.restoredAt && (
+                        <span
+                          className="git-history-restored"
+                          title={`已于 ${new Date(entry.restoredAt).toLocaleString("zh-CN")} 恢复本轮文件修改`}
+                        >
+                          <RotateCcw size={11} aria-hidden="true" />
+                          已在原地重试前回溯
                         </span>
                       )}
                       <span className="git-history-node">

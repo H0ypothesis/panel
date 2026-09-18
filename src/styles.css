@@ -950,6 +950,23 @@ button {
 .react-flow {
   background: var(--canvas-background);
 }
+.graph-container > .react-flow {
+  isolation: isolate;
+}
+.graph-container > .react-flow > .react-flow__renderer {
+  isolation: isolate;
+}
+.graph-container > .react-flow > .react-flow__panel {
+  /* Keep fixed controls above the transformed canvas during compositing. */
+  z-index: 10;
+  isolation: isolate;
+}
+.graph-container > .react-flow > .react-flow__panel.left,
+.graph-container > .react-flow > .react-flow__panel.right {
+  /* Persistent layers prevent WebKit from reordering them while panning.
+     Centered panels keep React Flow's own positioning transform. */
+  transform: translateZ(0);
+}
 .react-flow__panel.top {
   top: 10px;
 }
@@ -1081,7 +1098,7 @@ button {
   bottom: auto;
   background: var(--minimap-background);
   border: 1px solid var(--line-strong);
-  border-radius: 6px;
+  border-radius: 6px 6px 0 0;
   overflow: hidden;
   box-shadow: 0 2px 8px var(--shadow-soft);
 }
@@ -1091,6 +1108,66 @@ button {
 }
 .canvas-minimap .react-flow__minimap-svg:active {
   cursor: grabbing;
+}
+.canvas-minimap .react-flow__minimap-node {
+  vector-effect: non-scaling-stroke;
+}
+.minimap-branch-sage {
+  --minimap-branch-color: var(--branch-green);
+}
+.minimap-branch-violet {
+  --minimap-branch-color: var(--branch-purple);
+}
+.minimap-branch-blue {
+  --minimap-branch-color: var(--branch-blue);
+}
+.minimap-branch-amber {
+  --minimap-branch-color: var(--branch-orange);
+}
+.canvas-minimap .minimap-node-running {
+  stroke-dasharray: 4 2;
+  filter: drop-shadow(0 0 14px var(--minimap-branch-color)) brightness(1.12);
+  animation: minimap-running-dash 1.8s linear infinite;
+}
+.react-flow__panel.canvas-minimap-legend {
+  top: 156px;
+  display: flex;
+  justify-content: center;
+  gap: 14px;
+  width: 168px;
+  min-height: 24px;
+  border: 1px solid var(--line-strong);
+  border-top: 0;
+  border-radius: 0 0 6px 6px;
+  background: var(--minimap-background);
+  color: var(--text-body);
+  font-size: 9px;
+  pointer-events: none;
+}
+.canvas-minimap-legend span {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+}
+.canvas-minimap-legend i {
+  width: 9px;
+  height: 7px;
+  border-radius: 1px;
+  background: var(--line-strong);
+}
+.minimap-legend-running {
+  border: 1px dashed var(--text-body);
+  box-shadow: 0 0 3px var(--text-secondary);
+}
+@keyframes minimap-running-dash {
+  to {
+    stroke-dashoffset: -12;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .canvas-minimap .minimap-node-running {
+    animation: none;
+  }
 }
 .empty-canvas-note {
   position: absolute;
@@ -1254,6 +1331,37 @@ button {
   -webkit-box-orient: vertical;
   overflow: hidden;
   height: 62px;
+}
+.status-failed .card-preview,
+.status-cancelled .card-preview {
+  -webkit-line-clamp: 1;
+  height: 21px;
+}
+.card-retry-button {
+  position: absolute;
+  left: 18px;
+  bottom: 48px;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  height: 26px;
+  padding: 0 9px;
+  border: 1px solid var(--branch-line);
+  border-radius: 5px;
+  background: var(--branch-bg);
+  color: var(--branch);
+  font-size: 10px;
+}
+.card-retry-button:hover:not(:disabled) {
+  border-color: var(--branch);
+}
+.card-retry-button:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 2px;
+}
+.card-retry-button:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
 }
 .card-footer {
   position: absolute;
@@ -3442,15 +3550,50 @@ button {
   gap: 6px;
   font-size: 10px;
   color: var(--text-secondary);
-  margin-bottom: 8px;
+  padding: 10px;
+  border: 1px solid var(--line-strong);
+  border-radius: 7px;
+  background: var(--surface-subtle);
+  cursor: pointer;
+  list-style: none;
+}
+.tool-activity-heading::-webkit-details-marker {
+  display: none;
+}
+.tool-activity-heading:hover {
+  background: var(--surface-hover);
 }
 .tool-activity-heading b {
   font-weight: 500;
+  white-space: nowrap;
 }
-.tool-activity-heading > span {
+.tool-activity-count {
   margin-left: auto;
   font-size: 9px;
   color: var(--text-muted);
+  white-space: nowrap;
+}
+.tool-activity-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  font-size: 9px;
+  white-space: nowrap;
+}
+.tool-activity-status.needs-approval {
+  color: var(--warning);
+}
+.tool-activity-status.in-progress {
+  color: var(--info);
+}
+.tool-activity-status.has-failure {
+  color: var(--error);
+}
+.tool-activity-disclosure[open] > summary .tool-activity-chevron {
+  transform: rotate(90deg);
+}
+.tool-activity-content {
+  padding-top: 10px;
 }
 .tool-working-directory {
   display: flex;

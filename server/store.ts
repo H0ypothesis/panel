@@ -5,28 +5,76 @@ import { join, resolve } from "node:path";
 import type { Message } from "@earendil-works/pi-ai";
 import type {
   AppState,
+  ContextCheckpoint,
   GitHistoryEntry,
   TurnNode,
   Workspace,
 } from "../shared/types.ts";
-import { GitSnapshots, type GitBaseline } from "./git-snapshots.ts";
+import {
+  GitSnapshots,
+  type GitBaseline,
+  type GitRestorePlan,
+} from "./git-snapshots.ts";
 import { exampleWorkspace } from "./seed.ts";
+import { snapshotRequestUsage } from "./request-context-usage.ts";
+import { preparedContextCheckpoints } from "./context.ts";
 import {
   prepareTemporaryDirectory,
+  existingTemporaryDirectory,
+  removeTemporaryDirectory,
   temporaryWorkspaceDirectory,
 } from "./directories.ts";
 
 export interface StoredNode extends TurnNode {
   messages?: Message[];
   previousRuns?: StoredRun[];
+  requestKind?: "retry";
+  contextSelectionRequest?: {
+    contextCheckpointId?: string;
+    contextMode?: "raw";
+  };
+  preparationRequest?: {
+    requestId: string;
+    config: TurnNode["config"];
+    revision: number;
+  };
+  preparationRequests?: ContextPreparationRequest[];
+}
+export interface ContextPreparationRequest {
+  requestId: string;
+  config: TurnNode["config"];
+  revision: number;
+  status: "compacting" | "completed" | "failed" | "cancelled";
+  checkpoint?: ContextCheckpoint;
+  error?: string;
 }
 export interface StoredRun extends TurnNode {
   messages?: Message[];
   archivedAt: number;
+  requestKind?: "retry";
+  contextSelectionRequest?: {
+    contextCheckpointId?: string;
+    contextMode?: "raw";
+  };
+  preparationRequests?: ContextPreparationRequest[];
+}
+export interface PendingNodeRetry {
+  nodeId: string;
+  expectedRevision: number;
+  requestId: string;
+  workingDirectory: string;
+  plan: GitRestorePlan;
+  historyIds: string[];
+  status: "restoring" | "restored" | "failed";
+  createdAt: number;
+  restoredAt?: number;
+  error?: string;
 }
 export interface StoredWorkspace extends Omit<Workspace, "nodes"> {
   nodes: StoredNode[];
   pendingGitSnapshots?: { historyId: string; baseline: GitBaseline }[];
+  pendingNodeRetry?: PendingNodeRetry;
+  pendingWorkspaceDeletion?: { deleteTemporaryDirectory: true };
 }
 interface Database {
   version: 1;
@@ -59,12 +107,26 @@ export class Store extends EventEmitter {
       this.data = parsed;
       for (const workspace of this.data.workspaces) {
         for (const node of workspace.nodes) {
+          for (const request of node.preparationRequests ?? []) {
+            if (request.status === "compacting") {
+              request.status = "failed";
+              request.error = "上下文压缩被服务重启中断，未自动重新调用模型。";
+            }
+          }
+          for (const state of [node.contextState, node.preparedContextState]) {
+            if (state?.status === "compacting") {
+              state.status = "failed";
+              state.error = "上下文压缩被服务重启中断，未自动重新调用模型。";
+              state.updatedAt = Date.now();
+            }
+          }
           if (node.status === "running" || node.status === "queued") {
             node.status = "failed";
-            node.error = "运行被服务重启中断。请从父节点重新生成。";
+            node.error = "运行被服务重启中断。可以在当前卡片原地重试。";
             node.finishedAt = Date.now();
           }
           for (const call of node.toolCalls ?? []) {
+            call.waitingFor = undefined;
             if (
               call.status === "awaiting_approval" ||
               call.status === "reviewing" ||
@@ -105,6 +167,22 @@ export class Store extends EventEmitter {
           }
         }
       }
+      // Finish only a journaled filesystem restoration. Never replay a model or
+      // tool on startup; the failed card waits for an explicit retry request.
+      for (const workspace of this.data.workspaces) {
+        const pending = workspace.pendingNodeRetry;
+        if (!pending) continue;
+        try {
+          await this.gitSnapshots.applyRestore(pending.plan);
+          pending.status = "restored";
+          pending.error = undefined;
+          pending.restoredAt ??= Date.now();
+          this.markGitHistoryRestored(workspace, pending);
+        } catch (error) {
+          pending.status = "failed";
+          pending.error = `文件回溯未完成：${error instanceof Error ? error.message : String(error)}；未启动原地重试。`;
+        }
+      }
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
       if (seed) this.data.workspaces = [exampleWorkspace()];
@@ -118,12 +196,40 @@ export class Store extends EventEmitter {
       revision: this.data.revision,
       storageError: this.storageError,
       workspaces: this.data.workspaces.map(
-        ({ pendingGitSnapshots: _pending, ...workspace }) => ({
+        ({
+          pendingGitSnapshots: _pending,
+          pendingNodeRetry,
+          pendingWorkspaceDeletion: _deletion,
+          ...workspace
+        }) => ({
           ...workspace,
           temporaryDirectory: this.temporaryDirectory(workspace),
           nodes: workspace.nodes.map(
-            ({ messages: _messages, previousRuns: _previousRuns, ...node }) =>
-              node,
+            ({
+              messages: _messages,
+              previousRuns: _previousRuns,
+              requestKind: _requestKind,
+              contextSelectionRequest: _contextSelectionRequest,
+              preparationRequest: _preparationRequest,
+              preparationRequests: _preparationRequests,
+              ...node
+            }) => ({
+              ...node,
+              preparedCompactions: preparedContextCheckpoints({
+                ...node,
+                preparationRequests: _preparationRequests,
+              }),
+              lastRequestUsage: snapshotRequestUsage(node, _messages),
+              ...(pendingNodeRetry?.nodeId === node.id
+                ? {
+                    retryRestore: {
+                      requestId: pendingNodeRetry.requestId,
+                      status: pendingNodeRetry.status,
+                      error: pendingNodeRetry.error,
+                    },
+                  }
+                : {}),
+            }),
           ),
         }),
       ),
@@ -134,13 +240,34 @@ export class Store extends EventEmitter {
     return (this.snapshots ??= new GitSnapshots(this.directory));
   }
 
+  markGitHistoryRestored(
+    workspace: StoredWorkspace,
+    pending: PendingNodeRetry,
+  ) {
+    const ids = new Set(pending.historyIds);
+    for (const entry of workspace.gitHistory ?? []) {
+      if (!ids.has(entry.id)) continue;
+      entry.restoredAt = pending.restoredAt ?? Date.now();
+      entry.restoredByRequestId = pending.requestId;
+    }
+  }
+
   async finishGitSnapshot(
     workspace: StoredWorkspace,
     entry: GitHistoryEntry,
     baseline?: GitBaseline,
   ) {
+    const node = workspace.nodes.find((item) => item.id === entry.nodeId);
+    const run =
+      (node?.revision ?? 0) === entry.nodeRevision
+        ? node
+        : node?.previousRuns?.find(
+            (item) => (item.revision ?? 0) === entry.nodeRevision,
+          );
+    const call = run?.toolCalls?.find((item) => item.id === entry.toolCallId);
     try {
       if (!baseline) {
+        if (call) call.fileSnapshot = "failed";
         entry.status = "failed";
         entry.error ??= "未能创建操作前快照，文件更新可能已执行。";
         return;
@@ -150,6 +277,7 @@ export class Store extends EventEmitter {
         `Panel ${entry.toolName}: ${entry.nodeId} (revision ${entry.nodeRevision}, tool ${entry.toolCallId})`,
       );
       if (!result) {
+        if (call) call.fileSnapshot = "unchanged";
         workspace.gitHistory = workspace.gitHistory?.filter(
           (item) => item.id !== entry.id,
         );
@@ -161,7 +289,9 @@ export class Store extends EventEmitter {
           ? `服务中断后恢复 · ${result.files.length} 个文件`
           : `${entry.toolName === "write" ? "写入" : entry.toolName === "edit" ? "编辑" : "命令更新"} · ${result.files.length} 个文件`,
       });
+      if (call) call.fileSnapshot = "recorded";
     } catch (error) {
+      if (call) call.fileSnapshot = "failed";
       entry.status = "failed";
       entry.error = `Git 快照保存失败，文件更新可能已执行：${error instanceof Error ? error.message : "未知错误"}`;
     } finally {
@@ -194,21 +324,41 @@ export class Store extends EventEmitter {
     );
   }
 
+  existingTemporaryDirectory(workspace: StoredWorkspace) {
+    return existingTemporaryDirectory(this.directory, workspace.id);
+  }
+
+  removeTemporaryDirectory(workspace: StoredWorkspace) {
+    return removeTemporaryDirectory(this.directory, workspace.id);
+  }
+
   touch(workspace?: StoredWorkspace) {
     this.data.revision++;
     if (workspace) workspace.updatedAt = Date.now();
     this.emit("change");
   }
 
-  async save(settings?: {
-    workspace: StoredWorkspace;
-    values: Partial<
-      Pick<
-        StoredWorkspace,
-        "workingDirectory" | "approvalMode" | "safetyModel" | "nodes"
-      >
-    >;
-  }) {
+  async save(
+    settings?:
+      | {
+          workspace: StoredWorkspace;
+          values: Partial<
+            Pick<
+              StoredWorkspace,
+              | "workingDirectory"
+              | "approvalMode"
+              | "safetyModel"
+              | "autoCompact"
+              | "nodes"
+              | "pendingNodeRetry"
+              | "gitHistory"
+              | "pendingWorkspaceDeletion"
+            >
+          >;
+        }
+      | { workspace: StoredWorkspace; deleteWorkspace: true; values?: never }
+      | { workspace: StoredWorkspace; createWorkspace: true; values?: never },
+  ) {
     const write = this.writes
       .catch(() => {})
       .then(async () => {
@@ -219,11 +369,22 @@ export class Store extends EventEmitter {
           ? {
               ...this.data,
               revision: this.data.revision + 1,
-              workspaces: this.data.workspaces.map((workspace) =>
-                workspace === settings.workspace
-                  ? { ...workspace, ...settings.values, updatedAt: Date.now() }
-                  : workspace,
-              ),
+              workspaces:
+                "deleteWorkspace" in settings
+                  ? this.data.workspaces.filter(
+                      (workspace) => workspace !== settings.workspace,
+                    )
+                  : "createWorkspace" in settings
+                    ? [settings.workspace, ...this.data.workspaces]
+                    : this.data.workspaces.map((workspace) =>
+                        workspace === settings.workspace
+                          ? {
+                              ...workspace,
+                              ...settings.values,
+                              updatedAt: Date.now(),
+                            }
+                          : workspace,
+                      ),
             }
           : this.data;
         const serialized = JSON.stringify(data);
@@ -231,8 +392,18 @@ export class Store extends EventEmitter {
         await writeFile(temp, serialized, { mode: 0o600 });
         await rename(temp, join(this.directory, "state.json"));
         if (settings) {
-          Object.assign(settings.workspace, settings.values);
-          this.touch(settings.workspace);
+          if ("deleteWorkspace" in settings) {
+            this.data.workspaces = this.data.workspaces.filter(
+              (workspace) => workspace !== settings.workspace,
+            );
+            this.touch();
+          } else if ("createWorkspace" in settings) {
+            this.data.workspaces.unshift(settings.workspace);
+            this.touch();
+          } else {
+            Object.assign(settings.workspace, settings.values);
+            this.touch(settings.workspace);
+          }
         }
       });
     this.writes = write;

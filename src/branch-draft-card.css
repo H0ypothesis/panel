@@ -1,4 +1,5 @@
 .graph-container.has-branch-draft .canvas-minimap,
+.graph-container.has-branch-draft .canvas-minimap-legend,
 .graph-container.has-branch-draft .canvas-git-history {
   display: none;
 }

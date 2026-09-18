@@ -33,6 +33,7 @@ import {
   PanelLeftClose,
   PanelLeftOpen,
   Plus,
+  RefreshCw,
   Search,
   Settings2,
   ShieldQuestion,
@@ -65,16 +66,29 @@ import {
 import { Graph, StatusIcon } from "./Graph";
 import { ResizableWorkspace } from "./ResizableWorkspace";
 import { ToolActivity } from "./CodingControls";
+import { ContextCompression } from "./ContextCompression";
+import {
+  checkpointMatchesPath,
+  compressionNodeId,
+  preparedCheckpoints,
+} from "../shared/context-graph";
 import {
   ComposerModelControls,
   RootDirectoryCard,
   WorkbenchControls,
 } from "./WorkspaceControls";
 import { useTheme, type ThemePreference } from "./useTheme";
-import { estimatePathContextTokens } from "../shared/context-usage";
+import { useCollapsibleComposer } from "./useCollapsibleComposer";
+import "./composer-collapse.css";
+import {
+  contextUsageForNode,
+  estimatePathContextTokens,
+} from "../shared/context-usage";
 import { formatContextWindow } from "./model-context";
 import type { CanvasBranchDraft } from "./branch-draft";
 import { BrandHint } from "./BrandHint";
+import { DeleteWorkspaceDialog } from "./DeleteWorkspaceDialog";
+import { NewWorkspace } from "./NewWorkspace";
 import { getDesktopBridge, onDesktopAction } from "./desktop";
 import {
   NodeActionsDialog,
@@ -128,6 +142,21 @@ export function App() {
     "new" | "settings" | "help" | "directory" | null
   >(null);
   const [changingApproval, setChangingApproval] = useState(false);
+  const [changingAutoCompact, setChangingAutoCompact] = useState<
+    Record<string, boolean>
+  >({});
+  const autoCompactLocks = useRef(new Set<string>());
+  const [compactingPaths, setCompactingPaths] = useState<
+    Record<string, boolean>
+  >({});
+  const compactionLocks = useRef(new Set<string>());
+  const compactionRequestIds = useRef(new Map<string, string>());
+  const [selectedCompression, setSelectedCompression] = useState<{
+    workspaceId: string;
+    parentId: string;
+    revision: number;
+    checkpointId: string;
+  } | null>(null);
   const [safetyModelRequired, setSafetyModelRequired] = useState(false);
   const [directoryDirty, setDirectoryDirty] = useState(false);
   const [directoryBusy, setDirectoryBusy] = useState(false);
@@ -141,7 +170,7 @@ export function App() {
   const [exportOpen, setExportOpen] = useState(false);
   const [tab, setTab] = useState<"conversation" | "context">("conversation");
   const [drafts, setDrafts] = useState<
-    Record<string, { text: string; requestId: string }>
+    Record<string, { text: string; requestId: string; contextMode?: "raw" }>
   >({});
   const [config, setConfig] = useState<RunConfig>({ ...DEFAULT_CONFIG });
   const configSelection = useRef({ nodeId: "", revision: -1, resolved: false });
@@ -157,6 +186,11 @@ export function App() {
     null,
   );
   const [nodeAction, setNodeAction] = useState<NodeActionTarget | null>(null);
+  const [workspaceToDelete, setWorkspaceToDelete] = useState<Workspace | null>(
+    null,
+  );
+  const [retryingId, setRetryingId] = useState<string | null>(null);
+  const retryRequestIds = useRef(new Map<string, string>());
   const [sidebar, setSidebar] = useState(window.innerWidth > 1000);
   const [headingCollapsed, setHeadingCollapsed] = useState(
     () => readPreference("heading-collapsed") === "true",
@@ -259,23 +293,35 @@ export function App() {
       : canvasParent.contextStale ||
           (canvasParent.revision ?? 0) !== canvasDraft.parentRevision
         ? "来源上下文已更新，请点击来源节点的加号重新确认。"
-        : canvasParent.status !== "root" && canvasParent.status !== "completed"
-          ? "请等待来源节点完成后再生成分支。"
-          : !online
-            ? "连接已断开，恢复连接后可继续生成。"
-            : directoryDirty || directoryBusy
-              ? "请先完成工作目录设置。"
-              : changingApproval
-                ? "正在保存审批设置，请稍候。"
-                : submitting && canvasSubmittingId !== canvasDraft.id
-                  ? "另一条问题正在提交，请稍候。"
-                  : !canvasModel?.available
-                    ? "请选择一个已连接的模型。"
-                    : !canvasModel.thinkingLevels.includes(
-                          canvasDraft.config.thinking,
-                        )
-                      ? "请选择该模型支持的思考深度。"
-                      : "";
+        : canvasDraft.contextCheckpointId &&
+            !preparedCheckpoints(canvasParent).some(
+              (checkpoint) =>
+                checkpoint.id === canvasDraft.contextCheckpointId &&
+                checkpointMatchesPath(
+                  checkpoint,
+                  workspace!.nodes,
+                  canvasParent.id,
+                ),
+            )
+          ? "此压缩节点已失效，请取消草稿后重新选择来源。"
+          : canvasParent.status !== "root" &&
+              canvasParent.status !== "completed"
+            ? "请等待来源节点完成后再生成分支。"
+            : !online
+              ? "连接已断开，恢复连接后可继续生成。"
+              : directoryDirty || directoryBusy
+                ? "请先完成工作目录设置。"
+                : changingApproval
+                  ? "正在保存审批设置，请稍候。"
+                  : submitting && canvasSubmittingId !== canvasDraft.id
+                    ? "另一条问题正在提交，请稍候。"
+                    : !canvasModel?.available
+                      ? "请选择一个已连接的模型。"
+                      : !canvasModel.thinkingLevels.includes(
+                            canvasDraft.config.thinking,
+                          )
+                        ? "请选择该模型支持的思考深度。"
+                        : "";
   const selected =
     workspace?.nodes.find((node) => node.id === selectedId) ??
     workspace?.nodes[0];
@@ -284,8 +330,75 @@ export function App() {
   const canBranch =
     !selected?.contextStale &&
     (selected?.status === "root" || selected?.status === "completed");
-  const draftKey = `${workspace?.id}:${selected?.id}`;
+  const canRetry =
+    selected?.status === "failed" || selected?.status === "cancelled";
+  const retryDisabledReason = !online
+    ? "连接已断开，恢复连接后可原地重试。"
+    : directoryDirty || directoryBusy
+      ? "请先完成工作目录设置。"
+      : changingApproval
+        ? "正在保存审批设置，请稍候。"
+        : submitting
+          ? "当前操作正在提交，请稍候。"
+          : "";
+  const selectedRetryBusy =
+    retryingId === selected?.id ||
+    selected?.retryRestore?.status === "restoring";
+  const selectedRetryDisabledReason =
+    selected?.retryRestore?.status === "restoring"
+      ? "正在恢复本轮修改的文件，请稍候。"
+      : retryDisabledReason;
+  const selectedPreparedCheckpoint =
+    selectedCompression &&
+    workspace &&
+    selected &&
+    selectedCompression.workspaceId === workspace.id &&
+    selectedCompression.parentId === selected.id &&
+    selectedCompression.revision === (selected.revision ?? 0)
+      ? preparedCheckpoints(selected).find(
+          (checkpoint) => checkpoint.id === selectedCompression.checkpointId,
+        )
+      : undefined;
+  const selectedContextCheckpointId =
+    selectedPreparedCheckpoint &&
+    workspace &&
+    selected &&
+    selected.status === "completed" &&
+    checkpointMatchesPath(
+      selectedPreparedCheckpoint,
+      workspace.nodes,
+      selected.id,
+    )
+      ? selectedPreparedCheckpoint.id
+      : undefined;
+  const selectedRawContext =
+    !!selected &&
+    !selectedContextCheckpointId &&
+    preparedCheckpoints(selected).length > 0;
+  const draftKey = `${workspace?.id}:${selected?.id}:${selectedContextCheckpointId ?? "path"}`;
+  // Keep text attached to the card when its first compression point appears.
+  // Only renew the idempotency key if that card's submission mode changes.
+  useEffect(() => {
+    const contextMode = selectedRawContext ? ("raw" as const) : undefined;
+    setDrafts((current) => {
+      const existing = current[draftKey];
+      if (!existing || existing.contextMode === contextMode) return current;
+      return {
+        ...current,
+        [draftKey]: {
+          ...existing,
+          contextMode,
+          requestId: crypto.randomUUID(),
+        },
+      };
+    });
+  }, [draftKey, selectedRawContext]);
   const draft = drafts[draftKey]?.text ?? "";
+  const composer = useCollapsibleComposer(
+    `${draftKey}:${selected?.revision ?? 0}`,
+    Boolean(canBranch),
+    inputRef,
+  );
   const model = models.find((item) => item.id === config.model);
   const selectedModel = models.find(
     (item) => item.id === selected?.config.model,
@@ -304,6 +417,9 @@ export function App() {
       : defaultModel?.thinkingLevels[0];
   const path =
     workspace && selected ? ancestorPath(workspace.nodes, selected.id) : [];
+  const contextScope = `${workspace?.id}:${selected?.id}:${selected?.revision ?? 0}`;
+  const currentContextScope = useRef(contextScope);
+  currentContextScope.current = contextScope;
   const staleAncestor = path.slice(0, -1).find((node) => node.contextStale);
   const activeCount =
     state?.workspaces
@@ -343,7 +459,6 @@ export function App() {
         resolved: selected.status !== "root",
       };
       setConfig({ ...selected.config });
-      setTab("conversation");
       detailRef.current?.scrollTo({ top: 0 });
       savePreference("node", selected.id);
     }
@@ -366,23 +481,38 @@ export function App() {
   }, [workspace?.id, selected?.id]);
   useEffect(() => {
     if (
+      state &&
+      workspaceToDelete &&
+      !state.workspaces.some((item) => item.id === workspaceToDelete.id)
+    )
+      setWorkspaceToDelete(null);
+  }, [state, workspaceToDelete]);
+  useEffect(() => {
+    if (
       !approvalFocus ||
       selected?.id !== approvalFocus.nodeId ||
       tab !== "conversation"
     )
       return;
     const frame = requestAnimationFrame(() => {
-      detailRef.current
-        ?.querySelector(
-          `[data-tool-call-id="${CSS.escape(approvalFocus.toolId)}"]`,
-        )
-        ?.scrollIntoView({ block: "start" });
+      const call = detailRef.current?.querySelector<HTMLElement>(
+        `[data-tool-call-id="${CSS.escape(approvalFocus.toolId)}"]`,
+      );
+      if (!call) return;
+      const activity = call.closest<HTMLDetailsElement>(
+        ".tool-activity-disclosure",
+      );
+      if (activity) activity.open = true;
+      const details = call.querySelector("details");
+      if (details) details.open = true;
+      call.scrollIntoView({ block: "start" });
+      setApprovalFocus(null);
     });
     return () => cancelAnimationFrame(frame);
   }, [approvalFocus, selected?.id, tab]);
   useEffect(() => {
     const handle = (event: KeyboardEvent) => {
-      if (modal === "directory" || nodeAction) return;
+      if (modal === "directory" || nodeAction || workspaceToDelete) return;
       if (event.key === "Escape") {
         setModal(null);
         setSearchOpen(false);
@@ -396,19 +526,27 @@ export function App() {
       }
       if (
         event.key.toLowerCase() === "b" &&
+        !event.metaKey &&
+        !event.ctrlKey &&
+        !event.altKey &&
+        !event.isComposing &&
         !(event.target instanceof HTMLInputElement) &&
         !(event.target instanceof HTMLTextAreaElement) &&
+        !(event.target instanceof HTMLSelectElement) &&
+        !(
+          event.target instanceof HTMLElement && event.target.isContentEditable
+        ) &&
         !modal
       )
-        inputRef.current?.focus();
+        composer.expand();
     };
     document.addEventListener("keydown", handle);
     return () => document.removeEventListener("keydown", handle);
-  }, [modal, closeSidebar, nodeAction]);
+  }, [modal, closeSidebar, nodeAction, workspaceToDelete, composer.expand]);
   useEffect(
     () =>
       onDesktopAction((action) => {
-        if (!state || modal || nodeAction) return;
+        if (!state || modal || nodeAction || workspaceToDelete) return;
         setExportOpen(false);
         if (action === "new-workspace") {
           setSearchOpen(false);
@@ -418,15 +556,38 @@ export function App() {
           requestAnimationFrame(() => searchRef.current?.focus());
         }
       }),
-    [state, modal, nodeAction],
+    [state, modal, nodeAction, workspaceToDelete],
   );
 
   const select = useCallback((id: string) => {
     setSelectedId(id);
+    setSelectedCompression(null);
     setTab("conversation");
   }, []);
+  const showCompression = useCallback(
+    (parentId: string, checkpointId: string) => {
+      const source = workspace?.nodes.find((node) => node.id === parentId);
+      if (!workspace || !source) return;
+      setSelectedId(parentId);
+      setSelectedCompression({
+        workspaceId: workspace.id,
+        parentId,
+        revision: source.revision ?? 0,
+        checkpointId,
+      });
+      setTab("context");
+    },
+    [workspace],
+  );
+  const locateCompression = (parentId: string, checkpointId: string) => {
+    showCompression(parentId, checkpointId);
+    setFocus((current) => ({
+      id: compressionNodeId(parentId, checkpointId),
+      version: current.version + 1,
+    }));
+  };
   const branch = useCallback(
-    (id: string) => {
+    (id: string, contextCheckpointId?: string) => {
       if (!workspace || submissionLock.current) return;
       const source = workspace.nodes.find((node) => node.id === id);
       if (
@@ -435,7 +596,22 @@ export function App() {
         (source.status !== "root" && source.status !== "completed")
       )
         return;
-      const key = `${workspace.id}:${id}`;
+      const checkpoint = contextCheckpointId
+        ? preparedCheckpoints(source).find(
+            (item) => item.id === contextCheckpointId,
+          )
+        : undefined;
+      if (
+        contextCheckpointId &&
+        (!checkpoint || !checkpointMatchesPath(checkpoint, workspace.nodes, id))
+      )
+        return;
+      const contextMode =
+        !contextCheckpointId && preparedCheckpoints(source).length
+          ? ("raw" as const)
+          : undefined;
+      const originKey = `${id}:${contextCheckpointId ?? "path"}`;
+      const key = `${workspace.id}:${originKey}`;
       const initial =
         id === selected?.id
           ? config
@@ -456,6 +632,8 @@ export function App() {
             id: existing?.id ?? `draft-${crypto.randomUUID()}`,
             workspaceId: workspace.id,
             parentId: id,
+            contextCheckpointId,
+            contextMode,
             parentRevision: source.revision ?? 0,
             parentTitle: source.prompt,
             parentPosition: { ...source.position },
@@ -471,7 +649,9 @@ export function App() {
                 : (initialModel?.thinkingLevels[0] ?? initial.thinking),
             },
             requestId:
-              existing && existing.parentRevision === (source.revision ?? 0)
+              existing &&
+              existing.parentRevision === (source.revision ?? 0) &&
+              existing.contextMode === contextMode
                 ? existing.requestId
                 : crypto.randomUUID(),
             error: "",
@@ -479,8 +659,12 @@ export function App() {
           },
         };
       });
-      setCanvasDraftParents((current) => ({ ...current, [workspace.id]: id }));
-      select(id);
+      setCanvasDraftParents((current) => ({
+        ...current,
+        [workspace.id]: originKey,
+      }));
+      if (contextCheckpointId) showCompression(id, contextCheckpointId);
+      else select(id);
     },
     [
       workspace,
@@ -490,6 +674,7 @@ export function App() {
       defaultThinking,
       models,
       select,
+      showCompression,
     ],
   );
   const changeCanvasDraft = (
@@ -542,6 +727,8 @@ export function App() {
           prompt: submitted.text,
           config: submitted.config,
           requestId: submitted.requestId,
+          contextCheckpointId: submitted.contextCheckpointId,
+          contextMode: submitted.contextMode,
         },
       );
       apply(result.state);
@@ -600,7 +787,11 @@ export function App() {
   const setDraft = (text: string) =>
     setDrafts((current) => ({
       ...current,
-      [draftKey]: { text, requestId: crypto.randomUUID() },
+      [draftKey]: {
+        text,
+        requestId: crypto.randomUUID(),
+        contextMode: selectedRawContext ? "raw" : undefined,
+      },
     }));
 
   const changeConfig = (next: RunConfig) => {
@@ -611,6 +802,7 @@ export function App() {
       [draftKey]: {
         text: current[draftKey]?.text ?? "",
         requestId: crypto.randomUUID(),
+        contextMode: selectedRawContext ? "raw" : undefined,
       },
     }));
   };
@@ -639,7 +831,17 @@ export function App() {
     try {
       const result = await api<MutationResult>(
         `/workspaces/${workspace.id}/nodes`,
-        { parentId: selected.id, prompt: draft, config, requestId },
+        {
+          parentId: selected.id,
+          prompt: draft,
+          config,
+          requestId,
+          ...(selectedContextCheckpointId
+            ? { contextCheckpointId: selectedContextCheckpointId }
+            : selectedRawContext
+              ? { contextMode: "raw" }
+              : {}),
+        },
       );
       apply(result.state);
       setDrafts((current) =>
@@ -662,18 +864,81 @@ export function App() {
     }
   };
 
-  const retry = () => {
+  const retryInPlace = async (nodeId: string) => {
+    if (!workspace || submissionLock.current || retryDisabledReason) return;
+    const node = workspace.nodes.find((item) => item.id === nodeId);
+    if (
+      !node ||
+      !["failed", "cancelled"].includes(node.status) ||
+      node.retryRestore?.status === "restoring"
+    )
+      return;
+    const expectedRevision = node.revision ?? 0;
+    const key = `${workspace.id}:${node.id}:${expectedRevision}`;
+    const requestId =
+      node.retryRestore?.requestId ??
+      retryRequestIds.current.get(key) ??
+      crypto.randomUUID();
+    // Retain the same id if a response is lost after the server accepts the retry.
+    retryRequestIds.current.set(key, requestId);
+    submissionLock.current = true;
+    setSubmitting(true);
+    setRetryingId(node.id);
+    setError("");
+    select(node.id);
+    try {
+      const result = await api<MutationResult>(
+        `/workspaces/${workspace.id}/nodes/${node.id}/retry`,
+        { requestId, expectedRevision },
+      );
+      apply(result.state);
+      retryRequestIds.current.delete(key);
+      if (currentWorkspaceId.current === workspace.id) {
+        select(node.id);
+        setFocus((current) => ({ id: node.id, version: current.version + 1 }));
+      }
+    } catch (reason) {
+      fail(reason);
+    } finally {
+      submissionLock.current = false;
+      setSubmitting(false);
+      setRetryingId(null);
+    }
+  };
+
+  const retryAsBranch = () => {
     if (!parent || !selected || !workspace) return;
-    const key = `${workspace.id}:${parent.id}`;
+    const checkpointId = selected.requestedContextCheckpointId;
+    if (
+      checkpointId &&
+      !preparedCheckpoints(parent).some(
+        (checkpoint) =>
+          checkpoint.id === checkpointId &&
+          checkpointMatchesPath(checkpoint, workspace.nodes, parent.id),
+      )
+    ) {
+      fail(new Error("原分支使用的摘要已失效，请重新选择上下文来源。"));
+      return;
+    }
+    const origin = checkpointId ?? "path";
+    const key = `${workspace.id}:${parent.id}:${origin}`;
     setDrafts((current) => ({
       ...current,
-      [key]: { text: selected.prompt, requestId: crypto.randomUUID() },
+      [key]: {
+        text: selected.prompt,
+        requestId: crypto.randomUUID(),
+        contextMode:
+          !checkpointId && preparedCheckpoints(parent).length
+            ? "raw"
+            : undefined,
+      },
     }));
-    select(parent.id);
+    if (checkpointId) showCompression(parent.id, checkpointId);
+    else select(parent.id);
     requestAnimationFrame(() => {
       configSelection.current.resolved = true;
       setConfig({ ...selected.config });
-      inputRef.current?.focus();
+      composer.expand();
     });
   };
 
@@ -731,6 +996,84 @@ export function App() {
       fail(reason);
     } finally {
       setChangingApproval(false);
+    }
+  };
+
+  const changeAutoCompact = async (autoCompact: boolean) => {
+    if (!workspace || autoCompactLocks.current.has(workspace.id)) return;
+    const id = workspace.id;
+    autoCompactLocks.current.add(id);
+    setChangingAutoCompact((current) => ({ ...current, [id]: true }));
+    try {
+      apply(await api<AppState>(`/workspaces/${id}`, { autoCompact }, "PATCH"));
+    } catch (reason) {
+      fail(reason);
+    } finally {
+      autoCompactLocks.current.delete(id);
+      setChangingAutoCompact((current) => {
+        const next = { ...current };
+        delete next[id];
+        return next;
+      });
+    }
+  };
+
+  const generateContextSummary = async () => {
+    if (
+      !workspace ||
+      !selected ||
+      selected.status !== "completed" ||
+      selected.contextStale ||
+      !online ||
+      !model?.available ||
+      model.demo ||
+      compactionLocks.current.has(contextScope) ||
+      selected.preparedContextState?.status === "compacting"
+    )
+      return;
+    const scope = contextScope;
+    const requestKey = `${scope}:${config.model}:${config.thinking}`;
+    const previousStatus = selected.preparedContextState?.status;
+    if (previousStatus === "failed" || previousStatus === "cancelled")
+      compactionRequestIds.current.delete(requestKey);
+    const requestId =
+      compactionRequestIds.current.get(requestKey) ?? crypto.randomUUID();
+    compactionRequestIds.current.set(requestKey, requestId);
+    compactionLocks.current.add(scope);
+    setCompactingPaths((current) => ({ ...current, [scope]: true }));
+    try {
+      const result = await api<MutationResult & { checkpointId?: string }>(
+        `/workspaces/${workspace.id}/nodes/${selected.id}/compact`,
+        { config, expectedRevision: selected.revision ?? 0, requestId },
+      );
+      apply(result.state);
+      compactionRequestIds.current.delete(requestKey);
+      if (result.checkpointId && currentContextScope.current === scope) {
+        locateCompression(selected.id, result.checkpointId);
+      }
+    } catch (reason) {
+      fail(reason);
+    } finally {
+      compactionLocks.current.delete(scope);
+      setCompactingPaths((current) => {
+        const next = { ...current };
+        delete next[scope];
+        return next;
+      });
+    }
+  };
+
+  const cancelContextSummary = async () => {
+    if (!workspace || !selected || !online) return;
+    try {
+      apply(
+        await api<AppState>(
+          `/workspaces/${workspace.id}/nodes/${selected.id}/cancel`,
+          {},
+        ),
+      );
+    } catch (reason) {
+      fail(reason);
     }
   };
 
@@ -793,6 +1136,71 @@ export function App() {
     }
   };
 
+  const workspaceModal = modal && modal !== "directory" && (
+    <div className="modal-backdrop" onClick={() => setModal(null)}>
+      <section
+        className="modal"
+        role="dialog"
+        aria-modal="true"
+        aria-label={
+          modal === "new"
+            ? "新建探索"
+            : modal === "settings"
+              ? "模型连接"
+              : "使用指南"
+        }
+        onClick={(event) => event.stopPropagation()}
+      >
+        <button
+          className="modal-close icon-button"
+          aria-label="关闭弹窗"
+          onClick={() => setModal(null)}
+        >
+          <X size={19} />
+        </button>
+        {modal === "new" ? (
+          <NewWorkspace
+            onCreated={(result) => {
+              apply(result.state);
+              setWorkspaceId(result.workspaceId!);
+              setSelectedId(
+                result.state.workspaces
+                  .find((item) => item.id === result.workspaceId)
+                  ?.nodes.find((node) => node.parentId === null)?.id ?? null,
+              );
+              setFocus({ id: null, version: 0 });
+              setModal(null);
+              if (window.innerWidth <= 1000) closeSidebar();
+            }}
+          />
+        ) : modal === "settings" ? (
+          <Settings models={models} webCapabilities={webCapabilities} />
+        ) : (
+          <Help />
+        )}
+      </section>
+    </div>
+  );
+
+  if (state && state.workspaces.length === 0)
+    return (
+      <div className="workspace-empty-screen">
+        <Logo />
+        <h1>还没有探索空间</h1>
+        <p>从一个问题开始，创建新的探索。</p>
+        {error && (
+          <div className="inline-error" role="alert">
+            {error}
+          </div>
+        )}
+        <button className="primary-button" onClick={() => setModal("new")}>
+          <Plus size={16} />
+          新建探索
+        </button>
+        {workspaceModal}
+      </div>
+    );
+
   if (!workspace || !selected || !state)
     return (
       <div className="loading-screen">
@@ -817,6 +1225,14 @@ export function App() {
   );
   const contextNodes = canBranch ? path : path.slice(0, -1);
   const contextEstimate = estimatePathContextTokens(contextNodes);
+  const selectedContextUsage = contextUsageForNode(
+    selected,
+    estimatePathContextTokens(path),
+    selected.status === "root"
+      ? model?.contextWindow
+      : selectedModel?.contextWindow,
+    path.some((node) => Boolean(node.contextStale)),
+  );
 
   return (
     <div className={`workbench ${sidebar ? "" : "sidebar-hidden"}`}>
@@ -863,44 +1279,58 @@ export function App() {
         </div>
         <nav className="workspace-list" aria-label="探索空间">
           {state.workspaces.map((item) => (
-            <button
-              key={item.id}
-              className={`workspace-item ${item.id === workspace.id ? "selected" : ""}`}
-              onClick={() => {
-                setWorkspaceId(item.id);
-                setSelectedId(item.nodes[0].id);
-                setFocus({ id: null, version: 0 });
-                if (window.innerWidth <= 1000) closeSidebar();
-              }}
-            >
-              <Network size={16} />
-              <span>
-                {item.title}
-                <small>
-                  {item.nodes.length} 个节点{" "}
-                  {item.nodes.some((node) =>
-                    node.toolCalls?.some(
-                      (call) => call.status === "awaiting_approval",
-                    ),
-                  )
-                    ? "· 等待批准"
-                    : item.nodes.some((node) =>
-                          node.toolCalls?.some(
-                            (call) => call.status === "reviewing",
-                          ),
-                        )
-                      ? "· 安全审核中"
-                      : item.workingDirectory
-                        ? "· 本地项目"
-                        : item.example
-                          ? "· 示例探索"
-                          : "· 临时目录"}
-                </small>
-              </span>
-              {item.nodes.some((node) => node.status === "running") && (
-                <span className="tiny-green-dot pulse" />
-              )}
-            </button>
+            <div className="workspace-row" key={item.id}>
+              <button
+                className={`workspace-item ${item.id === workspace.id ? "selected" : ""}`}
+                onClick={() => {
+                  setWorkspaceId(item.id);
+                  setSelectedId(item.nodes[0].id);
+                  setFocus({ id: null, version: 0 });
+                  if (window.innerWidth <= 1000) closeSidebar();
+                }}
+              >
+                <Network size={16} />
+                <span>
+                  {item.title}
+                  <small>
+                    {item.nodes.length} 个节点{" "}
+                    {item.nodes.some((node) =>
+                      node.toolCalls?.some(
+                        (call) => call.status === "awaiting_approval",
+                      ),
+                    )
+                      ? "· 等待批准"
+                      : item.nodes.some((node) =>
+                            node.toolCalls?.some(
+                              (call) => call.status === "reviewing",
+                            ),
+                          )
+                        ? "· 安全审核中"
+                        : item.workingDirectory
+                          ? "· 本地项目"
+                          : item.example
+                            ? "· 示例探索"
+                            : "· 临时目录"}
+                  </small>
+                </span>
+                {item.nodes.some((node) => node.status === "running") && (
+                  <span className="tiny-green-dot pulse" />
+                )}
+              </button>
+              <button
+                type="button"
+                className="workspace-delete-button"
+                aria-label={`删除探索「${item.title}」`}
+                title={`删除探索「${item.title}」`}
+                onClick={() => {
+                  setSearchOpen(false);
+                  setExportOpen(false);
+                  setWorkspaceToDelete(structuredClone(item));
+                }}
+              >
+                <X size={14} aria-hidden="true" />
+              </button>
+            </div>
           ))}
         </nav>
         <div className="sidebar-spacer" />
@@ -1142,6 +1572,19 @@ export function App() {
               rootModelId={config.model}
               colorMode={colorMode}
               onSelect={select}
+              onShowContext={(id) => {
+                select(id);
+                setTab("context");
+              }}
+              onShowCompression={showCompression}
+              selectedCompressionId={
+                selectedPreparedCheckpoint
+                  ? compressionNodeId(
+                      selected.id,
+                      selectedPreparedCheckpoint.id,
+                    )
+                  : undefined
+              }
               onBranch={branch}
               branchDisabled={submitting}
               draft={canvasDraft}
@@ -1160,6 +1603,9 @@ export function App() {
                 directoryBusy ||
                 directoryDirty
               }
+              onRetry={(id) => void retryInPlace(id)}
+              retryingId={retryingId}
+              retryDisabledReason={retryDisabledReason}
               onChooseDirectory={() => {
                 const root = workspace.nodes.find(
                   (node) => node.status === "root",
@@ -1240,7 +1686,13 @@ export function App() {
                 上下文路径<span>{contextNodes.length}</span>
               </button>
             </div>
-            <div className="inspector-content" ref={detailRef}>
+            <div
+              className="inspector-content"
+              ref={detailRef}
+              tabIndex={0}
+              aria-label="对话输出与上下文"
+              {...composer.readingHandlers}
+            >
               <div hidden={tab !== "conversation"}>
                 <div className="question-label">
                   <span className="user-dot">S</span>
@@ -1330,6 +1782,7 @@ export function App() {
                     </div>
                     {!!selected.toolCalls?.length && (
                       <ToolActivity
+                        key={selected.id}
                         calls={selected.toolCalls}
                         workingDirectory={selected.execution?.workingDirectory}
                         onDecision={decideApproval}
@@ -1363,9 +1816,15 @@ export function App() {
                     {selected.error && (
                       <div className="inline-error">{selected.error}</div>
                     )}
+                    {selected.retryRestore?.error &&
+                      selected.retryRestore.error !== selected.error && (
+                        <div className="inline-error" role="alert">
+                          {selected.retryRestore.error}
+                        </div>
+                      )}
                     {selected.usage && (
                       <div className="usage">
-                        {selected.usage.total.toLocaleString()} tokens
+                        累计用量 {selected.usage.total.toLocaleString()} tokens
                         {selected.usage.cost !== undefined
                           ? ` · $${selected.usage.cost.toFixed(4)}`
                           : ""}
@@ -1381,13 +1840,30 @@ export function App() {
                           {copied ? "已复制" : "复制"}
                         </button>
                       )}
-                      {selected.status !== "running" &&
-                        selected.status !== "queued" && (
-                          <button onClick={retry}>
-                            <GitBranch size={13} />
-                            新分支重试
-                          </button>
-                        )}
+                      {canRetry ? (
+                        <button
+                          type="button"
+                          disabled={!!selectedRetryDisabledReason}
+                          title={
+                            selectedRetryDisabledReason ||
+                            "恢复本卡片本轮修改的文件，再使用原指令和模型重新生成"
+                          }
+                          onClick={() => void retryInPlace(selected.id)}
+                        >
+                          {selectedRetryBusy ? (
+                            <LoaderCircle size={13} className="spin" />
+                          ) : (
+                            <RefreshCw size={13} />
+                          )}
+                          {selectedRetryBusy ? "正在恢复…" : "原地重试"}
+                        </button>
+                      ) : selected.status !== "running" &&
+                        selected.status !== "queued" ? (
+                        <button onClick={retryAsBranch}>
+                          <GitBranch size={13} />
+                          新分支重试
+                        </button>
+                      ) : null}
                       {(selected.status === "running" ||
                         selected.status === "queued") && (
                         <button onClick={cancel}>
@@ -1401,22 +1877,44 @@ export function App() {
               </div>
               {tab === "context" && (
                 <div className="context-view">
+                  <ContextCompression
+                    key={contextScope}
+                    workspace={workspace}
+                    node={selected}
+                    usage={selectedContextUsage}
+                    config={config}
+                    model={model}
+                    online={online}
+                    busy={Boolean(compactingPaths[contextScope])}
+                    settingsBusy={Boolean(changingAutoCompact[workspace.id])}
+                    selectedCheckpointId={selectedPreparedCheckpoint?.id}
+                    onLocateCompression={(checkpointId) =>
+                      locateCompression(selected.id, checkpointId)
+                    }
+                    onBranch={(checkpointId) =>
+                      branch(selected.id, checkpointId)
+                    }
+                    onGenerate={() => void generateContextSummary()}
+                    onCancel={() => void cancelContextSummary()}
+                    onAutoChange={(value) => void changeAutoCompact(value)}
+                    onLocate={locate}
+                  />
                   <div className="context-explainer">
                     <Layers size={17} />
                     <b>
                       {selected.contextStale
                         ? "更新后的上下文路径"
                         : canBranch
-                          ? "下一轮将继承这条路径"
-                          : "本轮使用的上下文路径"}
+                          ? "下一轮的原始父链档案"
+                          : "本轮的原始父链档案"}
                     </b>
                     <p>
                       {selected.contextStale
                         ? "当前回答仍基于修改前的上下文。请先更新上游待生成节点，再重新生成这一轮。"
-                        : "从起点到当前分支，按时间顺序传递。其他分支的内容不会被带入。"}
+                        : "这里保留从起点到当前分支的原文。实际请求可能使用上方摘要与近期消息，其他分支的内容不会被带入。"}
                     </p>
                     <span>
-                      约 {contextEstimate.toLocaleString()} tokens · 估算
+                      原文约 {contextEstimate.toLocaleString()} tokens · 估算
                     </span>
                   </div>
                   {contextNodes.map((node, index) => (
@@ -1443,147 +1941,226 @@ export function App() {
               )}
             </div>
 
-            <form className="composer" onSubmit={send}>
+            <form
+              ref={composer.composerRef}
+              className={`composer${composer.collapsed ? " is-collapsed" : ""}`}
+              onSubmit={send}
+            >
               <div className="branch-from">
-                <GitBranch size={13} />
-                <span>
-                  {selected.contextStale
-                    ? "上游指令已更新"
-                    : canBranch
-                      ? "从这里，探索新分支"
-                      : selected.status === "running" ||
-                          selected.status === "queued"
-                        ? "这个节点正在生成"
-                        : "从上一个节点重新出发"}
-                </span>
+                {canBranch ? (
+                  <button
+                    ref={composer.toggleRef}
+                    type="button"
+                    className="composer-toggle"
+                    aria-expanded={!composer.collapsed}
+                    aria-controls="composer-content"
+                    aria-label={
+                      composer.collapsed ? "展开分支输入框" : "收起分支输入框"
+                    }
+                    title={
+                      composer.collapsed
+                        ? "展开并继续输入（B）"
+                        : "收起输入框，留出更多阅读空间"
+                    }
+                    onClick={
+                      composer.collapsed ? composer.expand : composer.collapse
+                    }
+                  >
+                    <GitBranch size={13} />
+                    <span>
+                      {composer.collapsed
+                        ? draft
+                          ? "继续输入 · 草稿已保留"
+                          : "点击输入，探索新分支"
+                        : "从这里，探索新分支"}
+                    </span>
+                    <ChevronDown
+                      size={13}
+                      className="composer-toggle-chevron"
+                    />
+                  </button>
+                ) : (
+                  <>
+                    <GitBranch size={13} />
+                    <span>
+                      {selected.contextStale
+                        ? "上游指令已更新"
+                        : selected.status === "running" ||
+                            selected.status === "queued"
+                          ? "这个节点正在生成"
+                          : "从上一个节点重新出发"}
+                    </span>
+                  </>
+                )}
                 {canBranch && (
-                  <span
+                  <button
+                    type="button"
                     className="context-count"
                     title="查看将被继承的上下文"
                     onClick={() => setTab("context")}
                   >
                     {path.length} 层上下文
                     <ChevronRight size={11} />
-                  </span>
+                  </button>
                 )}
               </div>
-              {canBranch ? (
-                <>
-                  <div className="compose-box">
-                    <textarea
-                      ref={inputRef}
-                      aria-label="新分支问题"
-                      placeholder={
-                        selected.status === "root"
-                          ? "你想先探索哪个方向？"
-                          : "追问一个细节，或打开新的可能…"
-                      }
-                      value={draft}
-                      onChange={(event) => setDraft(event.target.value)}
-                      maxLength={20000}
-                      onKeyDown={(event) => {
-                        if (
-                          (event.metaKey || event.ctrlKey) &&
-                          event.key === "Enter" &&
-                          !event.nativeEvent.isComposing
-                        ) {
-                          event.preventDefault();
-                          void send();
-                        }
-                      }}
-                    />
-                    <div className="compose-bottom">
-                      <span>
-                        <GitBranch size={12} />
-                        {selected.status === "root"
-                          ? "从起点分支"
-                          : `从对话 ${String(currentIndex).padStart(2, "0")} 分支`}
-                      </span>
+              <div
+                id="composer-content"
+                className="composer-content"
+                aria-hidden={composer.collapsed}
+                inert={composer.collapsed}
+                onTransitionEnd={composer.onTransitionEnd}
+              >
+                <div className="composer-content-inner">
+                  {canBranch ? (
+                    <>
+                      <div className="compose-box">
+                        <textarea
+                          ref={inputRef}
+                          aria-label="新分支问题"
+                          placeholder={
+                            selected.status === "root"
+                              ? "你想先探索哪个方向？"
+                              : "追问一个细节，或打开新的可能…"
+                          }
+                          value={draft}
+                          onChange={(event) => setDraft(event.target.value)}
+                          maxLength={20000}
+                          onKeyDown={(event) => {
+                            if (
+                              (event.metaKey || event.ctrlKey) &&
+                              event.key === "Enter" &&
+                              !event.nativeEvent.isComposing
+                            ) {
+                              event.preventDefault();
+                              void send();
+                            }
+                          }}
+                        />
+                        <div className="compose-bottom">
+                          <span>
+                            <GitBranch size={12} />
+                            {selected.status === "root"
+                              ? "从起点分支"
+                              : `从对话 ${String(currentIndex).padStart(2, "0")} 分支`}
+                          </span>
+                          <button
+                            type="submit"
+                            className="send-button"
+                            title="创建分支（⌘/Ctrl + Enter）"
+                            aria-label="发送并创建分支"
+                            disabled={
+                              !draft.trim() ||
+                              submitting ||
+                              directoryDirty ||
+                              directoryBusy ||
+                              changingApproval ||
+                              !online ||
+                              !model?.available
+                            }
+                          >
+                            {submitting ? (
+                              <LoaderCircle size={17} className="spin" />
+                            ) : (
+                              <ArrowUp size={18} />
+                            )}
+                          </button>
+                        </div>
+                      </div>
+                      <ComposerModelControls
+                        models={models}
+                        config={config}
+                        onConfigChange={changeConfig}
+                        disabled={!online || submitting}
+                      />
+                      {selectedContextCheckpointId && (
+                        <p className="composer-compression-note" role="status">
+                          从压缩节点继续，本次新分支将使用此摘要。
+                        </p>
+                      )}
+                      {directoryDirty && (
+                        <p className="root-directory-hint" role="status">
+                          工作目录尚未确认，请先在根节点保存或取消修改。
+                        </p>
+                      )}
+                      <div className="composer-footnote">
+                        {model?.demo ? (
+                          <span>演示模式，不调用远程模型或执行工具</span>
+                        ) : (
+                          <span
+                            title={`当前目录：${workspace.workingDirectory ?? workspace.temporaryDirectory ?? "空间临时目录"}。分支共享当前文件；停止或切换分支不会回滚已执行的操作。`}
+                          >
+                            {workspace.workingDirectory
+                              ? "本地项目"
+                              : "临时目录"}{" "}
+                            · 本机执行 · 分支共享文件
+                          </span>
+                        )}
+                        <span>
+                          <Command size={10} /> Enter
+                        </span>
+                      </div>
+                    </>
+                  ) : (
+                    <div className="blocked-composer">
+                      <p>
+                        {selected.contextStale
+                          ? staleAncestor
+                            ? "请先重新生成上游节点，再更新这轮回答。"
+                            : "编辑当前指令，使用更新后的上下文重新生成回答。"
+                          : selected.status === "running" ||
+                              selected.status === "queued"
+                            ? "等待完成后继续深入。现在可以切换到其他节点，同时探索。"
+                            : "恢复本卡片本轮修改的文件后，使用原指令和模型重新生成。"}
+                      </p>
                       <button
-                        type="submit"
-                        className="send-button"
-                        title="创建分支（⌘/Ctrl + Enter）"
-                        aria-label="发送并创建分支"
+                        type="button"
                         disabled={
-                          !draft.trim() ||
-                          submitting ||
-                          directoryDirty ||
-                          directoryBusy ||
-                          changingApproval ||
-                          !online ||
-                          !model?.available
+                          canRetry &&
+                          !selected.contextStale &&
+                          !!selectedRetryDisabledReason
+                        }
+                        title={
+                          canRetry
+                            ? selectedRetryDisabledReason ||
+                              "恢复本轮文件修改后，在当前卡片重新生成"
+                            : undefined
+                        }
+                        onClick={() =>
+                          selected.contextStale
+                            ? staleAncestor
+                              ? locate(staleAncestor.id)
+                              : openNodeAction("edit", selected.id)
+                            : canRetry
+                              ? void retryInPlace(selected.id)
+                              : retryAsBranch()
                         }
                       >
-                        {submitting ? (
-                          <LoaderCircle size={17} className="spin" />
+                        {canRetry && !selected.contextStale ? (
+                          selectedRetryBusy ? (
+                            <LoaderCircle size={14} className="spin" />
+                          ) : (
+                            <RefreshCw size={14} />
+                          )
                         ) : (
-                          <ArrowUp size={18} />
+                          <GitBranch size={14} />
                         )}
+                        {selected.contextStale
+                          ? staleAncestor
+                            ? "前往上游待更新节点"
+                            : "编辑并重新生成"
+                          : selected.status === "running" ||
+                              selected.status === "queued"
+                            ? "从父节点再开一个方向"
+                            : selectedRetryBusy
+                              ? "正在恢复…"
+                              : "原地重试"}
+                        <ArrowRight size={13} />
                       </button>
                     </div>
-                  </div>
-                  <ComposerModelControls
-                    models={models}
-                    config={config}
-                    onConfigChange={changeConfig}
-                    disabled={!online || submitting}
-                  />
-                  {directoryDirty && (
-                    <p className="root-directory-hint" role="status">
-                      工作目录尚未确认，请先在根节点保存或取消修改。
-                    </p>
                   )}
-                  <div className="composer-footnote">
-                    {model?.demo ? (
-                      <span>演示模式，不调用远程模型或执行工具</span>
-                    ) : (
-                      <span
-                        title={`当前目录：${workspace.workingDirectory ?? workspace.temporaryDirectory ?? "空间临时目录"}。分支共享当前文件；停止或切换分支不会回滚已执行的操作。`}
-                      >
-                        {workspace.workingDirectory ? "本地项目" : "临时目录"} ·
-                        本机执行 · 分支共享文件
-                      </span>
-                    )}
-                    <span>
-                      <Command size={10} /> Enter
-                    </span>
-                  </div>
-                </>
-              ) : (
-                <div className="blocked-composer">
-                  <p>
-                    {selected.contextStale
-                      ? staleAncestor
-                        ? "请先重新生成上游节点，再更新这轮回答。"
-                        : "编辑当前指令，使用更新后的上下文重新生成回答。"
-                      : selected.status === "running" ||
-                          selected.status === "queued"
-                        ? "等待完成后继续深入。现在可以切换到其他节点，同时探索。"
-                        : "这轮内容不完整。保留当前记录，从父节点创建新分支。"}
-                  </p>
-                  <button
-                    type="button"
-                    onClick={() =>
-                      selected.contextStale
-                        ? staleAncestor
-                          ? locate(staleAncestor.id)
-                          : openNodeAction("edit", selected.id)
-                        : retry()
-                    }
-                  >
-                    <GitBranch size={14} />
-                    {selected.contextStale
-                      ? staleAncestor
-                        ? "前往上游待更新节点"
-                        : "编辑并重新生成"
-                      : selected.status === "running" ||
-                          selected.status === "queued"
-                        ? "从父节点再开一个方向"
-                        : "准备重试"}
-                    <ArrowRight size={13} />
-                  </button>
                 </div>
-              )}
+              </div>
             </form>
           </aside>
         </ResizableWorkspace>
@@ -1700,8 +2277,8 @@ export function App() {
               Object.fromEntries(
                 Object.entries(current).filter(
                   ([key]) =>
-                    !nodeAction.subtreeIds.some(
-                      (id) => key === `${nodeAction.workspaceId}:${id}`,
+                    !nodeAction.subtreeIds.some((id) =>
+                      key.startsWith(`${nodeAction.workspaceId}:${id}:`),
                     ),
                 ),
               ),
@@ -1717,122 +2294,79 @@ export function App() {
           }}
         />
       )}
-      {modal && modal !== "directory" && (
-        <div className="modal-backdrop" onClick={() => setModal(null)}>
-          <section
-            className="modal"
-            role="dialog"
-            aria-modal="true"
-            aria-label={
-              modal === "new"
-                ? "新建探索"
-                : modal === "settings"
-                  ? "模型连接"
-                  : "使用指南"
+      {workspaceToDelete && (
+        <DeleteWorkspaceDialog
+          key={workspaceToDelete.id}
+          target={workspaceToDelete}
+          workspace={state.workspaces.find(
+            (item) => item.id === workspaceToDelete.id,
+          )}
+          disabled={
+            !online ||
+            submitting ||
+            changingApproval ||
+            directoryBusy ||
+            !!retryingId
+          }
+          onClose={() => setWorkspaceToDelete(null)}
+          onDelete={async (deleteTemporaryDirectory) => {
+            const target = workspaceToDelete;
+            const deletingCurrent = currentWorkspaceId.current === target.id;
+            const next = await api<AppState>(
+              `/workspaces/${encodeURIComponent(target.id)}`,
+              {
+                deleteTemporaryDirectory,
+                expectedNodeIds: target.nodes.map((node) => node.id),
+              },
+              "DELETE",
+            );
+            apply(next);
+            if (deletingCurrent || !next.workspaces.length) {
+              const remaining = next.workspaces[0];
+              setWorkspaceId(remaining?.id ?? null);
+              setSelectedId(remaining?.nodes[0]?.id ?? null);
+              savePreference("workspace", remaining?.id ?? "");
+              savePreference("node", remaining?.nodes[0]?.id ?? "");
+              setFocus({ id: null, version: 0 });
+              setTab("conversation");
+              setApprovalFocus(null);
             }
-            onClick={(event) => event.stopPropagation()}
-          >
-            <button
-              className="modal-close icon-button"
-              aria-label="关闭弹窗"
-              onClick={() => setModal(null)}
-            >
-              <X size={19} />
-            </button>
-            {modal === "new" ? (
-              <NewWorkspace
-                onCreate={async (title, description) => {
-                  const result = await api<MutationResult>("/workspaces", {
-                    title,
-                    description,
-                  });
-                  apply(result.state);
-                  setWorkspaceId(result.workspaceId!);
-                  setSelectedId(null);
-                  setFocus({ id: null, version: 0 });
-                  setModal(null);
-                  if (window.innerWidth <= 1000) closeSidebar();
-                }}
-              />
-            ) : modal === "settings" ? (
-              <Settings models={models} webCapabilities={webCapabilities} />
-            ) : (
-              <Help />
-            )}
-          </section>
-        </div>
+            setDrafts((current) =>
+              Object.fromEntries(
+                Object.entries(current).filter(
+                  ([key]) => !key.startsWith(`${target.id}:`),
+                ),
+              ),
+            );
+            setCanvasDrafts((current) =>
+              Object.fromEntries(
+                Object.entries(current).filter(
+                  ([, draft]) => draft.workspaceId !== target.id,
+                ),
+              ),
+            );
+            setCanvasDraftParents((current) =>
+              Object.fromEntries(
+                Object.entries(current).filter(([key]) => key !== target.id),
+              ),
+            );
+            setSearchOpen(false);
+            setSearch("");
+            setWorkspaceToDelete(null);
+            setError("");
+            requestAnimationFrame(() => {
+              const nextControl = document.querySelector<HTMLButtonElement>(
+                ".workspace-item.selected, .workspace-empty-screen > .primary-button",
+              );
+              if (window.innerWidth <= 1000 && next.workspaces.length)
+                sidebarToggleRef.current?.focus();
+              else nextControl?.focus();
+            });
+          }}
+        />
       )}
+      {workspaceModal}
     </div>
-  );
-}
-
-function NewWorkspace({
-  onCreate,
-}: {
-  onCreate: (title: string, description: string) => Promise<void>;
-}) {
-  const [title, setTitle] = useState("");
-  const [description, setDescription] = useState("");
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState("");
-  return (
-    <form
-      onSubmit={async (event) => {
-        event.preventDefault();
-        setBusy(true);
-        setError("");
-        try {
-          await onCreate(title, description);
-        } catch (reason) {
-          setError(reason instanceof Error ? reason.message : "创建失败");
-        } finally {
-          setBusy(false);
-        }
-      }}
-    >
-      <div className="modal-illustration">
-        <GitBranch size={27} />
-      </div>
-      <div className="eyebrow">START WITH A QUESTION</div>
-      <h2>开启一个新的探索</h2>
-      <p className="modal-intro">
-        每个空间自带临时目录，可直接开始；也可在根节点选择本地项目。
-      </p>
-      <label className="form-label">
-        探索主题
-        <input
-          autoFocus
-          required
-          maxLength={80}
-          placeholder="例如：下一代 AI 工作台应该是什么样？"
-          value={title}
-          onChange={(event) => setTitle(event.target.value)}
-        />
-      </label>
-      <label className="form-label">
-        背景与目标 <span>选填</span>
-        <textarea
-          maxLength={10000}
-          placeholder="补充一些背景。这些信息会被所有分支继承。"
-          value={description}
-          onChange={(event) => setDescription(event.target.value)}
-        />
-      </label>
-      {error && (
-        <div className="inline-error" role="alert">
-          {error}
-        </div>
-      )}
-      <button className="primary-button" disabled={!title.trim() || busy}>
-        {busy ? (
-          <LoaderCircle size={15} className="spin" />
-        ) : (
-          <Plus size={15} />
-        )}
-        创建探索
-        <ArrowRight size={15} />
-      </button>
-    </form>
   );
 }
 

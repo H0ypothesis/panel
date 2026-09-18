@@ -4,6 +4,7 @@ import {
   mkdir,
   readdir,
   realpath,
+  rm,
   stat,
 } from "node:fs/promises";
 import { constants } from "node:fs";
@@ -15,6 +16,36 @@ export function temporaryWorkspaceDirectory(dataDirectory: string, id: string) {
   if (!/^[a-zA-Z0-9][a-zA-Z0-9_-]{0,127}$/.test(id))
     throw new Error("空间 ID 无效，无法确定临时工作目录。");
   return join(dataDirectory, "workspaces", id);
+}
+
+export async function existingTemporaryDirectory(
+  dataDirectory: string,
+  id: string,
+): Promise<string | undefined> {
+  const directory = temporaryWorkspaceDirectory(dataDirectory, id);
+  // Check every managed ancestor before touching the target. A missing path is
+  // already clean; deletion must never create a temporary directory.
+  for (const path of [dataDirectory, dirname(directory), directory]) {
+    try {
+      if (!(await lstat(path)).isDirectory() || (await realpath(path)) !== path)
+        throw new Error(
+          "临时目录或其父目录已变为符号链接或普通文件，未清理文件。",
+        );
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+      throw error;
+    }
+  }
+  return directory;
+}
+
+export async function removeTemporaryDirectory(
+  dataDirectory: string,
+  id: string,
+) {
+  const directory = await existingTemporaryDirectory(dataDirectory, id);
+  // fs.rm removes child symlinks themselves, without following their targets.
+  if (directory) await rm(directory, { recursive: true, force: true });
 }
 
 export async function prepareTemporaryDirectory(

@@ -1,0 +1,91 @@
+:root {
+  --compression-accent: #9a704b;
+  --compression-background: #f6efe5;
+}
+:root[data-theme="dark"] {
+  --compression-accent: #c9a27c;
+  --compression-background: #352e26;
+}
+.turn-card.compression-entry-card {
+  border-left: 6px solid var(--compression-accent);
+  padding-left: 13px;
+}
+.turn-card.compression-entry-card > .react-flow__handle-left {
+  border-color: var(--compression-accent);
+}
+.card-token-usage {
+  padding: 4px 0;
+  color: var(--text-secondary);
+  font-size: 9px;
+  line-height: 1;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+.card-token-usage:hover {
+  color: var(--text-accent-strong);
+}
+.card-token-usage:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 3px;
+  border-radius: 2px;
+}
+.compression-node {
+  --branch: var(--compression-accent);
+  --card-background: var(--compression-background);
+  position: relative;
+  width: 56px;
+  height: 56px;
+  color: var(--compression-accent);
+}
+.compression-node-body {
+  display: grid;
+  place-items: center;
+  width: 56px;
+  height: 56px;
+  border: 1.5px solid var(--compression-accent);
+  border-radius: 50%;
+  background: var(--compression-background);
+  color: inherit;
+  box-shadow: 0 3px 9px var(--shadow-soft);
+  cursor: pointer;
+  transition: box-shadow 0.15s;
+}
+.compression-node-body:hover,
+.compression-node.active .compression-node-body {
+  box-shadow:
+    0 0 0 4px color-mix(in srgb, var(--compression-accent) 15%, transparent),
+    0 3px 12px var(--shadow-card);
+}
+.compression-node.in-path .compression-node-body {
+  border-width: 2px;
+}
+.compression-node.stale .compression-node-body {
+  border-style: dashed;
+  opacity: 0.65;
+}
+.compression-node .react-flow__handle {
+  width: 7px;
+  height: 7px;
+  min-width: 7px;
+  min-height: 7px;
+  border: 1.5px solid var(--compression-accent);
+  background: var(--surface);
+}
+.compression-node-branch:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+.compression-node-body:focus-visible,
+.compression-node-branch:focus-visible {
+  outline: 2px solid var(--compression-accent);
+  outline-offset: 3px;
+}
+.minimap-node-compression {
+  rx: 28px;
+  ry: 28px;
+}
+@media (prefers-reduced-motion: reduce) {
+  .compression-node-body {
+    transition: none;
+  }
+}

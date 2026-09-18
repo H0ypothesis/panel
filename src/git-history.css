@@ -233,6 +233,13 @@
   color: var(--text-accent-strong);
   font-size: 10px;
 }
+.git-history-restored {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--text-secondary);
+  font-size: 9px;
+}
 .git-history-node > span {
   overflow: hidden;
   min-width: 0;
@@ -274,7 +281,7 @@
   }
   .git-history-content {
     max-height: 382px;
-    margin-top: 128px;
+    margin-top: 152px;
     border-radius: 7px;
   }
 }

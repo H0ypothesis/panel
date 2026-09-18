@@ -1,10 +1,17 @@
-import type { ModelOption, TurnNode } from "./types.ts";
+import type { ContextState, ModelOption, TurnNode } from "./types.ts";
 
 export interface ContextUsage {
   tokens: number;
   limit: number | null;
   percentage: number | null;
   stale: boolean;
+  /** The latest request input plus its output; never cumulative billing totals. */
+  source: "provider" | "estimate" | "archive";
+  inputTokens?: number;
+  outputTokens?: number;
+  rawTokens: number;
+  compressionStatus?: ContextState["status"];
+  originalTokens?: number;
 }
 
 // This is the same conservative visible-text heuristic used in the inspector.
@@ -28,6 +35,62 @@ export function estimatePathContextTokens(path: TurnNode[]): number {
   return Math.ceil(
     path.reduce((total, node) => total + visibleCharacters(node), 0) * 1.2,
   );
+}
+
+function validTokens(value: number | undefined): value is number {
+  return value !== undefined && Number.isFinite(value) && value >= 0;
+}
+
+/** Count the latest request's input and output once, then fall back to estimates. */
+export function contextUsageForNode(
+  node: TurnNode,
+  rawTokens: number,
+  modelCapacity: number | undefined,
+  stale = Boolean(node.contextStale),
+): ContextUsage {
+  const state = node.contextState;
+  const measured = node.lastRequestUsage;
+  const currentMeasurement =
+    measured &&
+    validTokens(measured.inputTokens) &&
+    Number.isFinite(measured.timestamp) &&
+    (!state || measured.timestamp >= state.updatedAt);
+  const estimated = validTokens(state?.inputTokens);
+  const inputTokens = currentMeasurement
+    ? measured.inputTokens
+    : estimated
+      ? state!.inputTokens!
+      : undefined;
+  const outputTokens =
+    currentMeasurement && validTokens(measured.outputTokens)
+      ? measured.outputTokens
+      : undefined;
+  const source = currentMeasurement
+    ? measured.estimated || outputTokens === undefined
+      ? "estimate"
+      : "provider"
+    : estimated
+      ? "estimate"
+      : "archive";
+  const tokens =
+    inputTokens === undefined ? rawTokens : inputTokens + (outputTokens ?? 0);
+  const capacity = state?.contextWindow ?? modelCapacity;
+  const limit =
+    capacity !== undefined && Number.isFinite(capacity) && capacity > 0
+      ? capacity
+      : null;
+  return {
+    tokens,
+    inputTokens,
+    outputTokens,
+    rawTokens,
+    limit,
+    percentage: limit === null ? null : (tokens / limit) * 100,
+    source,
+    compressionStatus: state?.status,
+    originalTokens: state?.originalTokens,
+    stale,
+  };
 }
 
 /** Each branch counts its ancestors once; siblings never consume its context. */
@@ -62,23 +125,14 @@ export function buildContextUsageMap(
   return new Map(
     nodes.map((node) => {
       const total = accumulate(node);
-      const tokens = Math.ceil(total.characters * 1.2);
+      const rawTokens = Math.ceil(total.characters * 1.2);
       // The root has no model run; use the current composer's model as its basis.
       const capacity = byModel.get(
         node.status === "root" ? rootModelId : node.config.model,
       )?.contextWindow;
-      const limit =
-        capacity !== undefined && Number.isFinite(capacity) && capacity > 0
-          ? capacity
-          : null;
       return [
         node.id,
-        {
-          tokens,
-          limit,
-          percentage: limit === null ? null : (tokens / limit) * 100,
-          stale: total.stale,
-        },
+        contextUsageForNode(node, rawTokens, capacity, total.stale),
       ];
     }),
   );

@@ -337,6 +337,7 @@ function ToolCallCard({
   const [error, setError] = useState("");
   const pending = call.status === "awaiting_approval";
   const reviewing = call.status === "reviewing";
+  const waitingFor = call.status === "running" ? call.waitingFor : undefined;
   const decide = async (decision: "approve" | "deny") => {
     setBusy(true);
     setError("");
@@ -378,15 +379,24 @@ function ToolCallCard({
             <FileCode2 size={14} />
           )}
           <b>{toolLabels[call.name] ?? call.name}</b>
-          <span className="tool-call-status">
+          <span className="tool-call-status" title={waitingFor}>
             {(call.status === "running" || reviewing) && (
               <LoaderCircle size={11} className="spin" />
             )}
-            {toolStatusLabels[call.status]}
+            {waitingFor
+              ? call.name === "bash"
+                ? "等待文件操作"
+                : "等待文件"
+              : toolStatusLabels[call.status]}
           </span>
           <ChevronDown size={12} />
         </summary>
         <div className="tool-call-body">
+          {waitingFor && (
+            <p className="tool-content-label" role="status">
+              {waitingFor}
+            </p>
+          )}
           <span className="tool-content-label">参数 · {call.name}</span>
           <pre>{JSON.stringify(call.arguments, null, 2)}</pre>
           {call.safetyReview && (
@@ -502,22 +512,70 @@ export function ToolActivity({
   workingDirectory?: string;
   onDecision: (toolId: string, decision: "approve" | "deny") => Promise<void>;
 }) {
+  const pending = calls.filter(
+    (call) => call.status === "awaiting_approval",
+  ).length;
+  const active = calls.filter(
+    (call) =>
+      (call.status === "running" && !call.waitingFor) ||
+      call.status === "reviewing",
+  ).length;
+  const waiting = calls.filter(
+    (call) => call.status === "running" && call.waitingFor,
+  );
+  const failed = calls.filter((call) => call.status === "failed").length;
+  const progress = [
+    pending > 0 ? `${pending} 待批准` : "",
+    waiting.length > 0 ? `${waiting.length} 等待文件` : "",
+    active > 0 ? `${active} 进行中` : "",
+  ].filter(Boolean);
+
   return (
     <section className="tool-activity" aria-label="Agent 工具活动">
-      <div className="tool-activity-heading">
-        <Terminal size={13} />
-        <b>工具活动</b>
-        <span>{calls.length} 次操作</span>
-      </div>
-      {workingDirectory && (
-        <div className="tool-working-directory" title={workingDirectory}>
-          <FolderOpen size={12} />
-          {workingDirectory}
+      <details className="tool-activity-disclosure">
+        <summary className="tool-activity-heading" title="展开或收起工具调用">
+          <Terminal size={13} aria-hidden="true" />
+          <b>工具调用</b>
+          <span className="tool-activity-count">{calls.length} 次操作</span>
+          {(progress.length > 0 || failed > 0) && (
+            <span
+              className={`tool-activity-status ${pending ? "needs-approval" : active || waiting.length ? "in-progress" : "has-failure"}`}
+              title={
+                [
+                  progress.join(" · "),
+                  ...waiting.map((call) => call.waitingFor),
+                ].join("\n") || undefined
+              }
+              role="status"
+            >
+              {pending ? (
+                <ShieldQuestion size={12} aria-hidden="true" />
+              ) : active || waiting.length ? (
+                <LoaderCircle size={12} className="spin" aria-hidden="true" />
+              ) : null}
+              {progress.length > 0
+                ? progress.slice(0, 2).join(" · ")
+                : `${failed} 失败`}
+            </span>
+          )}
+          <ChevronRight
+            size={13}
+            className="tool-activity-chevron"
+            aria-hidden="true"
+          />
+        </summary>
+        <div className="tool-activity-content">
+          {workingDirectory && (
+            <div className="tool-working-directory" title={workingDirectory}>
+              <FolderOpen size={12} />
+              {workingDirectory}
+            </div>
+          )}
+          {calls.map((call) => (
+            <ToolCallCard key={call.id} call={call} onDecision={onDecision} />
+          ))}
         </div>
-      )}
-      {calls.map((call) => (
-        <ToolCallCard key={call.id} call={call} onDecision={onDecision} />
-      ))}
+      </details>
     </section>
   );
 }

@@ -1,0 +1,136 @@
+.composer {
+  --composer-transition-duration: 360ms;
+  --composer-transition-easing: cubic-bezier(0.4, 0, 0.2, 1);
+  transition:
+    padding-top var(--composer-transition-duration)
+      var(--composer-transition-easing),
+    padding-bottom var(--composer-transition-duration)
+      var(--composer-transition-easing);
+}
+
+.composer > .branch-from {
+  min-width: 0;
+  transition: margin-bottom var(--composer-transition-duration)
+    var(--composer-transition-easing);
+}
+
+.composer-toggle {
+  display: flex;
+  flex: 1;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  min-height: 21px;
+  margin: -3px 0 -3px -5px;
+  padding: 3px 5px;
+  border-radius: 5px;
+  color: inherit;
+  font-size: inherit;
+  line-height: 1.5;
+  text-align: left;
+  transition:
+    min-height var(--composer-transition-duration)
+      var(--composer-transition-easing),
+    margin-top var(--composer-transition-duration)
+      var(--composer-transition-easing),
+    margin-bottom var(--composer-transition-duration)
+      var(--composer-transition-easing),
+    background 0.15s,
+    color 0.15s,
+    box-shadow 0.15s;
+}
+
+.composer-toggle > span {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.composer-toggle > svg {
+  flex-shrink: 0;
+}
+
+.composer-toggle > svg:last-child {
+  color: var(--text-muted);
+}
+
+.composer-toggle-chevron {
+  transform: rotate(0deg);
+  transition: transform var(--composer-transition-duration)
+    var(--composer-transition-easing);
+}
+
+.composer-toggle:hover {
+  background: var(--surface-hover);
+  color: var(--text-accent-strong);
+}
+
+.composer-toggle:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 2px;
+}
+
+.composer > .branch-from > .context-count {
+  flex-shrink: 0;
+  max-width: 45%;
+  overflow: hidden;
+  white-space: nowrap;
+}
+
+.composer.is-collapsed {
+  padding-top: 6px;
+  padding-bottom: 6px;
+}
+
+.composer.is-collapsed > .branch-from {
+  margin-bottom: 0;
+}
+
+.composer.is-collapsed .composer-toggle {
+  min-height: 28px;
+  margin-top: 0;
+  margin-bottom: 0;
+}
+
+.composer.is-collapsed .composer-toggle-chevron {
+  transform: rotate(180deg);
+}
+
+.composer-content {
+  display: grid;
+  grid-template-rows: 1fr;
+  min-width: 0;
+  opacity: 1;
+  transition:
+    grid-template-rows var(--composer-transition-duration)
+      var(--composer-transition-easing),
+    opacity var(--composer-transition-duration)
+      var(--composer-transition-easing);
+}
+
+.composer-content-inner {
+  min-height: 0;
+  overflow: hidden;
+}
+
+.composer.is-collapsed .composer-content {
+  grid-template-rows: 0fr;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.composer-content[hidden] {
+  display: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .composer,
+  .composer > .branch-from,
+  .composer-toggle,
+  .composer-toggle-chevron,
+  .composer-content {
+    transition: none;
+  }
+}

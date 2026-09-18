@@ -57,10 +57,14 @@ export interface ToolCall {
     | "failed"
     | "denied"
     | "cancelled";
+  /** Temporary reason an authorized tool is waiting to access files. */
+  waitingFor?: string;
   output?: string;
   error?: string;
   sources?: { title: string; url: string }[];
   approval?: "auto" | "policy" | "safety_model" | "approved" | "denied";
+  /** Whether an executed file tool has a complete, restorable Git audit. */
+  fileSnapshot?: "unchanged" | "recorded" | "failed";
   safetyReview?: SafetyReview;
   // Audit metadata only. Live, single-use authorizations exist solely in memory.
   authorization?: {
@@ -80,6 +84,51 @@ export interface ToolCall {
 export interface RunConfig {
   model: string;
   thinking: ThinkingLevel;
+}
+
+/** Exact raw-message provenance. A zero count on the final source is filled at runtime. */
+export interface ContextSource {
+  nodeId: string;
+  revision: number;
+  messageCount: number;
+}
+
+/** A derived model-input view; never replaces the original node transcripts. */
+export interface ContextCheckpoint {
+  id: string;
+  version: 1;
+  sourceHash: string;
+  /** Number of original messages covered, including the separately retained root. */
+  messageCount: number;
+  sources: ContextSource[];
+  summary: string;
+  model: string;
+  thinking: ThinkingLevel;
+  createdAt: number;
+  tokensBefore: number;
+  tokensAfter: number;
+  usage?: TurnNode["usage"];
+}
+
+export interface ContextState {
+  status: "full" | "compacting" | "compacted" | "failed" | "cancelled";
+  updatedAt: number;
+  originalTokens?: number;
+  inputTokens?: number;
+  contextWindow?: number;
+  reservedTokens?: number;
+  checkpointId?: string;
+  error?: string;
+}
+
+/** Input and generated output of one request, including input cache hits. */
+export interface ContextRequestUsage {
+  inputTokens: number;
+  outputTokens: number;
+  /** Start timestamp of the assistant response associated with this request. */
+  timestamp: number;
+  /** Streaming or missing-provider counts use an explicitly labelled estimate. */
+  estimated?: boolean;
 }
 
 export interface TurnNode {
@@ -108,6 +157,28 @@ export interface TurnNode {
     safetyModel?: string;
   };
   toolCalls?: ToolCall[];
+  contextSources?: ContextSource[];
+  contextAutoCompact?: boolean;
+  contextState?: ContextState;
+  /** Derived from this run's transcript for UI snapshots; raw messages remain private. */
+  lastRequestUsage?: ContextRequestUsage;
+  compactions?: ContextCheckpoint[];
+  /** Explicitly selected for this run, never inherited implicitly by siblings. */
+  requestedContextCheckpointId?: string;
+  /** Explicit raw branch entry; inherited separately from the workspace setting. */
+  contextMode?: "raw";
+  effectiveContextMode?: "raw";
+  /** The selected summary continues along this branch, even below the threshold. */
+  effectiveContextCheckpointId?: string;
+  preparedContextState?: ContextState;
+  preparedCompaction?: ContextCheckpoint;
+  /** Successful manual summaries available as independent branch origins. */
+  preparedCompactions?: ContextCheckpoint[];
+  retryRestore?: {
+    requestId: string;
+    status: "restoring" | "restored" | "failed";
+    error?: string;
+  };
 }
 
 export interface Workspace {
@@ -123,6 +194,8 @@ export interface Workspace {
   workingDirectory?: string;
   approvalMode?: ApprovalMode;
   safetyModel?: string;
+  /** Missing on older workspaces means enabled. */
+  autoCompact?: boolean;
   gitHistory?: GitHistoryEntry[];
   nodes: TurnNode[];
 }
@@ -143,6 +216,8 @@ export interface GitHistoryEntry {
   parentCommit?: string;
   error?: string;
   interrupted?: boolean;
+  restoredAt?: number;
+  restoredByRequestId?: string;
 }
 
 export interface AppState {
@@ -231,14 +306,16 @@ export function layoutTree(
       ]);
   }
   let row = 0;
-  const visit = (node: TurnNode, depth: number): number => {
+  const visit = (node: TurnNode, x: number): number => {
     const descendants = children.get(node.id) ?? [];
-    const ys = descendants.map((child) => visit(child, depth + 1));
+    const ys = descendants.map((child) =>
+      visit(child, x + (child.requestedContextCheckpointId ? 500 : 360)),
+    );
     const y = ys.length ? (ys[0] + ys[ys.length - 1]) / 2 : row++ * 250;
-    positions.set(node.id, { x: depth * 360 + 80, y: y + 70 });
+    positions.set(node.id, { x, y: y + 70 });
     return y;
   };
   const root = nodes.find((node) => node.parentId === null);
-  if (root) visit(root, 0);
+  if (root) visit(root, 80);
   return positions;
 }

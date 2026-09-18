@@ -266,7 +266,7 @@ test("binding and clearing switch future runs while preserving temporary files a
   );
 });
 
-test("temporary directories serialize one workspace while separate workspaces run concurrently", async (t) => {
+test("temporary directories allow same-workspace and independent runs concurrently", async (t) => {
   const env = await fixture(t);
   env.scheduler.shutdown();
   const other = createWorkspace("独立空间", "独立任务");
@@ -297,9 +297,13 @@ test("temporary directories serialize one workspace while separate workspaces ru
   const first = await submit(env.workspace, "first");
   const second = await submit(env.workspace, "second");
   const independent = await submit(other, "independent");
-  await until(() => started.has("first") && started.has("independent"));
-  assert.equal(second.status, "queued");
-  assert.equal(started.has("second"), false);
+  await until(
+    () =>
+      started.has("first") &&
+      started.has("second") &&
+      started.has("independent"),
+  );
+  assert.equal(second.status, "running");
   assert.notEqual(started.get("first"), started.get("independent"));
   assert.equal(
     started.get("first"),

@@ -1,6 +1,8 @@
 import type { Message } from "@earendil-works/pi-ai";
 import { ancestorPath } from "../shared/types.ts";
+import type { ContextCheckpoint, ContextSource } from "../shared/types.ts";
 import type { StoredWorkspace } from "./store.ts";
+import type { StoredNode } from "./store.ts";
 
 export const SYSTEM_PROMPT =
   "你是 Panel 工作台中的协作助手。使用用户的语言清晰、具体地回答。当前对话只包含根到当前分支的上下文，不要假设自己读过其他分支。不声称已执行你没有能力执行的操作。使用 Markdown 排版。";
@@ -8,11 +10,13 @@ export const SYSTEM_PROMPT =
 export function buildContext(
   workspace: StoredWorkspace,
   parentId: string,
-): { ids: string[]; messages: Message[] } {
+): { ids: string[]; messages: Message[]; sources: ContextSource[] } {
   const path = ancestorPath(workspace.nodes, parentId);
   const messages: Message[] = [];
+  const sources: ContextSource[] = [];
   for (const visible of path) {
     const node = workspace.nodes.find((item) => item.id === visible.id)!;
+    const start = messages.length;
     if (node.contextStale)
       throw new Error("此路径包含已失效的上下文，请从最早失效的节点重新生成。");
     if (node.status !== "root" && node.status !== "completed")
@@ -33,8 +37,44 @@ export function buildContext(
         timestamp: node.createdAt,
       });
     }
+    sources.push({
+      nodeId: node.id,
+      revision: node.revision ?? 0,
+      messageCount: messages.length - start,
+    });
   }
-  return { ids: path.map((node) => node.id), messages };
+  return { ids: path.map((node) => node.id), messages, sources };
+}
+
+/** Candidates only: the runtime verifies source hashes and decides whether this path needs one. */
+export function preparedContextCheckpoints(
+  node: StoredNode,
+): ContextCheckpoint[] {
+  return [
+    ...new Map(
+      [
+        ...(node.preparedCompactions ?? []),
+        ...(node.preparationRequests ?? []).flatMap((request) =>
+          request.status === "completed" && request.checkpoint
+            ? [request.checkpoint]
+            : [],
+        ),
+        ...(node.preparedCompaction ? [node.preparedCompaction] : []),
+      ].map((checkpoint) => [checkpoint.id, checkpoint]),
+    ).values(),
+  ];
+}
+
+export function contextCheckpoints(
+  workspace: StoredWorkspace,
+  ids: string[],
+): ContextCheckpoint[] {
+  return ids.flatMap((id) => {
+    const node = workspace.nodes.find((item) => item.id === id);
+    return node
+      ? [...(node.compactions ?? []), ...preparedContextCheckpoints(node)]
+      : [];
+  });
 }
 
 export function estimateTokens(messages: Message[], prompt = ""): number {

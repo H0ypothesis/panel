@@ -1,0 +1,68 @@
+.context-compression {
+  min-width: 0;
+  margin-bottom: 22px;
+  padding: 14px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--surface-subtle);
+  color: var(--text-body);
+  font-size: 11px;
+}
+.compression-heading,
+.compression-heading > b,
+.compression-auto,
+.compression-preparation-heading,
+.compression-preparation-heading > button {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+.compression-heading,
+.compression-preparation-heading {
+  flex-wrap: wrap;
+  justify-content: space-between;
+  gap: 10px;
+}
+.compression-heading > b {
+  color: var(--text-heading);
+  font-size: 12px;
+}
+.compression-auto,
+.compression-checkpoint.selected {
+  border-color: var(--compression-accent, #9b7653);
+}
+.compression-prepared-node + .compression-prepared-node {
+  margin-top: 14px;
+}
+.compression-node-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 6px;
+  margin-top: 7px;
+}
+.compression-node-actions > button {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 5px 8px;
+  border: 1px solid var(--line-strong);
+  border-radius: 6px;
+  background: var(--surface-control);
+  color: var(--text-control);
+  font-size: 10px;
+}
+.composer-compression-note {
+  margin: 8px 0 0;
+  color: var(--text-accent-strong);
+  font-size: 10px;
+  line-height: 1.6;
+}
+@media (max-width: 600px) {
+  .context-compression {
+    padding: 11px;
+  }
+  .compression-checkpoint > summary {
+    flex-wrap: wrap;
+  }
+}

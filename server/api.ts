@@ -11,6 +11,8 @@ import { Store } from "./store.ts";
 import { listDirectories, workingDirectory } from "./directories.ts";
 import { validateApprovalSettings } from "./approval-settings.ts";
 import { webCapabilities } from "./web-tools.ts";
+import { importWorkspace, MAX_IMPORT_BYTES } from "./workspace-import.ts";
+import { readWorkspaceImportFile } from "./workspace-import-file.ts";
 
 function approvalMode(value: unknown): ApprovalMode {
   if (value !== "ask" && value !== "auto")
@@ -28,6 +30,7 @@ function json(response: ServerResponse, status: number, body: unknown) {
 
 async function readJson(
   request: IncomingMessage,
+  maxBytes = 512_000,
 ): Promise<Record<string, unknown>> {
   if (!request.headers["content-type"]?.startsWith("application/json"))
     throw new Error("请求必须使用 application/json。");
@@ -35,7 +38,7 @@ async function readJson(
   const chunks: Buffer[] = [];
   for await (const chunk of request) {
     size += chunk.length;
-    if (size > 512_000) throw new Error("请求内容过大。");
+    if (size > maxBytes) throw new Error("请求内容过大。");
     chunks.push(chunk);
   }
   const data: unknown = JSON.parse(Buffer.concat(chunks).toString("utf8"));
@@ -65,7 +68,17 @@ function expectedRevision(value: unknown): number {
   return value;
 }
 
+function requestId(value: unknown): string {
+  const id = field(value, "请求 ID", 80);
+  if (!/^[a-zA-Z0-9_-]{8,80}$/.test(id)) throw new Error("请求 ID 格式错误。");
+  return id;
+}
+
 function runInput(body: Record<string, unknown>) {
+  if (body.contextMode !== undefined && body.contextMode !== "raw")
+    throw new Error("上下文选择无效。");
+  if (body.contextMode === "raw" && body.contextCheckpointId !== undefined)
+    throw new Error("原文和压缩摘要不能同时选择。");
   const config = body.config as Partial<RunConfig> | undefined;
   if (
     !config ||
@@ -73,13 +86,15 @@ function runInput(body: Record<string, unknown>) {
     typeof config.thinking !== "string"
   )
     throw new Error("请选择模型与思考强度。");
-  const requestId = field(body.requestId, "请求 ID", 80);
-  if (!/^[a-zA-Z0-9_-]{8,80}$/.test(requestId))
-    throw new Error("请求 ID 格式错误。");
   return {
     prompt: field(body.prompt, "问题", 20000),
     config: config as RunConfig,
-    requestId,
+    requestId: requestId(body.requestId),
+    contextMode: body.contextMode as "raw" | undefined,
+    contextCheckpointId:
+      body.contextCheckpointId === undefined
+        ? undefined
+        : field(body.contextCheckpointId, "摘要 ID", 100),
   };
 }
 
@@ -157,6 +172,23 @@ export function createApi(
         });
       } else if (
         request.method === "POST" &&
+        url.pathname === "/api/workspaces/import"
+      ) {
+        const body = await readJson(request, MAX_IMPORT_BYTES);
+        const hasPath = Object.hasOwn(body, "path");
+        const hasData = Object.hasOwn(body, "data");
+        if (hasPath === hasData)
+          throw new Error("请选择一个 JSON 文件或填写一个 JSON 文件路径。");
+        const workspace = importWorkspace(
+          hasPath ? await readWorkspaceImportFile(body.path) : body.data,
+        );
+        await store.save({ workspace, createWorkspace: true });
+        json(response, 201, {
+          workspaceId: workspace.id,
+          state: store.snapshot(),
+        });
+      } else if (
+        request.method === "POST" &&
         url.pathname === "/api/workspaces"
       ) {
         const body = await readJson(request);
@@ -165,6 +197,12 @@ export function createApi(
           field(body.description ?? "", "背景", 10000, true),
         );
         workspace.approvalMode = approvalMode(body.approvalMode ?? "ask");
+        if (
+          body.autoCompact !== undefined &&
+          typeof body.autoCompact !== "boolean"
+        )
+          throw new Error("自动压缩设置必须为布尔值。");
+        workspace.autoCompact = body.autoCompact !== false;
         if (
           body.safetyModel !== undefined &&
           body.safetyModel !== null &&
@@ -184,6 +222,7 @@ export function createApi(
           workspace.workingDirectory = await workingDirectory(
             body.workingDirectory,
           );
+        scheduler.assertDirectoryAvailable(workspace.workingDirectory);
         store.data.workspaces.unshift(workspace);
         store.touch(workspace);
         await store.save();
@@ -193,6 +232,30 @@ export function createApi(
         });
       } else {
         const settings = url.pathname.match(/^\/api\/workspaces\/([^/]+)$/);
+        if (request.method === "DELETE" && settings) {
+          const body = await readJson(request);
+          if (
+            body.deleteTemporaryDirectory !== undefined &&
+            typeof body.deleteTemporaryDirectory !== "boolean"
+          )
+            throw new Error("请选择是否清理临时目录文件。");
+          if (
+            !Array.isArray(body.expectedNodeIds) ||
+            !body.expectedNodeIds.length
+          )
+            throw new Error("请提供确认删除的节点范围。");
+          const state = await scheduler.deleteWorkspace(
+            decodeURIComponent(settings[1]),
+            {
+              deleteTemporaryDirectory: body.deleteTemporaryDirectory === true,
+              expectedNodeIds: body.expectedNodeIds.map((id) =>
+                field(id, "节点 ID", 80),
+              ),
+            },
+          );
+          json(response, 200, state);
+          return true;
+        }
         if (request.method === "PATCH" && settings) {
           const workspace = store.workspace(settings[1]);
           const body = await readJson(request);
@@ -200,6 +263,11 @@ export function createApi(
             body.approvalMode !== undefined
               ? approvalMode(body.approvalMode)
               : undefined;
+          if (
+            body.autoCompact !== undefined &&
+            typeof body.autoCompact !== "boolean"
+          )
+            throw new Error("自动压缩设置必须为布尔值。");
           const directory =
             body.workingDirectory === undefined
               ? undefined
@@ -209,6 +277,7 @@ export function createApi(
           await scheduler.configureWorkspace(workspace.id, {
             workingDirectory: directory,
             approvalMode: mode,
+            autoCompact: body.autoCompact as boolean | undefined,
             safetyModel:
               body.safetyModel === undefined
                 ? undefined
@@ -217,6 +286,33 @@ export function createApi(
                   : field(body.safetyModel, "安全模型", 300),
           });
           json(response, 200, store.snapshot());
+          return true;
+        }
+        const compaction = url.pathname.match(
+          /^\/api\/workspaces\/([^/]+)\/nodes\/([^/]+)\/compact$/,
+        );
+        if (request.method === "POST" && compaction) {
+          const body = await readJson(request);
+          const config = body.config as Partial<RunConfig> | undefined;
+          if (
+            !config ||
+            typeof config.model !== "string" ||
+            typeof config.thinking !== "string"
+          )
+            throw new Error("请选择摘要使用的模型与思考强度。");
+          const checkpoint = await scheduler.compactContext(
+            decodeURIComponent(compaction[1]),
+            decodeURIComponent(compaction[2]),
+            {
+              config: config as RunConfig,
+              expectedRevision: expectedRevision(body.expectedRevision),
+              requestId: requestId(body.requestId),
+            },
+          );
+          json(response, 200, {
+            checkpointId: checkpoint?.id,
+            state: store.snapshot(),
+          });
           return true;
         }
         const approval = url.pathname.match(
@@ -236,6 +332,22 @@ export function createApi(
               : expectedRevision(body.expectedRevision),
           );
           json(response, 200, store.snapshot());
+          return true;
+        }
+        const retry = url.pathname.match(
+          /^\/api\/workspaces\/([^/]+)\/nodes\/([^/]+)\/retry$/,
+        );
+        if (request.method === "POST" && retry) {
+          const body = await readJson(request);
+          const node = await scheduler.retry(
+            decodeURIComponent(retry[1]),
+            decodeURIComponent(retry[2]),
+            {
+              requestId: requestId(body.requestId),
+              expectedRevision: expectedRevision(body.expectedRevision),
+            },
+          );
+          json(response, 200, { nodeId: node.id, state: store.snapshot() });
           return true;
         }
         const regenerate = url.pathname.match(
@@ -291,9 +403,17 @@ export function createApi(
             json(response, 200, {
               version: 1,
               exportedAt: new Date().toISOString(),
-              workspace: store
-                .snapshot()
-                .workspaces.find((item) => item.id === workspace.id),
+              workspace: {
+                ...store
+                  .snapshot()
+                  .workspaces.find((item) => item.id === workspace.id),
+                // The UI snapshot omits transcripts; an explicit JSON export keeps
+                // the full original messages, archived runs, and derived summaries.
+                nodes: workspace.nodes.map(
+                  ({ preparationRequest: _preparationRequest, ...node }) =>
+                    node,
+                ),
+              },
             });
           }
         } else if (request.method === "POST" && action === "nodes" && !nodeId) {

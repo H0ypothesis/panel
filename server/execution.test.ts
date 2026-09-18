@@ -509,7 +509,7 @@ test("a failed settings save rolls approval back, and tool batches run sequentia
   }
 });
 
-test("overlapping coding directories serialize while independent projects still run in parallel", async () => {
+test("overlapping directories allow model parallelism while explicit capacity still queues later jobs", async () => {
   const env = await setup([]);
   const calls: string[] = [];
   const releases = new Map<string, () => void>();
@@ -553,15 +553,15 @@ test("overlapping coding directories serialize while independent projects still 
     const second = await submit(env.workspace, "same");
     const third = await submit(nested, "nested");
     const fourth = await submit(independent, "independent");
-    await until(() => calls.length === 2);
-    assert.deepEqual(calls, ["first", "independent"]);
-    assert.equal(second.status, "queued");
-    assert.equal(third.status, "queued");
+    await until(() => calls.length === 3);
+    assert.deepEqual(calls, ["first", "same", "nested"]);
+    assert.equal(second.status, "running");
+    assert.equal(third.status, "running");
+    assert.equal(fourth.status, "queued");
     releases.get("first")!();
-    await until(() => calls.includes("same"));
+    await until(() => calls.includes("independent"));
     assert.equal(first.status, "completed");
     releases.get("same")!();
-    await until(() => calls.includes("nested"));
     releases.get("nested")!();
     releases.get("independent")!();
     await until(
