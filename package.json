@@ -6,7 +6,8 @@
   "scripts": {
     "dev": "tsx server/index.ts",
     "check": "tsc --noEmit && tsc --project tsconfig.server.json --noEmit",
-    "setup:pi": "node pi/packages/ai/scripts/generate-models.ts --strict --data-only",
+    "setup:pi": "node --import ./scripts/pi-models-dev-compat.mjs pi/packages/ai/scripts/generate-models.ts --strict --data-only",
+    "test:setup": "node --test scripts/setup-pi.test.mjs",
     "test:core": "tsx --test server/*.test.ts",
     "build": "vite build",
     "format": "prettier --write src server shared vite.config.ts tsconfig*.json package.json docs/PRD.md README.md",

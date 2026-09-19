@@ -24,6 +24,8 @@ npm run dev
 
 打开 <http://127.0.0.1:4317>。`setup:pi` 使用 Pi 自带生成器下载模型元数据，首次运行或升级 Pi 后执行一次；随后启动和演示模式可离线使用。
 
+安装入口兼容 models.dev 将 `kimi-for-coding` 拆分为区域目录的变化：把与当前 Pi `api.kimi.com` 端点对应的 `kimi-code-plan-cn` 映射回生成器使用的名称。仍保留 `--strict --data-only` 校验；网络失败或供应商目录确实缺失时会报错。遇到 `Cannot hydrate missing providers: kimi-coding` 时，更新 Panel 后重新运行 `npm run setup:pi`。
+
 没有 API Key 也可体验对话分支工作流。默认提供 **Pi Demo 演示模型**和明确标注的示例探索。演示模型使用真实 Pi Agent 和 faux provider 流式执行预设回复，不是远程模型推理，不产生模型费用，也不会执行本地或联网工具。
 
 ## 真实模型
@@ -187,6 +189,7 @@ EXA_API_KEY=你的_Exa_API_密钥
 
 ```bash
 npm run check       # 前后端 TypeScript 检查
+npm run test:setup  # 安装时的模型目录兼容与严格校验回归测试（无需联网）
 npm run test:core   # 分支、审批、目录调度、本地与联网工具、取消、恢复、API 和 Pi 演示测试
 npm run build      # 生成前端发布文件
 npm start          # 本地生产模式，仍需要 node_modules 与 pi/ 源码
