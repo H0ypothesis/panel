@@ -584,7 +584,7 @@ test("limits excessive node counts without attempting recursive traversal", () =
     id: `node-${index}`,
   }));
   assert.throws(() => importWorkspace(source), /10000/);
-  assert.equal(MAX_IMPORT_BYTES, 20 * 1024 * 1024);
+  assert.equal(MAX_IMPORT_BYTES, 100 * 1024 * 1024);
 });
 
 test("imports verified compression origins and branch choices with new checkpoint provenance", () => {

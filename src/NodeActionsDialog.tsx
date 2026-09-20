@@ -8,6 +8,7 @@ import {
   type Workspace,
 } from "../shared/types";
 import { ComposerModelControls } from "./WorkspaceControls";
+import { CardReferenceInput } from "./CardReferenceInput";
 import "./node-actions.css";
 
 export function subtreeIds(nodes: TurnNode[], nodeId: string): string[] {
@@ -32,6 +33,7 @@ export interface RegenerateInput {
   config: RunConfig;
   requestId: string;
   expectedRevision: number;
+  referenceNodeIds?: string[];
 }
 
 export function NodeActionsDialog({
@@ -55,6 +57,33 @@ export function NodeActionsDialog({
   const input = useRef<HTMLTextAreaElement>(null);
   const cancel = useRef<HTMLButtonElement>(null);
   const [prompt, setPrompt] = useState(target.node.prompt);
+  const [referenceNodeIds, setReferenceNodeIds] = useState(() =>
+    (target.node.contextReferences ?? []).map((item) => item.nodeId),
+  );
+  const [referencesChanged, setReferencesChanged] = useState(false);
+  const referenceCandidates = workspace.nodes.filter(
+    (node) =>
+      node.id !== target.node.id &&
+      node.status === "completed" &&
+      !node.contextStale,
+  );
+  // Keep original labels for saved snapshots, including deleted source cards.
+  for (const reference of target.node.contextReferences ?? []) {
+    const index = referenceCandidates.findIndex(
+      (node) => node.id === reference.nodeId,
+    );
+    const source: TurnNode = {
+      ...target.node,
+      id: reference.nodeId,
+      prompt: reference.prompt,
+      response: reference.response,
+      revision: reference.revision,
+      status: "completed",
+      contextStale: false,
+    };
+    if (index >= 0) referenceCandidates[index] = source;
+    else referenceCandidates.push(source);
+  }
   const [config, setConfig] = useState<RunConfig>({ ...target.node.config });
   const [requestId, setRequestId] = useState(() => crypto.randomUUID());
   const [busy, setBusy] = useState(false);
@@ -139,6 +168,7 @@ export function NodeActionsDialog({
           config,
           requestId,
           expectedRevision: target.node.revision ?? 0,
+          ...(referencesChanged ? { referenceNodeIds } : {}),
         });
       else await onDelete();
     } catch (reason) {
@@ -185,14 +215,22 @@ export function NodeActionsDialog({
           <>
             <label className="form-label">
               当前节点指令
-          <textarea
-            ref={input}
-            aria-label="当前节点指令"
+              <CardReferenceInput
+                inputRef={input}
+                candidates={referenceCandidates}
+                workspaceNodes={workspace.nodes}
+                referenceNodeIds={referenceNodeIds}
+                onReferencesChange={(ids) => {
+                  setReferenceNodeIds(ids);
+                  setReferencesChanged(true);
+                  setRequestId(crypto.randomUUID());
+                }}
+                aria-label="当前节点指令"
                 value={prompt}
                 maxLength={20000}
                 disabled={busy}
-                onChange={(event) => {
-                  setPrompt(event.target.value);
+                onChange={(value) => {
+                  setPrompt(value);
                   setRequestId(crypto.randomUUID());
                 }}
                 onKeyDown={(event) => {

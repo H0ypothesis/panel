@@ -8,16 +8,26 @@ import type {
 } from "@earendil-works/pi-ai";
 import type {
   ContextCheckpoint,
+  ContextReference,
   ContextSource,
   RunConfig,
   ToolCall,
   TurnNode,
 } from "../shared/types.ts";
 import { buildContext } from "./context.ts";
+import {
+  attachmentPrompt,
+  imageContent,
+  restoreAttachments,
+} from "./attachments.ts";
 import { checkpointMatches, contextSourceHash } from "./compaction.ts";
+import {
+  contextReferencePrompt,
+  MAX_CONTEXT_REFERENCES,
+} from "./context-references.ts";
 import type { StoredNode, StoredRun, StoredWorkspace } from "./store.ts";
 
-export const MAX_IMPORT_BYTES = 20 * 1024 * 1024;
+export const MAX_IMPORT_BYTES = 100 * 1024 * 1024;
 const MAX_NODES = 10_000;
 const thinkingLevels = [
   "off",
@@ -553,10 +563,37 @@ export function importWorkspace(value: unknown): StoredWorkspace {
     for (const id of path) visited.add(id);
   }
   const now = Date.now();
+  // Deleted sources remain immutable historical references. Give them IDs in
+  // a separate namespace, shared across every imported run of this workspace,
+  // so they cannot accidentally link to a current card after import.
+  const historicalReferenceIds = new Map<string, string>();
   function remap(value: unknown, label: string): string {
     const id = ids.get(string(value, label, true));
     if (!id) invalid(`${label}引用`);
     return id;
+  }
+  function references(value: unknown, label: string): ContextReference[] {
+    const items = array(value, label);
+    if (items.length > MAX_CONTEXT_REFERENCES) invalid(`${label}数量`);
+    const seen = new Set<string>();
+    return items.map((item) => {
+      const source = object(item, label);
+      const originalId = string(source.nodeId, `${label}节点 ID`, true);
+      if (seen.has(originalId)) invalid(`${label}重复节点 ID`);
+      seen.add(originalId);
+      let nodeId =
+        ids.get(originalId) ?? historicalReferenceIds.get(originalId);
+      if (!nodeId) {
+        nodeId = `historical-reference:${randomUUID()}`;
+        historicalReferenceIds.set(originalId, nodeId);
+      }
+      return {
+        nodeId,
+        revision: integer(source.revision, `${label}版本`),
+        prompt: string(source.prompt, `${label}问题`),
+        response: string(source.response, `${label}回答`),
+      };
+    });
   }
   function parseNode(original: ObjectValue, label: string): StoredNode {
     const position = object(original.position, `${label}位置`);
@@ -565,6 +602,11 @@ export function importWorkspace(value: unknown): StoredWorkspace {
     const createdAt = number(original.createdAt, `${label}创建时间`);
     const prompt = string(original.prompt, `${label}问题`);
     const response = string(original.response, `${label}回答`);
+    const contextReferences = optional(
+      original.contextReferences,
+      `${label}引用卡片`,
+      references,
+    );
     const contextIds = array(original.contextIds, `${label}上下文`).map((id) =>
       string(id, `${label}上下文 ID`, true),
     );
@@ -598,6 +640,23 @@ export function importWorkspace(value: unknown): StoredWorkspace {
       `${label}完整消息`,
       messages,
     );
+    // Attachment bytes are data, never a live path or execution grant. Rebuild
+    // the public list from validated originals instead of trusting metadata.
+    const attachmentData =
+      original.attachmentData === undefined
+        ? undefined
+        : restoreAttachments(original.attachmentData);
+    if (
+      original.attachments !== undefined &&
+      array(original.attachments, `${label}附件`).length > 0 &&
+      !attachmentData?.length
+    )
+      invalid(`${label}附件原件缺失`);
+    const fallbackPrompt = attachmentPrompt(
+      `以下是从 JSON 导入的历史轮次：\n用户：${contextReferencePrompt(prompt, contextReferences)}\n助手：${response}`,
+      attachmentData ?? [],
+    );
+    const fallbackImages = imageContent(attachmentData ?? []);
     const startedAt = optional(original.startedAt, `${label}开始时间`, number);
     const finishedAt = optional(
       original.finishedAt,
@@ -611,6 +670,13 @@ export function importWorkspace(value: unknown): StoredWorkspace {
         original.parentId === null ? null : remap(original.parentId, label),
       prompt,
       response,
+      ...(contextReferences === undefined ? {} : { contextReferences }),
+      ...(attachmentData?.length
+        ? {
+            attachments: attachmentData.map((file) => file.metadata),
+            attachmentData,
+          }
+        : {}),
       status: interrupted ? "failed" : status,
       config: config(original.config, `${label}配置`),
       color: enumeration(
@@ -681,7 +747,12 @@ export function importWorkspace(value: unknown): StoredWorkspace {
               messages: [
                 {
                   role: "user",
-                  content: `以下是从 JSON 导入的历史轮次：\n用户：${prompt}\n助手：${response}`,
+                  content: fallbackImages.length
+                    ? [
+                        { type: "text", text: fallbackPrompt },
+                        ...fallbackImages,
+                      ]
+                    : fallbackPrompt,
                   timestamp: createdAt,
                 },
               ],

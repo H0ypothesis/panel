@@ -1,0 +1,161 @@
+.attachment-picker {
+  min-width: 0;
+  padding: 9px 10px;
+  border: 1px dashed var(--line-strong);
+  border-radius: 7px;
+  background: var(--composer-background);
+  transition:
+    border-color 0.15s,
+    background-color 0.15s;
+}
+.attachment-picker.is-dragging {
+  border-color: var(--focus-ring);
+  background: var(--surface-hover);
+  box-shadow: 0 0 0 2px var(--focus-halo);
+}
+.attachment-picker.is-disabled {
+  opacity: 0.65;
+}
+.attachment-file-input {
+  display: none;
+}
+.attachment-picker-topline,
+.attachment-add {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.attachment-picker-topline {
+  justify-content: space-between;
+  min-width: 0;
+}
+.attachment-add {
+  min-height: 24px;
+  padding: 3px 5px;
+  border-radius: 4px;
+  color: var(--text-accent-strong);
+  font-size: 11px;
+  white-space: nowrap;
+}
+.attachment-add:hover:not(:disabled) {
+  background: var(--surface-hover);
+}
+.attachment-add > span {
+  color: var(--text-muted);
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+}
+.attachment-drop-hint,
+.attachment-help {
+  color: var(--text-muted);
+  font-size: 10px;
+  line-height: 1.6;
+}
+.attachment-help {
+  margin: 3px 0 0;
+}
+.attachment-error {
+  margin: 6px 0 0;
+  font-size: 11px;
+  line-height: 1.6;
+  color: var(--error);
+  overflow-wrap: anywhere;
+}
+.attachment-file-list {
+  display: grid;
+  gap: 5px;
+  min-width: 0;
+  max-height: 158px;
+  margin: 7px 0 0;
+  padding: 0;
+  overflow-y: auto;
+  list-style: none;
+  overscroll-behavior: contain;
+}
+.attachment-file {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  min-height: 42px;
+  padding: 5px 6px;
+  border: 1px solid var(--line-subtle);
+  border-radius: 6px;
+  background: var(--card-background);
+}
+.attachment-file-icon {
+  display: grid;
+  place-items: center;
+  width: 30px;
+  height: 30px;
+  flex-shrink: 0;
+  overflow: hidden;
+  border-radius: 4px;
+  color: var(--text-muted);
+  background: var(--surface-hover);
+}
+.attachment-file-icon > img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+.attachment-file-info {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+  flex: 1;
+}
+.attachment-file-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-control);
+  font-size: 11px;
+  line-height: 1.4;
+}
+.attachment-file-detail {
+  color: var(--text-muted);
+  font-size: 10px;
+  line-height: 1.4;
+}
+.attachment-remove,
+.attachment-download {
+  display: grid;
+  place-items: center;
+  width: 24px;
+  height: 24px;
+  flex-shrink: 0;
+  padding: 0;
+  border-radius: 4px;
+  color: var(--text-muted);
+}
+.attachment-remove:hover:not(:disabled),
+.attachment-download:hover {
+  color: var(--text-heading);
+  background: var(--surface-hover);
+}
+.attachment-add:focus-visible,
+.attachment-remove:focus-visible,
+.attachment-download:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 2px;
+}
+.attachment-picker.compact {
+  padding: 7px 8px;
+}
+.attachment-picker.compact .attachment-help {
+  font-size: 9px;
+}
+.attachment-uploaded-list {
+  max-height: none;
+  margin: 10px 0;
+}
+.card-attachment-count {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  flex-shrink: 0;
+  color: var(--text-muted);
+  font-size: 9px;
+  font-variant-numeric: tabular-nums;
+}

@@ -29,13 +29,14 @@ export async function readWorkspaceImportFile(
     if (!info.isFile())
       throw new Error("请选择 JSON 文件，不能导入目录或特殊文件。");
     if (info.size > MAX_IMPORT_BYTES)
-      throw new Error("JSON 文件不能超过 20 MB。");
+      throw new Error("JSON 文件不能超过 100 MB。");
     const chunks: Buffer[] = [];
     let size = 0;
     // Bound the actual read too, in case another process grows the file.
     for await (const chunk of file.createReadStream({ autoClose: false })) {
       size += chunk.length;
-      if (size > MAX_IMPORT_BYTES) throw new Error("JSON 文件不能超过 20 MB。");
+      if (size > MAX_IMPORT_BYTES)
+        throw new Error("JSON 文件不能超过 100 MB。");
       chunks.push(chunk);
     }
     try {

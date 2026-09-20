@@ -1,0 +1,209 @@
+.card-reference-input {
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+.card-reference-input > textarea {
+  display: block;
+  flex: 1 0 auto;
+}
+.card-reference-sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+.card-reference-selection {
+  padding: 5px 8px 7px;
+  min-width: 0;
+}
+.card-reference-selection-label {
+  display: block;
+  margin-bottom: 5px;
+  font-size: 9px;
+  color: var(--text-muted);
+}
+.card-reference-chips {
+  display: flex;
+  flex-wrap: wrap;
+  align-content: flex-start;
+  gap: 4px;
+  max-height: 84px;
+  overflow: auto;
+  overscroll-behavior: contain;
+  padding: 0;
+  margin: 0;
+  list-style: none;
+}
+.card-reference-chip {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+  max-width: 100%;
+  min-height: 23px;
+  padding: 2px 4px 2px 6px;
+  border: 1px solid var(--line-strong);
+  border-radius: 5px;
+  background: var(--surface-selected);
+  color: var(--text-heading);
+  font-size: 10px;
+}
+.card-reference-chip > span {
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+.card-reference-chip > svg,
+.card-reference-chip > button {
+  flex-shrink: 0;
+}
+.card-reference-chip > button {
+  display: grid;
+  place-items: center;
+  width: 19px;
+  height: 19px;
+  padding: 0;
+  color: var(--text-muted);
+  border-radius: 3px;
+}
+.card-reference-chip > button:hover:not(:disabled) {
+  background: var(--surface-hover);
+  color: var(--text-heading);
+}
+.card-reference-chip.is-unavailable,
+.card-reference-notice {
+  color: var(--error);
+}
+.card-reference-notice {
+  margin: 3px 8px 6px;
+  font-size: 10px;
+}
+.card-reference-menu {
+  position: fixed;
+  z-index: 2000;
+  display: flex;
+  flex-direction: column;
+  box-sizing: border-box;
+  overflow: hidden;
+  border: 1px solid var(--line-strong);
+  border-radius: 9px;
+  background: var(--surface-raised);
+  box-shadow: 0 6px 24px var(--shadow-card);
+  color: var(--text-heading);
+  cursor: default;
+}
+.card-reference-menu-heading,
+.card-reference-menu-heading > strong {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+}
+.card-reference-menu-heading {
+  flex-shrink: 0;
+  justify-content: space-between;
+  padding: 9px 11px 7px;
+  font-size: 11px;
+}
+.card-reference-menu-heading > span {
+  font-size: 10px;
+  color: var(--text-muted);
+}
+.card-reference-options {
+  min-height: 0;
+  overflow-y: auto;
+  padding: 2px 5px;
+  overscroll-behavior: contain;
+}
+.card-reference-option {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  width: 100%;
+  padding: 8px 6px;
+  margin-bottom: 2px;
+  border-radius: 5px;
+  text-align: left;
+  color: var(--text-heading);
+}
+.card-reference-option.is-active {
+  background: var(--surface-selected);
+}
+.card-reference-option[aria-disabled="true"] {
+  opacity: 0.5;
+}
+.card-reference-option-content {
+  display: grid;
+  min-width: 0;
+  flex: 1;
+  gap: 3px;
+}
+.card-reference-option-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  min-width: 0;
+}
+.card-reference-option-heading > strong,
+.card-reference-option-preview {
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+.card-reference-option-heading > strong {
+  min-width: 0;
+  font-size: 11px;
+  font-weight: 500;
+}
+.card-reference-option-preview {
+  font-size: 10px;
+  color: var(--text-muted);
+}
+.card-reference-option-meta {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  flex-shrink: 0;
+}
+.card-reference-option-number {
+  padding: 2px 5px;
+  border-radius: 4px;
+  background: var(--surface-muted);
+  color: var(--text-muted);
+  font-size: 9px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.card-reference-color {
+  flex: 0 0 5px;
+  width: 5px;
+  height: 24px;
+  border-radius: 3px;
+  background: var(--branch-green);
+}
+.card-reference-color.color-violet {
+  background: var(--branch-purple);
+}
+.card-reference-color.color-blue {
+  background: var(--branch-blue);
+}
+.card-reference-color.color-amber {
+  background: var(--branch-orange);
+}
+.card-reference-menu-footer {
+  flex-shrink: 0;
+  padding: 7px 11px;
+  border-top: 1px solid var(--line-subtle);
+  font-size: 9px;
+  color: var(--text-muted);
+}
+.card-reference-empty {
+  margin: 10px 7px 14px;
+  font-size: 11px;
+  line-height: 1.6;
+  color: var(--text-muted);
+}

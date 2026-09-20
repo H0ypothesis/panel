@@ -1,0 +1,73 @@
+.card-reference-list {
+  margin: 0 0 18px;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  min-width: 0;
+}
+.card-reference-list-heading {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 8px;
+  font-size: 11px;
+  color: var(--muted);
+}
+.card-reference-list-heading b {
+  color: var(--text-heading);
+}
+.card-reference-list-heading > span {
+  margin-left: auto;
+}
+.card-reference-snapshot {
+  font-size: 12px;
+}
+.card-reference-snapshot + .card-reference-snapshot {
+  margin-top: 6px;
+}
+.card-reference-snapshot > summary {
+  cursor: pointer;
+  overflow-wrap: anywhere;
+}
+.card-reference-snapshot-number {
+  float: right;
+  margin-left: 8px;
+  padding: 1px 5px;
+  border-radius: 4px;
+  background: var(--surface-muted);
+  color: var(--text-muted);
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.card-reference-snapshot-body {
+  padding: 10px 0 2px;
+  min-width: 0;
+}
+.card-reference-origin {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 12px;
+  color: var(--muted);
+  font-size: 11px;
+}
+.card-reference-origin button {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  color: var(--text-accent-strong);
+  background: transparent;
+  border: 0;
+  padding: 2px 0;
+  cursor: pointer;
+}
+.card-reference-question {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.card-reference-snapshot .markdown {
+  font-size: 12px;
+}

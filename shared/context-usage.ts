@@ -20,6 +20,11 @@ function visibleCharacters(node: TurnNode): number {
   return (
     node.prompt.length +
     node.response.length +
+    (node.contextReferences ?? []).reduce(
+      (total, reference) =>
+        total + reference.prompt.length + reference.response.length,
+      0,
+    ) +
     (node.toolCalls ?? []).reduce(
       (total, call) =>
         total +

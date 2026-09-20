@@ -66,6 +66,8 @@ import {
 import { Graph, StatusIcon } from "./Graph";
 import { ResizableWorkspace } from "./ResizableWorkspace";
 import { ToolActivity } from "./CodingControls";
+import { GenerationIndicator } from "./GenerationIndicator";
+import { getGenerationActivity } from "./generation-activity";
 import { ContextCompression } from "./ContextCompression";
 import {
   checkpointMatchesPath,
@@ -86,6 +88,10 @@ import {
 } from "../shared/context-usage";
 import { formatContextWindow } from "./model-context";
 import type { CanvasBranchDraft } from "./branch-draft";
+import { AttachmentPicker, AttachmentList } from "./Attachments";
+import { encodeAttachments } from "./attachment-draft";
+import { CardReferenceInput } from "./CardReferenceInput";
+import { CardReferenceList } from "./CardReferenceList";
 import { BrandHint } from "./BrandHint";
 import { DeleteWorkspaceDialog } from "./DeleteWorkspaceDialog";
 import { NewWorkspace } from "./NewWorkspace";
@@ -95,6 +101,8 @@ import {
   subtreeIds,
   type NodeActionTarget,
 } from "./NodeActionsDialog";
+
+const EMPTY_ATTACHMENT_FILES: File[] = [];
 
 function Logo({ small = false }: { small?: boolean }) {
   return (
@@ -170,7 +178,16 @@ export function App() {
   const [exportOpen, setExportOpen] = useState(false);
   const [tab, setTab] = useState<"conversation" | "context">("conversation");
   const [drafts, setDrafts] = useState<
-    Record<string, { text: string; requestId: string; contextMode?: "raw" }>
+    Record<
+      string,
+      {
+        text: string;
+        files?: File[];
+        referenceNodeIds?: string[];
+        requestId: string;
+        contextMode?: "raw";
+      }
+    >
   >({});
   const [config, setConfig] = useState<RunConfig>({ ...DEFAULT_CONFIG });
   const configSelection = useRef({ nodeId: "", revision: -1, resolved: false });
@@ -394,6 +411,12 @@ export function App() {
     });
   }, [draftKey, selectedRawContext]);
   const draft = drafts[draftKey]?.text ?? "";
+  const draftFiles = drafts[draftKey]?.files ?? EMPTY_ATTACHMENT_FILES;
+  const draftReferenceIds = drafts[draftKey]?.referenceNodeIds ?? [];
+  const referenceCandidates =
+    workspace?.nodes.filter(
+      (node) => node.status === "completed" && !node.contextStale,
+    ) ?? [];
   const composer = useCollapsibleComposer(
     `${draftKey}:${selected?.revision ?? 0}`,
     Boolean(canBranch),
@@ -642,6 +665,8 @@ export function App() {
                 ? colors[siblings.length % colors.length]
                 : source.color,
             text: existing?.text ?? "",
+            files: existing?.files ?? [],
+            referenceNodeIds: existing?.referenceNodeIds ?? [],
             config: existing?.config ?? {
               ...initial,
               thinking: initialModel?.thinkingLevels.includes(initial.thinking)
@@ -678,7 +703,9 @@ export function App() {
     ],
   );
   const changeCanvasDraft = (
-    change: Partial<Pick<CanvasBranchDraft, "text" | "config">>,
+    change: Partial<
+      Pick<CanvasBranchDraft, "text" | "config" | "files" | "referenceNodeIds">
+    >,
   ) => {
     if (!canvasDraft || canvasSubmittingId === canvasDraft.id) return;
     setCanvasDrafts((current) => ({
@@ -709,7 +736,7 @@ export function App() {
   const sendCanvasDraft = async () => {
     if (
       !canvasDraft ||
-      !canvasDraft.text.trim() ||
+      (!canvasDraft.text.trim() && !canvasDraft.files.length) ||
       canvasDraftBlockedReason ||
       submissionLock.current
     )
@@ -720,11 +747,14 @@ export function App() {
     setSubmitting(true);
     setCanvasSubmittingId(submitted.id);
     try {
+      const attachments = await encodeAttachments(submitted.files);
       const result = await api<MutationResult>(
         `/workspaces/${submitted.workspaceId}/nodes`,
         {
           parentId: submitted.parentId,
           prompt: submitted.text,
+          attachments,
+          referenceNodeIds: submitted.referenceNodeIds,
           config: submitted.config,
           requestId: submitted.requestId,
           contextCheckpointId: submitted.contextCheckpointId,
@@ -788,6 +818,7 @@ export function App() {
     setDrafts((current) => ({
       ...current,
       [draftKey]: {
+        ...current[draftKey],
         text,
         requestId: crypto.randomUUID(),
         contextMode: selectedRawContext ? "raw" : undefined,
@@ -800,7 +831,34 @@ export function App() {
     setDrafts((current) => ({
       ...current,
       [draftKey]: {
+        ...current[draftKey],
         text: current[draftKey]?.text ?? "",
+        requestId: crypto.randomUUID(),
+        contextMode: selectedRawContext ? "raw" : undefined,
+      },
+    }));
+  };
+
+  const changeDraftFiles = (files: File[]) => {
+    setDrafts((current) => ({
+      ...current,
+      [draftKey]: {
+        ...current[draftKey],
+        text: current[draftKey]?.text ?? "",
+        files,
+        requestId: crypto.randomUUID(),
+        contextMode: selectedRawContext ? "raw" : undefined,
+      },
+    }));
+  };
+
+  const changeDraftReferences = (referenceNodeIds: string[]) => {
+    setDrafts((current) => ({
+      ...current,
+      [draftKey]: {
+        ...current[draftKey],
+        text: current[draftKey]?.text ?? "",
+        referenceNodeIds,
         requestId: crypto.randomUUID(),
         contextMode: selectedRawContext ? "raw" : undefined,
       },
@@ -812,7 +870,7 @@ export function App() {
     if (
       !workspace ||
       !selected ||
-      !draft.trim() ||
+      (!draft.trim() && !draftFiles.length) ||
       !canBranch ||
       submitting ||
       submissionLock.current ||
@@ -824,16 +882,18 @@ export function App() {
     )
       return;
     const key = draftKey;
-    const submittedText = draft;
     const requestId = drafts[key]?.requestId ?? crypto.randomUUID();
     submissionLock.current = true;
     setSubmitting(true);
     try {
+      const attachments = await encodeAttachments(draftFiles);
       const result = await api<MutationResult>(
         `/workspaces/${workspace.id}/nodes`,
         {
           parentId: selected.id,
           prompt: draft,
+          attachments,
+          referenceNodeIds: draftReferenceIds,
           config,
           requestId,
           ...(selectedContextCheckpointId
@@ -845,8 +905,11 @@ export function App() {
       );
       apply(result.state);
       setDrafts((current) =>
-        current[key]?.text === submittedText
-          ? { ...current, [key]: { text: "", requestId: crypto.randomUUID() } }
+        current[key]?.requestId === requestId
+          ? {
+              ...current,
+              [key]: { text: "", files: [], requestId: crypto.randomUUID() },
+            }
           : current,
       );
       if (currentWorkspaceId.current === workspace.id) {
@@ -926,6 +989,9 @@ export function App() {
       ...current,
       [key]: {
         text: selected.prompt,
+        referenceNodeIds: (selected.contextReferences ?? []).map(
+          (reference) => reference.nodeId,
+        ),
         requestId: crypto.randomUUID(),
         contextMode:
           !checkpointId && preparedCheckpoints(parent).length
@@ -1592,6 +1658,10 @@ export function App() {
               draftBlockedReason={canvasDraftBlockedReason}
               onDraftTextChange={(text) => changeCanvasDraft({ text })}
               onDraftConfigChange={(config) => changeCanvasDraft({ config })}
+              onDraftFilesChange={(files) => changeCanvasDraft({ files })}
+              onDraftReferencesChange={(referenceNodeIds) =>
+                changeCanvasDraft({ referenceNodeIds })
+              }
               onDraftSubmit={() => void sendCanvasDraft()}
               onDraftCancel={cancelCanvasDraft}
               onEdit={(id) => openNodeAction("edit", id)}
@@ -1755,6 +1825,16 @@ export function App() {
                   </>
                 ) : (
                   <>
+                    <CardReferenceList
+                      references={selected.contextReferences ?? []}
+                      nodes={workspace.nodes}
+                      onLocate={locate}
+                    />
+                    <AttachmentList
+                      attachments={selected.attachments ?? []}
+                      workspaceId={workspace.id}
+                      nodeId={selected.id}
+                    />
                     <div className="answer-heading">
                       <span className="answer-logo">π</span>
                       <b>
@@ -1788,31 +1868,29 @@ export function App() {
                         onDecision={decideApproval}
                       />
                     )}
-                    {selected.response ? (
-                      <Markdown text={selected.response} />
-                    ) : (
+                    {selected.response && <Markdown text={selected.response} />}
+                    {selected.status === "running" ||
+                    selected.status === "queued" ? (
+                      <GenerationIndicator
+                        key={selected.id}
+                        hasResponse={Boolean(selected.response)}
+                        active={tab === "conversation"}
+                        activityKey={getGenerationActivity(selected).key}
+                        message={
+                          selectedPendingApproval
+                            ? "工具操作等待你的批准…"
+                            : selectedSafetyReview
+                              ? "安全模型正在审核工具操作…"
+                              : selected.status === "queued"
+                                ? "已进入队列，稍后开始…"
+                                : undefined
+                        }
+                      />
+                    ) : !selected.response ? (
                       <div className="waiting-response">
-                        {selected.status === "running" ||
-                        selected.status === "queued" ? (
-                          <>
-                            <span className="thinking-dots">
-                              <i />
-                              <i />
-                              <i />
-                            </span>
-                            {selectedPendingApproval
-                              ? "工具操作等待你的批准…"
-                              : selectedSafetyReview
-                                ? "安全模型正在审核工具操作…"
-                                : selected.status === "running"
-                                  ? "正在展开这个方向…"
-                                  : "已进入队列，稍后开始…"}
-                          </>
-                        ) : (
-                          "这次运行没有生成回答。"
-                        )}
+                        这次运行没有生成回答。
                       </div>
-                    )}
+                    ) : null}
                     {selected.error && (
                       <div className="inline-error">{selected.error}</div>
                     )}
@@ -1911,7 +1989,7 @@ export function App() {
                     <p>
                       {selected.contextStale
                         ? "当前回答仍基于修改前的上下文。请先更新上游待生成节点，再重新生成这一轮。"
-                        : "这里保留从起点到当前分支的原文。实际请求可能使用上方摘要与近期消息，其他分支的内容不会被带入。"}
+                        : "这里保留从起点到当前分支的原文，以及每轮显式引用的卡片快照。实际请求可能使用上方摘要与近期消息，未引用的其他分支不会被带入。"}
                     </p>
                     <span>
                       原文约 {contextEstimate.toLocaleString()} tokens · 估算
@@ -1929,6 +2007,11 @@ export function App() {
                         <ChevronDown size={13} />
                       </summary>
                       <div>
+                        <CardReferenceList
+                          references={node.contextReferences ?? []}
+                          nodes={workspace.nodes}
+                          onLocate={locate}
+                        />
                         <Markdown text={node.response || "没有额外背景。"} />
                         <button onClick={() => locate(node.id)}>
                           在画布上定位
@@ -2015,16 +2098,22 @@ export function App() {
                   {canBranch ? (
                     <>
                       <div className="compose-box">
-                        <textarea
-                          ref={inputRef}
+                        <CardReferenceInput
+                          key={draftKey}
+                          inputRef={inputRef}
+                          referenceNodeIds={draftReferenceIds}
+                          onReferencesChange={changeDraftReferences}
+                          candidates={referenceCandidates}
+                          workspaceNodes={workspace.nodes}
                           aria-label="新分支问题"
                           placeholder={
                             selected.status === "root"
-                              ? "你想先探索哪个方向？"
-                              : "追问一个细节，或打开新的可能…"
+                              ? "你想先探索哪个方向？输入 @ 引用卡片"
+                              : "追问一个细节，或输入 @ 引用卡片…"
                           }
                           value={draft}
-                          onChange={(event) => setDraft(event.target.value)}
+                          disabled={submitting}
+                          onChange={setDraft}
                           maxLength={20000}
                           onKeyDown={(event) => {
                             if (
@@ -2050,7 +2139,7 @@ export function App() {
                             title="创建分支（⌘/Ctrl + Enter）"
                             aria-label="发送并创建分支"
                             disabled={
-                              !draft.trim() ||
+                              (!draft.trim() && !draftFiles.length) ||
                               submitting ||
                               directoryDirty ||
                               directoryBusy ||
@@ -2067,6 +2156,12 @@ export function App() {
                           </button>
                         </div>
                       </div>
+                      <AttachmentPicker
+                        key={draftKey}
+                        files={draftFiles}
+                        onChange={changeDraftFiles}
+                        disabled={submitting || !online}
+                      />
                       <ComposerModelControls
                         models={models}
                         config={config}

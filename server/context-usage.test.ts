@@ -21,6 +21,31 @@ const model = (id: string, contextWindow: number): ModelOption => ({
   demo: true,
   thinkingLevels: ["medium"],
 });
+
+test("context estimates count saved references only along the inheriting branch", () => {
+  const root = node("root", null, "", "");
+  const referenced = node(
+    "source",
+    "root",
+    "new source",
+    "changed".repeat(100),
+  );
+  const branch = node("branch", "root", "", "");
+  branch.contextReferences = [
+    { nodeId: referenced.id, revision: 0, prompt: "old", response: "snapshot" },
+  ];
+  const child = node("child", branch.id, "", "");
+  const sibling = node("sibling", root.id, "", "");
+  const usage = buildContextUsageMap(
+    [root, referenced, branch, child, sibling],
+    [model(DEFAULT_CONFIG.model, 1000)],
+    DEFAULT_CONFIG.model,
+  );
+  assert.equal(usage.get(branch.id)?.tokens, 14);
+  assert.equal(usage.get(child.id)?.tokens, 14);
+  assert.equal(usage.get(sibling.id)?.tokens, 0);
+  assert.equal(estimatePathContextTokens([root, branch, child]), 14);
+});
 function node(
   id: string,
   parentId: string | null,

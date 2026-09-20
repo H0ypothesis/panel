@@ -1,0 +1,75 @@
+.generation-indicator {
+  gap: 7px;
+  min-height: 24px;
+}
+
+.lissajous-drift {
+  display: block;
+  width: 24px;
+  height: 24px;
+  flex: 0 0 24px;
+  color: var(--text-accent-strong);
+}
+
+.generation-copy {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.generation-phrase {
+  --wave-dark: #3d5638;
+  --wave-light: #a6b69a;
+  font-size: 11px;
+  line-height: 1.7;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+  color: var(--text-heading);
+}
+
+[data-theme="dark"] .generation-phrase {
+  --wave-dark: #63765f;
+  --wave-light: #e3efdb;
+}
+
+.generation-character {
+  color: var(--wave-dark);
+  animation: generation-character-wave var(--wave-duration) ease-in-out infinite;
+}
+
+@keyframes generation-character-wave {
+  0%,
+  65%,
+  100% {
+    color: var(--wave-dark);
+  }
+  28% {
+    color: var(--wave-light);
+  }
+}
+
+.generation-detail {
+  color: var(--text-secondary);
+  font-size: 10px;
+  line-height: 1.5;
+}
+
+.generation-announcement {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+  border: 0;
+}
+
+@media (prefers-reduced-motion: reduce), (forced-colors: active) {
+  .generation-character {
+    animation: none;
+    color: inherit;
+  }
+}

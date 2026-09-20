@@ -34,6 +34,7 @@ import {
   Trash2,
   RefreshCw,
   Layers,
+  Paperclip,
 } from "lucide-react";
 import {
   ancestorPath,
@@ -53,7 +54,11 @@ import { ContextUsageRing } from "./ContextUsageRing";
 import { formatContextWindow } from "./model-context";
 import { GitHistoryPanel } from "./GitHistoryPanel";
 import { BranchDraftCard, type BranchDraftNode } from "./BranchDraftCard";
-import { branchDraftPosition, type CanvasBranchDraft } from "./branch-draft";
+import {
+  branchDraftHeight,
+  branchDraftPosition,
+  type CanvasBranchDraft,
+} from "./branch-draft";
 import {
   buildCompressionNodes,
   compressionNodeId,
@@ -144,6 +149,18 @@ const TurnCard = memo(function TurnCard({ data }: NodeProps<TurnGraphNode>) {
           {root ? "探索起点" : `对话 ${String(index).padStart(2, "0")}`}
         </span>
         <div className="card-topline-tools">
+          {!!turn.attachments?.length && (
+            <span
+              className="card-attachment-count"
+              aria-label={`${turn.attachments.length} 个附件`}
+              title={turn.attachments
+                .map((attachment) => attachment.name)
+                .join("\n")}
+            >
+              <Paperclip size={11} />
+              {turn.attachments.length}
+            </span>
+          )}
           <span
             className={`card-status ${turn.status} ${turn.contextStale ? "context-stale" : ""}`}
             title={
@@ -434,6 +451,8 @@ interface Props {
   draftBusy: boolean;
   draftBlockedReason: string;
   onDraftTextChange: (text: string) => void;
+  onDraftFilesChange: (files: File[]) => void;
+  onDraftReferencesChange: (ids: string[]) => void;
   onDraftConfigChange: (config: RunConfig) => void;
   onDraftSubmit: () => void;
   onDraftCancel: () => void;
@@ -466,6 +485,8 @@ export function Graph({
   draftBusy,
   draftBlockedReason,
   onDraftTextChange,
+  onDraftFilesChange,
+  onDraftReferencesChange,
   onDraftConfigChange,
   onDraftSubmit,
   onDraftCancel,
@@ -505,12 +526,16 @@ export function Graph({
             workspace.nodes,
             draftParent?.position ?? draft.parentPosition,
             draftCompression?.position,
+            draft.files.length,
+            draft.referenceNodeIds.length,
           )
         : null,
     [
       workspace.nodes,
       draft?.id,
       draft?.contextCheckpointId,
+      draft?.files.length,
+      draft?.referenceNodeIds.length,
       draftParent?.position,
       draftCompression?.position,
     ],
@@ -625,13 +650,22 @@ export function Graph({
               type: "branchDraft" as const,
               position: draftPosition,
               width: 320,
-              height: 300,
+              initialHeight: branchDraftHeight(
+                draft.files.length,
+                draft.referenceNodeIds.length,
+              ),
               draggable: false,
               selectable: false,
               focusable: false,
               zIndex: 10,
               data: {
                 text: draft.text,
+                files: draft.files,
+                referenceNodeIds: draft.referenceNodeIds,
+                referenceCandidates: workspace.nodes.filter(
+                  (node) => node.status === "completed" && !node.contextStale,
+                ),
+                workspaceNodes: workspace.nodes,
                 config: draft.config,
                 models,
                 parentTitle: `${draft?.contextCheckpointId ? "压缩摘要 · " : ""}${draftParent?.prompt ?? draft.parentTitle}`,
@@ -641,6 +675,8 @@ export function Graph({
                 error: draft.error,
                 focusVersion: draft.focusVersion,
                 onTextChange: onDraftTextChange,
+                onFilesChange: onDraftFilesChange,
+                onReferencesChange: onDraftReferencesChange,
                 onConfigChange: onDraftConfigChange,
                 onSubmit: onDraftSubmit,
                 onCancel: onDraftCancel,
@@ -679,6 +715,8 @@ export function Graph({
       draftBusy,
       draftBlockedReason,
       onDraftTextChange,
+      onDraftFilesChange,
+      onDraftReferencesChange,
       onDraftConfigChange,
       onDraftSubmit,
       onDraftCancel,
@@ -768,13 +806,26 @@ export function Graph({
   );
   useEffect(() => {
     if (!draft || !draftPosition) return;
-    void flow.setCenter(draftPosition.x + 160, draftPosition.y + 150, {
-      zoom: Math.max(0.8, Math.min(1, flow.getZoom())),
-      duration: window.matchMedia("(prefers-reduced-motion: reduce)").matches
-        ? 0
-        : 300,
-    });
-  }, [draft?.id, draft?.focusVersion]);
+    void flow.setCenter(
+      draftPosition.x + 160,
+      draftPosition.y +
+        branchDraftHeight(draft.files.length, draft.referenceNodeIds.length) /
+          2,
+      {
+        zoom: Math.max(0.8, Math.min(1, flow.getZoom())),
+        duration: window.matchMedia("(prefers-reduced-motion: reduce)").matches
+          ? 0
+          : 300,
+      },
+    );
+  }, [
+    draft?.id,
+    draft?.focusVersion,
+    draft?.files.length,
+    draft?.referenceNodeIds.length,
+    draftPosition?.x,
+    draftPosition?.y,
+  ]);
   useEffect(() => {
     if (!focusId) return;
     const node =

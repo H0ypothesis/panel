@@ -13,6 +13,11 @@ import { validateApprovalSettings } from "./approval-settings.ts";
 import { webCapabilities } from "./web-tools.ts";
 import { importWorkspace, MAX_IMPORT_BYTES } from "./workspace-import.ts";
 import { readWorkspaceImportFile } from "./workspace-import-file.ts";
+import {
+  MAX_ATTACHMENT_REQUEST_BYTES,
+  type AttachmentUpload,
+} from "../shared/attachments.ts";
+import { referenceNodeIds } from "./context-references.ts";
 
 function approvalMode(value: unknown): ApprovalMode {
   if (value !== "ask" && value !== "auto")
@@ -74,7 +79,12 @@ function requestId(value: unknown): string {
   return id;
 }
 
-function runInput(body: Record<string, unknown>) {
+function runInput(body: Record<string, unknown>, allowAttachments = false) {
+  if (!allowAttachments && body.attachments !== undefined)
+    throw new Error("重新生成会保留原附件；如需更换附件，请创建新分支。");
+  if (body.attachments !== undefined && !Array.isArray(body.attachments))
+    throw new Error("附件列表格式错误。");
+  const attachments = body.attachments as AttachmentUpload[] | undefined;
   if (body.contextMode !== undefined && body.contextMode !== "raw")
     throw new Error("上下文选择无效。");
   if (body.contextMode === "raw" && body.contextCheckpointId !== undefined)
@@ -87,7 +97,11 @@ function runInput(body: Record<string, unknown>) {
   )
     throw new Error("请选择模型与思考强度。");
   return {
-    prompt: field(body.prompt, "问题", 20000),
+    prompt:
+      field(body.prompt ?? "", "问题", 20000, Boolean(attachments?.length)) ||
+      "请分析上传的附件。",
+    ...(allowAttachments ? { attachments } : {}),
+    referenceNodeIds: referenceNodeIds(body.referenceNodeIds),
     config: config as RunConfig,
     requestId: requestId(body.requestId),
     contextMode: body.contextMode as "raw" | undefined,
@@ -146,7 +160,7 @@ export function createApi(
       else if (request.method === "GET" && url.pathname === "/api/models")
         json(response, 200, runtime.models());
       else if (request.method === "GET" && url.pathname === "/api/capabilities")
-        json(response, 200, webCapabilities());
+        json(response, 200, { ...webCapabilities(), cardReferences: true });
       else if (request.method === "GET" && url.pathname === "/api/directories")
         json(
           response,
@@ -231,6 +245,39 @@ export function createApi(
           state: store.snapshot(),
         });
       } else {
+        const attachmentDownload = url.pathname.match(
+          /^\/api\/workspaces\/([^/]+)\/nodes\/([^/]+)\/attachments\/([^/]+)$/,
+        );
+        if (request.method === "GET" && attachmentDownload) {
+          const workspace = store.workspace(
+            decodeURIComponent(attachmentDownload[1]),
+          );
+          const node = workspace.nodes.find(
+            (item) => item.id === decodeURIComponent(attachmentDownload[2]),
+          );
+          const attachment = node?.attachmentData?.find(
+            (item) =>
+              item.metadata.id === decodeURIComponent(attachmentDownload[3]),
+          );
+          if (!attachment) {
+            json(response, 404, { error: "附件不存在或已删除。" });
+            return true;
+          }
+          const data = Buffer.from(attachment.data, "base64");
+          const filename = encodeURIComponent(attachment.metadata.name).replace(
+            /[!'()*]/g,
+            (char) => `%${char.charCodeAt(0).toString(16).toUpperCase()}`,
+          );
+          response.writeHead(200, {
+            "Content-Type": "application/octet-stream",
+            "Content-Disposition": `attachment; filename="attachment"; filename*=UTF-8''${filename}`,
+            "Content-Length": data.length,
+            "Cache-Control": "no-store",
+            "Content-Security-Policy": "default-src 'none'; sandbox",
+          });
+          response.end(data);
+          return true;
+        }
         const settings = url.pathname.match(/^\/api\/workspaces\/([^/]+)$/);
         if (request.method === "DELETE" && settings) {
           const body = await readJson(request);
@@ -387,7 +434,7 @@ export function createApi(
                 .slice(1)
                 .map(
                   (node, i) =>
-                    `## ${i + 1}. ${node.prompt}\n\n模型：${node.config.model} · 思考强度：${node.config.thinking} · 状态：${node.status}\n\n${node.contextStale ? "> 上游已更新，此回答基于修改前的上下文，需重新生成。\n\n" : ""}${node.response || "（暂无回答）"}\n`,
+                    `## ${i + 1}. ${node.prompt}\n\n模型：${node.config.model} · 思考强度：${node.config.thinking} · 状态：${node.status}\n\n${node.attachments?.length ? `附件：${node.attachments.map((file) => `${file.name.replace(/[\r\n]/g, " ")}（${file.size} 字节${file.truncated ? "，提取内容已截断" : ""}）`).join("、")}\n\n` : ""}${node.contextReferences?.length ? `引用卡片（保存时的内容快照）：\n\n${node.contextReferences.map((reference) => `> 卡片 ${reference.nodeId} · 版本 ${reference.revision}\n> 问题：${reference.prompt.replaceAll("\n", "\n> ")}\n> 回答：${reference.response.replaceAll("\n", "\n> ")}`).join("\n\n")}\n\n` : ""}${node.contextStale ? "> 上游已更新，此回答基于修改前的上下文，需重新生成。\n\n" : ""}${node.response || "（暂无回答）"}\n`,
                 )
                 .join("\n---\n\n");
             response.writeHead(200, {
@@ -417,9 +464,9 @@ export function createApi(
             });
           }
         } else if (request.method === "POST" && action === "nodes" && !nodeId) {
-          const body = await readJson(request);
+          const body = await readJson(request, MAX_ATTACHMENT_REQUEST_BYTES);
           const node = await scheduler.submit(workspaceId, {
-            ...runInput(body),
+            ...runInput(body, true),
             parentId: field(body.parentId, "父节点", 80),
           });
           json(response, 201, { nodeId: node.id, state: store.snapshot() });

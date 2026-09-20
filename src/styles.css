@@ -2008,22 +2008,10 @@ button {
   gap: 10px;
   padding: 8px 0 16px;
 }
-.thinking-dots {
-  display: flex;
-  gap: 3px;
-}
-.thinking-dots i {
-  height: 4px;
-  width: 4px;
-  background: var(--branch-green);
-  border-radius: 50%;
-  animation: pulse 1.2s ease infinite;
-}
-.thinking-dots i:nth-child(2) {
-  animation-delay: 0.2s;
-}
-.thinking-dots i:nth-child(3) {
-  animation-delay: 0.4s;
+.response-generating {
+  margin-top: 12px;
+  padding: 0;
+  color: var(--text-muted);
 }
 .inline-error {
   padding: 11px;

@@ -1,3 +1,5 @@
+import type { Attachment } from "./attachments";
+
 export type ThinkingLevel =
   | "off"
   | "minimal"
@@ -93,6 +95,14 @@ export interface ContextSource {
   messageCount: number;
 }
 
+/** An explicitly selected card's text, frozen at the time this run was created. */
+export interface ContextReference {
+  nodeId: string;
+  revision: number;
+  prompt: string;
+  response: string;
+}
+
 /** A derived model-input view; never replaces the original node transcripts. */
 export interface ContextCheckpoint {
   id: string;
@@ -139,6 +149,8 @@ export interface TurnNode {
   contextStale?: boolean;
   parentId: string | null;
   prompt: string;
+  attachments?: Attachment[];
+  contextReferences?: ContextReference[];
   response: string;
   status: RunStatus;
   config: RunConfig;
@@ -237,10 +249,13 @@ export interface ModelOption {
   default?: boolean;
   thinkingLevels: ThinkingLevel[];
   contextWindow: number;
+  supportsImages?: boolean;
   envVar?: string;
 }
 
 export interface WebCapabilities {
+  /** Missing on older backends, which silently discard referenceNodeIds. */
+  cardReferences?: boolean;
   webFetch: boolean;
   webSearch: boolean;
   searchProvider: "Exa API" | "Exa MCP";

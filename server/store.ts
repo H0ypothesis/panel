@@ -18,6 +18,7 @@ import {
 import { exampleWorkspace } from "./seed.ts";
 import { snapshotRequestUsage } from "./request-context-usage.ts";
 import { preparedContextCheckpoints } from "./context.ts";
+import type { StoredAttachment } from "./attachments.ts";
 import {
   prepareTemporaryDirectory,
   existingTemporaryDirectory,
@@ -26,6 +27,8 @@ import {
 } from "./directories.ts";
 
 export interface StoredNode extends TurnNode {
+  attachmentData?: StoredAttachment[];
+  attachmentInputHash?: string;
   messages?: Message[];
   previousRuns?: StoredRun[];
   requestKind?: "retry";
@@ -49,6 +52,8 @@ export interface ContextPreparationRequest {
   error?: string;
 }
 export interface StoredRun extends TurnNode {
+  attachmentData?: StoredAttachment[];
+  attachmentInputHash?: string;
   messages?: Message[];
   archivedAt: number;
   requestKind?: "retry";
@@ -207,6 +212,8 @@ export class Store extends EventEmitter {
           nodes: workspace.nodes.map(
             ({
               messages: _messages,
+              attachmentData: _attachmentData,
+              attachmentInputHash: _attachmentInputHash,
               previousRuns: _previousRuns,
               requestKind: _requestKind,
               contextSelectionRequest: _contextSelectionRequest,

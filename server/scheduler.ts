@@ -1,4 +1,16 @@
 import { randomUUID } from "node:crypto";
+import type { AttachmentUpload } from "../shared/attachments.ts";
+import {
+  attachmentInputHash,
+  attachmentPrompt,
+  prepareAttachments,
+} from "./attachments.ts";
+import {
+  contextReferencePrompt,
+  referenceNodeIds,
+  referenceSelectionMatches,
+  resolveContextReferences,
+} from "./context-references.ts";
 import { realpath } from "node:fs/promises";
 import type {
   ApprovalMode,
@@ -84,6 +96,8 @@ export class Scheduler {
     input: {
       parentId: string;
       prompt: string;
+      attachments?: AttachmentUpload[];
+      referenceNodeIds?: string[];
       config: RunConfig;
       requestId: string;
       contextCheckpointId?: string;
@@ -100,12 +114,16 @@ export class Scheduler {
     input: {
       parentId: string;
       prompt: string;
+      attachments?: AttachmentUpload[];
+      referenceNodeIds?: string[];
       config: RunConfig;
       requestId: string;
       contextCheckpointId?: string;
       contextMode?: "raw";
     },
   ) {
+    if (!input.prompt.trim() && input.attachments?.length)
+      input = { ...input, prompt: "请分析上传的附件。" };
     const workspace = this.store.workspace(workspaceId);
     this.validateContextSelection(input);
     this.assertWorkspaceNotDeleting(workspace);
@@ -116,12 +134,19 @@ export class Scheduler {
         "请求 ID 已用于摘要任务，请使用新的请求 ID。",
       );
     const duplicate = this.findRequest(workspace, input.requestId);
+    const attachmentHash = attachmentInputHash(input.attachments);
+    const references = referenceNodeIds(input.referenceNodeIds);
     if (duplicate) {
       if (
         duplicate.run.requestKind === "retry" ||
         (duplicate.run.revision ?? 0) !== 0 ||
         duplicate.run.parentId !== input.parentId ||
         duplicate.run.prompt !== input.prompt ||
+        duplicate.run.attachmentInputHash !== attachmentHash ||
+        !referenceSelectionMatches(
+          duplicate.run.contextReferences,
+          references,
+        ) ||
         duplicate.run.config.model !== input.config.model ||
         duplicate.run.config.thinking !== input.config.thinking ||
         duplicate.run.requestedContextCheckpointId !==
@@ -148,6 +173,7 @@ export class Scheduler {
         this.store.effectiveWorkingDirectory(workspace),
       );
     const context = buildContext(workspace, input.parentId);
+    const contextReferences = resolveContextReferences(workspace, references);
     const parent = workspace.nodes.find((node) => node.id === input.parentId)!;
     const selection = this.contextSelection(workspace, parent, input);
     this.validateRequestedContext(
@@ -169,10 +195,23 @@ export class Scheduler {
       )
     )
       y += 250;
+    const attachments = await prepareAttachments(input.attachments);
+    if (
+      !model.demo &&
+      model.supportsImages === false &&
+      attachments.some((file) => file.metadata.kind === "image")
+    )
+      throw new Error("当前模型不支持图片输入，请选择支持图片的模型。");
     const node: StoredNode = {
       id: randomUUID(),
       parentId: parent.id,
       prompt: input.prompt,
+      contextReferences,
+      attachments: attachments.length
+        ? attachments.map((file) => file.metadata)
+        : undefined,
+      attachmentData: attachments.length ? attachments : undefined,
+      attachmentInputHash: attachmentHash,
       response: "",
       status: "queued",
       config: { ...input.config },
@@ -587,6 +626,7 @@ export class Scheduler {
     nodeId: string,
     input: {
       prompt: string;
+      referenceNodeIds?: string[];
       config: RunConfig;
       requestId: string;
       expectedRevision: number;
@@ -597,6 +637,7 @@ export class Scheduler {
     return this.serializeMutation(workspaceId, async () => {
       const workspace = this.store.workspace(workspaceId);
       this.validateContextSelection(input);
+      const references = referenceNodeIds(input.referenceNodeIds);
       if (this.preparationRequestExists(workspace, input.requestId))
         throw new NodeMutationConflict(
           "请求 ID 已用于摘要任务，请使用新的请求 ID。",
@@ -637,6 +678,11 @@ export class Scheduler {
           duplicate.node.id !== nodeId ||
           (duplicate.run.revision ?? 0) !== input.expectedRevision + 1 ||
           duplicate.run.prompt !== input.prompt ||
+          !referenceSelectionMatches(
+            duplicate.run.contextReferences,
+            references,
+            previous?.contextReferences,
+          ) ||
           duplicate.run.config.model !== input.config.model ||
           duplicate.run.config.thinking !== input.config.thinking ||
           !selectionMatches
@@ -662,12 +708,23 @@ export class Scheduler {
         );
       if (!model.thinkingLevels.includes(input.config.thinking))
         throw new Error("该模型不支持所选思考强度。");
+      if (
+        !model.demo &&
+        model.supportsImages === false &&
+        node.attachmentData?.some((file) => file.metadata.kind === "image")
+      )
+        throw new Error("当前模型不支持图片输入，请选择支持图片的模型。");
       if (!model.demo)
         this.assertDirectoryAvailable(
           this.store.effectiveWorkingDirectory(workspace),
         );
       // Build from the parent; the old question, answer and transcript are never replayed.
       const context = buildContext(workspace, node.parentId!);
+      const contextReferences = resolveContextReferences(
+        workspace,
+        references,
+        node.contextReferences,
+      );
       const selection = this.contextSelection(
         workspace,
         workspace.nodes.find((item) => item.id === node.parentId)!,
@@ -699,6 +756,10 @@ export class Scheduler {
         createdAt: node.createdAt,
         revision: input.expectedRevision + 1,
         prompt: input.prompt,
+        contextReferences,
+        attachments: structuredClone(node.attachments),
+        attachmentData: structuredClone(node.attachmentData),
+        attachmentInputHash: node.attachmentInputHash,
         response: "",
         status: "queued",
         config: { ...input.config },
@@ -955,13 +1016,19 @@ export class Scheduler {
           createdAt: node.createdAt,
           revision: input.expectedRevision + 1,
           prompt: node.prompt,
+          contextReferences: structuredClone(node.contextReferences),
+          attachments: structuredClone(node.attachments),
+          attachmentData: structuredClone(node.attachmentData),
+          attachmentInputHash: node.attachmentInputHash,
           response: "",
           status: "queued",
           config: { ...node.config },
           contextIds: context.ids,
           contextSources: context.sources,
           ...selection,
-          preparedCompactions: structuredClone(preparedContextCheckpoints(node)),
+          preparedCompactions: structuredClone(
+            preparedContextCheckpoints(node),
+          ),
           contextStale: false,
           requestId: input.requestId,
           requestKind: "retry",
@@ -1786,14 +1853,23 @@ export class Scheduler {
             workingDirectory: node.execution!.workingDirectory,
             workspaceTitle: workspace.title,
             workspaceDescription: workspace.description,
-            userRequest: node.prompt,
+            userRequest: attachmentPrompt(
+              contextReferencePrompt(node.prompt, node.contextReferences),
+              node.attachmentData ?? [],
+            ),
             ancestry: node.contextIds
               .map(
                 (id) => workspace.nodes.find((ancestor) => ancestor.id === id)!,
               )
               .filter(Boolean)
               .map((ancestor) => ({
-                prompt: ancestor.prompt,
+                prompt: attachmentPrompt(
+                  contextReferencePrompt(
+                    ancestor.prompt,
+                    ancestor.contextReferences,
+                  ),
+                  ancestor.attachmentData ?? [],
+                ),
                 response: ancestor.response,
               })),
             recentTools: (node.toolCalls ?? [])
@@ -1946,7 +2022,10 @@ export class Scheduler {
       const result = await this.runtime.run(
         node.config,
         context.messages,
-        node.prompt,
+        attachmentPrompt(
+          contextReferencePrompt(node.prompt, node.contextReferences),
+          node.attachmentData ?? [],
+        ),
         controller.signal,
         (text) => {
           if (node.status !== "running") return;
@@ -1993,6 +2072,9 @@ export class Scheduler {
             }
           : undefined,
         {
+          attachments: node.attachmentData,
+          contextReferenceCount: node.contextReferences?.length,
+          displayPrompt: node.prompt,
           autoCompact:
             node.contextAutoCompact ?? workspace.autoCompact !== false,
           sources,

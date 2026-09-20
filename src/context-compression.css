@@ -41,6 +41,7 @@
   gap: 6px;
   margin-top: 7px;
 }
+.compression-preparation-heading > button,
 .compression-node-actions > button {
   display: inline-flex;
   align-items: center;
@@ -51,6 +52,26 @@
   background: var(--surface-control);
   color: var(--text-control);
   font-size: 10px;
+  line-height: 1.4;
+}
+.compression-preparation-heading > button {
+  min-height: 28px;
+  padding: 6px 10px;
+}
+.compression-preparation-heading > button:hover:not(:disabled),
+.compression-node-actions > button:hover:not(:disabled) {
+  border-color: var(--text-accent-strong);
+  background: var(--surface-hover);
+}
+.compression-preparation-heading > button:focus-visible,
+.compression-node-actions > button:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 2px;
+}
+.compression-preparation-heading > button:disabled,
+.compression-node-actions > button:disabled {
+  cursor: not-allowed;
+  opacity: 0.6;
 }
 .composer-compression-note {
   margin: 8px 0 0;

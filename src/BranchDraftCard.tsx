@@ -1,12 +1,23 @@
 import { memo, useEffect, useId, useRef } from "react";
 import { Handle, Position, type Node, type NodeProps } from "@xyflow/react";
 import { ArrowUpRight, GitBranch, LoaderCircle, X } from "lucide-react";
-import type { BranchColor, ModelOption, RunConfig } from "../shared/types";
+import type {
+  BranchColor,
+  ModelOption,
+  RunConfig,
+  TurnNode,
+} from "../shared/types";
 import { ComposerModelControls } from "./WorkspaceControls";
+import { AttachmentPicker } from "./Attachments";
+import { CardReferenceInput } from "./CardReferenceInput";
 import "./branch-draft-card.css";
 
 export type BranchDraftData = {
   text: string;
+  files: File[];
+  referenceNodeIds: string[];
+  referenceCandidates: TurnNode[];
+  workspaceNodes: TurnNode[];
   config: RunConfig;
   models: ModelOption[];
   parentTitle: string;
@@ -16,6 +27,8 @@ export type BranchDraftData = {
   error: string;
   focusVersion: number;
   onTextChange: (text: string) => void;
+  onFilesChange: (files: File[]) => void;
+  onReferencesChange: (nodeIds: string[]) => void;
   onConfigChange: (config: RunConfig) => void;
   onSubmit: () => void;
   onCancel: () => void;
@@ -39,7 +52,10 @@ export const BranchDraftCard = memo(function BranchDraftCard({
       ? "所选模型不支持当前思考强度，请重新选择。"
       : "";
   const blockedReason = data.blockedReason || modelIssue;
-  const canSubmit = !data.busy && !blockedReason && Boolean(data.text.trim());
+  const canSubmit =
+    !data.busy &&
+    !blockedReason &&
+    Boolean(data.text.trim() || data.files.length);
   const feedback = data.error || blockedReason;
 
   useEffect(() => {
@@ -88,16 +104,20 @@ export const BranchDraftCard = memo(function BranchDraftCard({
       >
         从「{data.parentTitle}」继续
       </p>
-      <textarea
-        ref={inputRef}
+      <CardReferenceInput
+        inputRef={inputRef}
         aria-label="卡片中的新问题"
         aria-describedby={`${feedbackId} ${shortcutId}`}
         className="branch-draft-input nodrag nopan nowheel"
         value={data.text}
         maxLength={20_000}
         disabled={data.busy}
-        placeholder="沿着这个方向，提出一个新问题…"
-        onChange={(event) => data.onTextChange(event.target.value)}
+        placeholder="提出一个新问题，输入 @ 引用其他卡片…"
+        onChange={data.onTextChange}
+        referenceNodeIds={data.referenceNodeIds}
+        onReferencesChange={data.onReferencesChange}
+        candidates={data.referenceCandidates}
+        workspaceNodes={data.workspaceNodes}
         onCompositionStart={() => {
           composing.current = true;
         }}
@@ -118,6 +138,12 @@ export const BranchDraftCard = memo(function BranchDraftCard({
             if (canSubmit) data.onSubmit();
           }
         }}
+      />
+      <AttachmentPicker
+        files={data.files}
+        onChange={data.onFilesChange}
+        disabled={data.busy}
+        compact
       />
       <ComposerModelControls
         models={data.models}

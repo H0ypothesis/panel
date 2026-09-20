@@ -186,7 +186,7 @@ test("imports allow full transcripts above normal mutation limits but bound file
   const file = await open(path, "w");
   await file.truncate(MAX_IMPORT_BYTES + 1);
   await file.close();
-  await assert.rejects(readWorkspaceImportFile(path), /20 MB/);
+  await assert.rejects(readWorkspaceImportFile(path), /100 MB/);
 });
 
 test("failed persistence does not publish an imported exploration and retry succeeds", async (t) => {

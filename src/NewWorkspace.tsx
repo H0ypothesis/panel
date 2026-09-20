@@ -9,7 +9,7 @@ import {
 import { api, type MutationResult } from "./api";
 import "./workspace-import.css";
 
-const MAX_IMPORT_BYTES = 20 * 1024 * 1024;
+const MAX_IMPORT_BYTES = 100 * 1024 * 1024;
 
 type ImportFile = {
   name: string;
@@ -59,7 +59,7 @@ export function NewWorkspace({
     setFile(null);
     setError("");
     if (selected.size > MAX_IMPORT_BYTES) {
-      setError("JSON 文件不能超过 20 MiB，请选择较小的导出文件。");
+      setError("JSON 文件不能超过 100 MiB，请选择较小的导出文件。");
       return;
     }
     setReading(true);
@@ -177,7 +177,7 @@ export function NewWorkspace({
         <>
           <fieldset className="workspace-import-source" disabled={disabled}>
             <legend>
-              导入来源 <span>二选一 · 最大 20 MiB</span>
+              导入来源 <span>二选一 · 最大 100 MiB</span>
             </legend>
             <div className="workspace-import-options">
               <label>
