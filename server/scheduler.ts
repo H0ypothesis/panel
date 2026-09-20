@@ -159,6 +159,10 @@ export class Scheduler {
     }
     if (this.closed) throw new Error("服务正在关闭，请稍后重试。");
     if (this.store.storageError) throw new Error(this.store.storageError);
+    if (workspace.pendingNodeRetry)
+      throw new NodeMutationConflict(
+        "此画布还有未完成的文件回溯，请先完成对应卡片的原地重试。",
+      );
     const model = this.runtime
       .models()
       .find((item) => item.id === input.config.model);
@@ -173,6 +177,20 @@ export class Scheduler {
         this.store.effectiveWorkingDirectory(workspace),
       );
     const context = buildContext(workspace, input.parentId);
+    // Cancellation exposes its terminal status before the runtime flushes its
+    // transcript. Completed turns already have their final messages assigned.
+    if (
+      context.ids.some((id) => {
+        const ancestor = workspace.nodes.find((node) => node.id === id)!;
+        return (
+          (ancestor.status === "failed" || ancestor.status === "cancelled") &&
+          this.active.has(id)
+        );
+      })
+    )
+      throw new NodeMutationConflict(
+        "此路径仍在收尾，请等待结束后继续。",
+      );
     const contextReferences = resolveContextReferences(workspace, references);
     const parent = workspace.nodes.find((node) => node.id === input.parentId)!;
     const selection = this.contextSelection(workspace, parent, input);
@@ -1436,7 +1454,7 @@ export class Scheduler {
       for (const node of workspace.nodes) {
         if (node.status === "running" || node.status === "queued") {
           node.status = "failed";
-          node.error = "运行被服务关闭中断。可以在当前卡片原地重试。";
+          node.error = "运行被服务关闭中断。可以在新节点继续，或在当前卡片原地重试。";
           node.finishedAt = Date.now();
           this.interruptTools(node);
           this.store.touch(workspace);
@@ -2139,7 +2157,7 @@ export class Scheduler {
     } catch (error) {
       if (this.closed) {
         node.status = "failed";
-        node.error = "运行被服务关闭中断。可以在当前卡片原地重试。";
+        node.error = "运行被服务关闭中断。可以在新节点继续，或在当前卡片原地重试。";
       } else if (node.status !== "cancelled") {
         node.status = controller.signal.aborted ? "cancelled" : "failed";
         node.error = controller.signal.aborted ? undefined : safeError(error);

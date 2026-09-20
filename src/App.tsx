@@ -68,6 +68,7 @@ import { ResizableWorkspace } from "./ResizableWorkspace";
 import { ToolActivity } from "./CodingControls";
 import { GenerationIndicator } from "./GenerationIndicator";
 import { getGenerationActivity } from "./generation-activity";
+import { canBranchFrom } from "../shared/node-branching";
 import { ContextCompression } from "./ContextCompression";
 import {
   checkpointMatchesPath,
@@ -103,6 +104,8 @@ import {
 } from "./NodeActionsDialog";
 
 const EMPTY_ATTACHMENT_FILES: File[] = [];
+const CONTINUE_PROMPT =
+  "请从上一轮中断的位置继续完成尚未完成的任务。沿用已有回答和已完成的工具结果，先核对当前进度与文件状态，避免重复已经完成的操作；对未返回结果的工具先确认实际状态，再决定下一步。";
 
 function Logo({ small = false }: { small?: boolean }) {
   return (
@@ -208,6 +211,8 @@ export function App() {
   );
   const [retryingId, setRetryingId] = useState<string | null>(null);
   const retryRequestIds = useRef(new Map<string, string>());
+  const [continuingId, setContinuingId] = useState<string | null>(null);
+  const continuationRequestIds = useRef(new Map<string, string>());
   const [sidebar, setSidebar] = useState(window.innerWidth > 1000);
   const [headingCollapsed, setHeadingCollapsed] = useState(
     () => readPreference("heading-collapsed") === "true",
@@ -321,9 +326,10 @@ export function App() {
                 ),
             )
           ? "此压缩节点已失效，请取消草稿后重新选择来源。"
-          : canvasParent.status !== "root" &&
-              canvasParent.status !== "completed"
-            ? "请等待来源节点完成后再生成分支。"
+          : !canBranchFrom(canvasParent)
+            ? canvasParent.retryRestore
+              ? "请先完成来源节点的文件恢复与重试，再生成分支。"
+              : "请等待来源节点结束后再生成分支。"
             : !online
               ? "连接已断开，恢复连接后可继续生成。"
               : directoryDirty || directoryBusy
@@ -344,9 +350,7 @@ export function App() {
     workspace?.nodes[0];
   const parent =
     selected && workspace?.nodes.find((node) => node.id === selected.parentId);
-  const canBranch =
-    !selected?.contextStale &&
-    (selected?.status === "root" || selected?.status === "completed");
+  const canBranch = canBranchFrom(selected);
   const canRetry =
     selected?.status === "failed" || selected?.status === "cancelled";
   const retryDisabledReason = !online
@@ -423,6 +427,12 @@ export function App() {
     inputRef,
   );
   const model = models.find((item) => item.id === config.model);
+  const continueDisabledReason =
+    selectedRetryDisabledReason ||
+    (!canBranch
+      ? "当前节点暂时不能继续，请先完成文件恢复或更新上下文。"
+      : "") ||
+    (!model?.available ? "请选择一个已连接的模型。" : "");
   const selectedModel = models.find(
     (item) => item.id === selected?.config.model,
   );
@@ -518,17 +528,31 @@ export function App() {
     )
       return;
     const frame = requestAnimationFrame(() => {
-      const call = detailRef.current?.querySelector<HTMLElement>(
+      const container = detailRef.current;
+      const call = container?.querySelector<HTMLElement>(
         `[data-tool-call-id="${CSS.escape(approvalFocus.toolId)}"]`,
       );
-      if (!call) return;
+      if (!container || !call) return;
       const activity = call.closest<HTMLDetailsElement>(
         ".tool-activity-disclosure",
       );
       if (activity) activity.open = true;
       const details = call.querySelector("details");
       if (details) details.open = true;
-      call.scrollIntoView({ block: "start" });
+      // scrollIntoView also scrolls overflow:hidden ancestors, which can shift
+      // the entire desktop workbench beyond its visible, unscrollable bounds.
+      container.scrollTo({
+        top:
+          container.scrollTop +
+          call.getBoundingClientRect().top -
+          container.getBoundingClientRect().top -
+          container.clientTop,
+      });
+      // The narrow layout stacks the inspector below the canvas and uses page
+      // scrolling, so reveal the panel after positioning its own content.
+      if (window.matchMedia("(max-width: 650px)").matches) {
+        container.scrollIntoView({ block: "nearest" });
+      }
       setApprovalFocus(null);
     });
     return () => cancelAnimationFrame(frame);
@@ -613,12 +637,7 @@ export function App() {
     (id: string, contextCheckpointId?: string) => {
       if (!workspace || submissionLock.current) return;
       const source = workspace.nodes.find((node) => node.id === id);
-      if (
-        !source ||
-        source.contextStale ||
-        (source.status !== "root" && source.status !== "completed")
-      )
-        return;
+      if (!source || !canBranchFrom(source)) return;
       const checkpoint = contextCheckpointId
         ? preparedCheckpoints(source).find(
             (item) => item.id === contextCheckpointId,
@@ -924,6 +943,58 @@ export function App() {
     } finally {
       submissionLock.current = false;
       setSubmitting(false);
+    }
+  };
+
+  const continueInNewNode = async () => {
+    if (
+      !workspace ||
+      !selected ||
+      !canRetry ||
+      continueDisabledReason ||
+      submissionLock.current
+    )
+      return;
+    const key = JSON.stringify([
+      workspace.id,
+      selected.id,
+      selected.revision ?? 0,
+      config.model,
+      config.thinking,
+    ]);
+    const requestId =
+      continuationRequestIds.current.get(key) ?? crypto.randomUUID();
+    // Reuse the same request after an uncertain network response.
+    continuationRequestIds.current.set(key, requestId);
+    submissionLock.current = true;
+    setSubmitting(true);
+    setContinuingId(selected.id);
+    setError("");
+    try {
+      const result = await api<MutationResult>(
+        `/workspaces/${workspace.id}/nodes`,
+        {
+          parentId: selected.id,
+          prompt: CONTINUE_PROMPT,
+          config: { ...config },
+          requestId,
+        },
+      );
+      apply(result.state);
+      continuationRequestIds.current.delete(key);
+      if (currentWorkspaceId.current === workspace.id) {
+        select(result.nodeId!);
+        setFocus((current) => ({
+          id: result.nodeId!,
+          version: current.version + 1,
+        }));
+      }
+    } catch (reason) {
+      fail(reason);
+    } finally {
+      submissionLock.current = false;
+      setSubmitting(false);
+      setContinuingId(null);
     }
   };
 
@@ -1918,6 +1989,26 @@ export function App() {
                           {copied ? "已复制" : "复制"}
                         </button>
                       )}
+                      {canRetry && canBranch && (
+                        <button
+                          type="button"
+                          disabled={!!continueDisabledReason}
+                          title={
+                            continueDisabledReason ||
+                            "使用所选模型，在新节点继承已有进度继续，保留当前文件"
+                          }
+                          onClick={() => void continueInNewNode()}
+                        >
+                          {continuingId === selected.id ? (
+                            <LoaderCircle size={13} className="spin" />
+                          ) : (
+                            <GitBranch size={13} />
+                          )}
+                          {continuingId === selected.id
+                            ? "正在创建…"
+                            : "在新节点继续"}
+                        </button>
+                      )}
                       {canRetry ? (
                         <button
                           type="button"
@@ -2097,6 +2188,11 @@ export function App() {
                 <div className="composer-content-inner">
                   {canBranch ? (
                     <>
+                      {canRetry && (
+                        <p className="composer-continuation-note">
+                          可接着已有进度继续；新节点会继承部分回答和工具记录，保留当前文件。
+                        </p>
+                      )}
                       <div className="compose-box">
                         <CardReferenceInput
                           key={draftKey}
@@ -2109,7 +2205,9 @@ export function App() {
                           placeholder={
                             selected.status === "root"
                               ? "你想先探索哪个方向？输入 @ 引用卡片"
-                              : "追问一个细节，或输入 @ 引用卡片…"
+                              : canRetry
+                                ? "补充继续执行的要求，或点击上方「在新节点继续」"
+                                : "追问一个细节，或输入 @ 引用卡片…"
                           }
                           value={draft}
                           disabled={submitting}

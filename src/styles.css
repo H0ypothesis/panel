@@ -257,7 +257,8 @@ button {
 .workbench {
   height: 100dvh;
   display: flex;
-  overflow: hidden;
+  /* Clip the desktop shell without creating a hidden programmatic scroller. */
+  overflow: clip;
 }
 .sidebar {
   --sidebar-width: 218px;
@@ -1981,6 +1982,7 @@ button {
 }
 .answer-actions {
   display: flex;
+  flex-wrap: wrap;
   gap: 15px;
   margin-top: 17px;
 }
@@ -2029,6 +2031,12 @@ button {
   padding: 15px 18px 14px;
   border-top: 1px solid var(--line);
   background: var(--composer-background);
+}
+.composer-continuation-note {
+  margin: 0 0 10px;
+  color: var(--text-secondary);
+  font-size: 10px;
+  line-height: 1.7;
 }
 .branch-from {
   display: flex;

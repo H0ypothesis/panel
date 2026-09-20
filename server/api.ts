@@ -443,13 +443,20 @@ export function createApi(
             });
             response.end(markdown);
           } else {
+            const exportedAt = new Date();
+            const exportDate = [
+              exportedAt.getFullYear(),
+              String(exportedAt.getMonth() + 1).padStart(2, "0"),
+              String(exportedAt.getDate()).padStart(2, "0"),
+            ].join("-");
+            const exportId = workspace.id.replace(/[^a-zA-Z0-9_-]/g, "_");
             response.setHeader(
               "Content-Disposition",
-              'attachment; filename="panel-exploration.json"',
+              `attachment; filename="panel-exploration_${exportId}_${exportDate}.json"`,
             );
             json(response, 200, {
               version: 1,
-              exportedAt: new Date().toISOString(),
+              exportedAt: exportedAt.toISOString(),
               workspace: {
                 ...store
                   .snapshot()

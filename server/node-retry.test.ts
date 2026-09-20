@@ -256,6 +256,60 @@ test("cancelled cards roll back already written files before in-place retry", as
   await e.finish(next);
 });
 
+test("continuing in a child retains failed-run file effects and requires fresh tool approval", async (t) => {
+  const e = await fixture(t);
+  const node = await e.submit();
+  await e.invoke("write", { path: "retained.txt", content: "completed work" });
+  node.toolCalls![0].output = "Saved retained.txt";
+  node.response = "The first step is complete.";
+  await e.finish(node, "Connection lost");
+  const original = structuredClone(node);
+  const historyBefore = structuredClone(e.workspace.gitHistory);
+  e.workspace.approvalMode = "ask";
+  const child = await e.scheduler.submit(e.workspace.id, {
+    parentId: node.id,
+    prompt: "Continue the remaining work",
+    config,
+    requestId: randomUUID(),
+  });
+  await until(() => e.runs.length === 2);
+  assert.equal(child.parentId, node.id);
+  assert.deepEqual(node, original);
+  assert.deepEqual(e.workspace.gitHistory, historyBefore);
+  assert.equal(
+    await readFile(join(e.project, "retained.txt"), "utf8"),
+    "completed work",
+  );
+  assert.match(JSON.stringify(e.runs[1].history), /Saved retained.txt/);
+  assert.match(JSON.stringify(e.runs[1].history), /The first step is complete/);
+  assert.equal(child.toolCalls, undefined);
+  const execution = e.runs[1].environment;
+  let effects = 0;
+  const old = node.toolCalls![0];
+  await assert.rejects(
+    execution.executeTool(old, async () => {
+      effects++;
+    }),
+  );
+  const call = {
+    id: randomUUID(),
+    name: "write",
+    arguments: { path: "next.txt", content: "new" },
+  };
+  const approval = execution.beforeToolCall(call);
+  await until(() => child.toolCalls?.[0]?.status === "awaiting_approval");
+  assert.equal(effects, 0);
+  await e.scheduler.approve(e.workspace.id, child.id, call.id, "deny");
+  assert.equal(await approval, false);
+  await assert.rejects(
+    execution.executeTool(call, async () => {
+      effects++;
+    }),
+  );
+  assert.equal(effects, 0);
+  await e.finish(child);
+});
+
 test("text-only failures and verified no-op file operations can retry without snapshots", async (t) => {
   const e = await fixture(t);
   await writeFile(join(e.project, "same.txt"), "same");
@@ -481,6 +535,16 @@ test("a save failure after restoring files keeps a durable journal, and restart 
   );
   const scheduler = new Scheduler(restarted, e.runtime);
   t.after(() => scheduler.shutdown());
+  await assert.rejects(
+    scheduler.submit(e.workspace.id, {
+      parentId: node.id,
+      prompt: "Cannot continue while restored files await retry",
+      config,
+      requestId: randomUUID(),
+    }),
+    /未完成的文件回溯/,
+  );
+  assert.equal(e.runs.length, 1);
   const next = await scheduler.retry(e.workspace.id, node.id, {
     expectedRevision: 0,
     requestId,

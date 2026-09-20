@@ -680,7 +680,7 @@ export class PiRuntime implements Runtime {
       }
       if (assistant.stopReason === "length")
         throw new Error(
-          "回答超过输出限制，已保留部分内容，请从父节点缩小问题后重试。",
+          "回答超过输出限制，已保留部分内容。可以在新节点继续，或缩小问题后重试。",
         );
       if (assistant.stopReason === "toolUse")
         throw new Error(

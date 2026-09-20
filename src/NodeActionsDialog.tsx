@@ -8,6 +8,7 @@ import {
   type Workspace,
 } from "../shared/types";
 import { ComposerModelControls } from "./WorkspaceControls";
+import { canBranchFrom } from "../shared/node-branching";
 import { CardReferenceInput } from "./CardReferenceInput";
 import "./node-actions.css";
 
@@ -111,7 +112,7 @@ export function NodeActionsDialog({
   const incompleteParent =
     editing && live?.parentId
       ? ancestorPath(workspace.nodes, live.parentId).some(
-          (node) => !["root", "completed"].includes(node.status),
+          (node) => !canBranchFrom(node),
         )
       : false;
   const blocked = changed
@@ -121,7 +122,7 @@ export function NodeActionsDialog({
       : staleParent
         ? "请先重新生成上游标记为「上下文已更新」的节点。"
         : incompleteParent
-          ? "请先等待上游节点完成，或重新生成尚未完成的上游节点。"
+          ? "请先等待上游任务结束，并完成待处理的文件恢复。"
           : disabled
             ? "请等待连接恢复或当前设置保存完成。"
             : "";

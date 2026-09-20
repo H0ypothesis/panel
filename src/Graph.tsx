@@ -46,6 +46,7 @@ import {
   type RunConfig,
 } from "../shared/types";
 import { readPreference, savePreference } from "./api";
+import { canBranchFrom } from "../shared/node-branching";
 import {
   buildContextUsageMap,
   type ContextUsage,
@@ -353,7 +354,7 @@ const TurnCard = memo(function TurnCard({ data }: NodeProps<TurnGraphNode>) {
         </div>
       </div>
       <Handle type="source" position={Position.Right} />
-      {(root || (turn.status === "completed" && !turn.contextStale)) && (
+      {canBranchFrom(turn) && (
         <button
           type="button"
           className="card-branch-button nodrag nopan"
@@ -367,7 +368,9 @@ const TurnCard = memo(function TurnCard({ data }: NodeProps<TurnGraphNode>) {
           title={
             data.branchDisabled
               ? "问题正在提交，请稍候"
-              : "沿当前分支增加新问题"
+              : retryable
+                ? "保留已有进度，从当前节点继续新分支"
+                : "沿当前分支增加新问题"
           }
           aria-label={`从「${turn.prompt}」创建分支`}
         >

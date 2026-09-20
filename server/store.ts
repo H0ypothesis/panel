@@ -127,7 +127,7 @@ export class Store extends EventEmitter {
           }
           if (node.status === "running" || node.status === "queued") {
             node.status = "failed";
-            node.error = "运行被服务重启中断。可以在当前卡片原地重试。";
+            node.error = "运行被服务重启中断。可以在新节点继续，或在当前卡片原地重试。";
             node.finishedAt = Date.now();
           }
           for (const call of node.toolCalls ?? []) {
