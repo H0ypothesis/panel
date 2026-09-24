@@ -1,0 +1,19 @@
+/* The native titlebar is transparent: each pane paints up to the window edge.
+   AppKit supplies this inset in CSS pixels, including page zoom and fullscreen. */
+:root[data-desktop="macos"] .sidebar {
+  padding-top: calc(24px + var(--desktop-titlebar-inset, 28px));
+}
+
+:root[data-desktop="macos"] .topbar {
+  padding-top: var(--desktop-titlebar-inset, 28px);
+}
+
+/* At high page zoom the compact layout scrolls the whole document. Keep its
+   titlebar background and controls in place above the scrolling content. */
+@media (max-width: 650px) {
+  :root[data-desktop="macos"] .topbar {
+    position: sticky;
+    top: 0;
+    z-index: 70;
+  }
+}

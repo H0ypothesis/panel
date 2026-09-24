@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { createRequire } from "node:module";
 import type { ImageContent } from "@earendil-works/pi-ai";
 import {
+  ATTACHMENT_PATH_HINT,
   MAX_ATTACHMENT_BYTES,
   MAX_ATTACHMENT_COUNT,
   attachmentKind,
@@ -126,12 +127,10 @@ function decodeAttachments(value: unknown): DecodedAttachment[] {
       ].includes(declared);
     if (!unspecified && !(kind === "text" ? textType : declared === mediaType))
       throw new Error(`文件「${name}」的媒体类型与扩展名不匹配。`);
-    if (
-      typeof input.data !== "string" ||
-      input.data.length === 0 ||
-      input.data.length > Math.ceil(MAX_ATTACHMENT_BYTES / 3) * 4
-    )
-      throw new Error(`文件「${name}」为空或超过 10 MB。`);
+    if (typeof input.data !== "string" || input.data.length === 0)
+      throw new Error(`文件「${name}」为空或数据无效。`);
+    if (input.data.length > Math.ceil(MAX_ATTACHMENT_BYTES / 3) * 4)
+      throw new Error(`文件「${name}」超过 10 MB。${ATTACHMENT_PATH_HINT}`);
     if (
       input.data.length % 4 !== 0 ||
       !/^[A-Za-z0-9+/]*={0,2}$/.test(input.data)

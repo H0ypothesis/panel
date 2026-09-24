@@ -1,5 +1,6 @@
 import { useEffect, useLayoutEffect, useState } from "react";
 import { readPreference, savePreference } from "./api";
+import { getDesktopBridge } from "./desktop";
 
 export type ThemePreference = "light" | "dark" | "system";
 
@@ -43,6 +44,13 @@ export function useTheme() {
       .querySelector('meta[name="theme-color"]')
       ?.setAttribute("content", background);
   }, [colorMode]);
+
+  useEffect(() => {
+    // Pass the preference, so following macOS never pins its resolved appearance.
+    void getDesktopBridge()
+      ?.setAppearance?.(preference)
+      .catch(() => {});
+  }, [preference]);
 
   const changeTheme = (next: ThemePreference) => {
     setPreference(next);

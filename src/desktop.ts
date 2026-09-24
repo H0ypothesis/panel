@@ -2,9 +2,11 @@ export type DesktopAction = "new-workspace" | "search";
 
 export interface PanelDesktop {
   readonly platform: "macos";
+  readonly fullscreen: boolean;
   chooseDirectory: () => Promise<string | null>;
   openSettings: () => Promise<unknown>;
   openDataDirectory: () => Promise<unknown>;
+  setAppearance: (theme: "light" | "dark" | "system") => Promise<unknown>;
 }
 
 declare global {

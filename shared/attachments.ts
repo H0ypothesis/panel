@@ -20,6 +20,8 @@ export const MAX_ATTACHMENT_BYTES = 10 * 1024 * 1024;
 export const MAX_ATTACHMENTS_BYTES = 20 * 1024 * 1024;
 // Base64 expands 20 MiB to ~26.7 MiB. Leave room for prompts and JSON framing.
 export const MAX_ATTACHMENT_REQUEST_BYTES = 29 * 1024 * 1024;
+export const ATTACHMENT_PATH_HINT =
+  "可在消息中发送本机文件的绝对路径，让模型按需选择读取方式。";
 
 const textExtensions = new Set([
   "txt",
@@ -136,10 +138,10 @@ export function attachmentSelectionError(
     if (!Number.isSafeInteger(file.size) || file.size <= 0)
       return `文件「${file.name}」为空或大小无效。`;
     if (file.size > MAX_ATTACHMENT_BYTES)
-      return `文件「${file.name}」超过 10 MB。`;
+      return `文件「${file.name}」超过 10 MB。${ATTACHMENT_PATH_HINT}`;
     total += file.size;
   }
   if (total > MAX_ATTACHMENTS_BYTES)
-    return "每条消息的附件总大小不能超过 20 MB。";
+    return `每条消息的附件总大小不能超过 20 MB。${ATTACHMENT_PATH_HINT}`;
   return undefined;
 }

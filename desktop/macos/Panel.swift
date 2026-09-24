@@ -2,7 +2,7 @@ import AppKit
 import WebKit
 import Darwin
 
-// The renderer has only these three capabilities. No filesystem or shell API is
+// The renderer has only explicit native conveniences. No filesystem or shell API is
 // exposed to JavaScript; the local server remains responsible for tool approval.
 final class PanelApp: NSObject, NSApplicationDelegate, NSWindowDelegate,
     WKNavigationDelegate, WKUIDelegate, WKScriptMessageHandlerWithReply, WKDownloadDelegate {
@@ -26,6 +26,8 @@ final class PanelApp: NSObject, NSApplicationDelegate, NSWindowDelegate,
     private var downloadDestinations: [ObjectIdentifier: (temporary: URL, destination: URL)] = [:]
     private var cancelledDownloads: Set<ObjectIdentifier> = []
     private var directoryPicker: NSOpenPanel?
+    private var filePicker: NSOpenPanel?
+    private var filePickerCompletion: (([URL]?) -> Void)?
 
     private let files = FileManager.default
     private var supportURL: URL {
@@ -81,16 +83,19 @@ final class PanelApp: NSObject, NSApplicationDelegate, NSWindowDelegate,
 
     private func makeWindow() {
         window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1440, height: 920),
-                          styleMask: [.titled, .closable, .miniaturizable, .resizable],
+                          styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
                           backing: .buffered, defer: false)
         window.title = "Panel"
+        window.titleVisibility = .hidden
+        window.titlebarAppearsTransparent = true
+        window.titlebarSeparatorStyle = .none
         window.minSize = NSSize(width: 1060, height: 680)
         window.isReleasedWhenClosed = false
         window.delegate = self
         window.tabbingMode = .disallowed
         window.center()
         window.setFrameAutosaveName("PanelMainWindow")
-        container = NSView(frame: NSRect(origin: .zero, size: window.contentLayoutRect.size))
+        container = NSView(frame: window.contentView?.bounds ?? NSRect(origin: .zero, size: window.frame.size))
         container.autoresizingMask = [.width, .height]
         window.contentView = container
         window.makeKeyAndOrderFront(nil)
@@ -365,27 +370,48 @@ final class PanelApp: NSObject, NSApplicationDelegate, NSWindowDelegate,
         let origin = "http://127.0.0.1:\(url.port!)"
         let source = """
         if (window === window.top && location.origin === '\(origin)') {
+          const markDesktop = () => {
+            const root = document.documentElement;
+            if (!root) return false;
+            \(desktopStateAssignments())
+            return true;
+          };
+          if (!markDesktop()) {
+            const observer = new MutationObserver(() => {
+              if (markDesktop()) observer.disconnect();
+            });
+            observer.observe(document, {childList: true});
+          }
           Object.defineProperty(window, 'panelDesktop', { value: Object.freeze({
             platform: 'macos',
+            get fullscreen() { return document.documentElement?.dataset.fullscreen === 'true'; },
             chooseDirectory: () => window.webkit.messageHandlers.panel.postMessage({action:'choose-directory'}),
             openSettings: () => window.webkit.messageHandlers.panel.postMessage({action:'open-settings'}),
-            openDataDirectory: () => window.webkit.messageHandlers.panel.postMessage({action:'open-data-directory'})
+            openDataDirectory: () => window.webkit.messageHandlers.panel.postMessage({action:'open-data-directory'}),
+            setAppearance: (theme) => window.webkit.messageHandlers.panel.postMessage({action:'set-appearance', theme})
           }), writable: false, configurable: false });
         }
         """
         configuration.userContentController.addUserScript(WKUserScript(source: source,
             injectionTime: .atDocumentStart, forMainFrameOnly: true))
         let view = WKWebView(frame: container.bounds, configuration: configuration)
-        view.autoresizingMask = [.width, .height]
+        view.translatesAutoresizingMaskIntoConstraints = false
         view.navigationDelegate = self
         view.uiDelegate = self
         view.allowsBackForwardNavigationGestures = false
         container.addSubview(view, positioned: .below, relativeTo: statusView)
+        NSLayoutConstraint.activate([
+            view.leadingAnchor.constraint(equalTo: container.leadingAnchor),
+            view.trailingAnchor.constraint(equalTo: container.trailingAnchor),
+            view.topAnchor.constraint(equalTo: container.topAnchor),
+            view.bottomAnchor.constraint(equalTo: container.bottomAnchor)
+        ])
         webView = view
         view.load(URLRequest(url: url))
     }
 
     private func destroyWebView() {
+        cancelFilePicker()
         directoryPicker?.cancel(nil)
         directoryPicker = nil
         for download in downloads.values { download.cancel { _ in } }
@@ -407,6 +433,30 @@ final class PanelApp: NSObject, NSApplicationDelegate, NSWindowDelegate,
             url.user == nil && url.password == nil
     }
 
+    private func desktopStateAssignments() -> String {
+        let fullscreen = window.styleMask.contains(.fullScreen)
+        let contentHeight = window.contentView?.bounds.height ?? window.frame.height
+        let titlebarHeight = max(28, contentHeight - window.contentLayoutRect.height)
+        // Fullscreen can still show native titlebar or sharing controls.
+        let inset = titlebarHeight / (webView?.pageZoom ?? 1)
+        return """
+        root.dataset.desktop = 'macos';
+        root.dataset.fullscreen = '\(fullscreen)';
+        root.style.setProperty('--desktop-titlebar-inset', '\(inset)px');
+        """
+    }
+
+    private func syncDesktopState() {
+        guard let view = webView, sameOrigin(view.url) else { return }
+        view.evaluateJavaScript("""
+        (() => {
+          const root = document.documentElement;
+          if (!root) return;
+          \(desktopStateAssignments())
+        })();
+        """, completionHandler: nil)
+    }
+
     func userContentController(_ userContentController: WKUserContentController,
         didReceive message: WKScriptMessage, replyHandler: @escaping (Any?, String?) -> Void) {
         let origin = message.frameInfo.securityOrigin
@@ -419,7 +469,7 @@ final class PanelApp: NSObject, NSApplicationDelegate, NSWindowDelegate,
         }
         switch action {
         case "choose-directory":
-            guard directoryPicker == nil else { replyHandler(nil, "已有文件夹选择窗口打开。"); return }
+            guard directoryPicker == nil, filePicker == nil else { replyHandler(nil, "已有文件选择窗口打开。"); return }
             let panel = NSOpenPanel()
             panel.title = "选择工作目录"
             panel.prompt = "选择目录"
@@ -437,6 +487,16 @@ final class PanelApp: NSObject, NSApplicationDelegate, NSWindowDelegate,
             replyHandler(nil, nil)
         case "open-data-directory":
             openDataDirectory()
+            replyHandler(nil, nil)
+        case "set-appearance":
+            switch body["theme"] as? String {
+            case "light": window.appearance = NSAppearance(named: .aqua)
+            case "dark": window.appearance = NSAppearance(named: .darkAqua)
+            case "system": window.appearance = nil
+            default:
+                replyHandler(nil, "不支持的主题。")
+                return
+            }
             replyHandler(nil, nil)
         default:
             replyHandler(nil, "不支持的原生操作。")
@@ -471,6 +531,7 @@ final class PanelApp: NSObject, NSApplicationDelegate, NSWindowDelegate,
 
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
         guard sameOrigin(webView.url) else { return }
+        syncDesktopState()
         statusView?.removeFromSuperview()
         statusView = nil
         window.makeFirstResponder(webView)
@@ -492,11 +553,57 @@ final class PanelApp: NSObject, NSApplicationDelegate, NSWindowDelegate,
     }
 
     func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
+        cancelFilePicker()
         showStatus("页面进程已停止", "你的探索已保存在本机，点击重试重新打开工作台。", retry: true)
     }
 
     func webView(_ webView: WKWebView, createWebViewWith configuration: WKWebViewConfiguration,
                  for navigationAction: WKNavigationAction, windowFeatures: WKWindowFeatures) -> WKWebView? { nil }
+
+    func webView(_ webView: WKWebView, runOpenPanelWith parameters: WKOpenPanelParameters,
+                 initiatedByFrame frame: WKFrameInfo, completionHandler: @escaping ([URL]?) -> Void) {
+        let origin = frame.securityOrigin
+        guard webView === self.webView, frame.isMainFrame,
+              let expected = serviceURL, sameOrigin(webView.url), sameOrigin(frame.request.url),
+              origin.protocol == expected.scheme, origin.host == expected.host, origin.port == expected.port,
+              !stopping, !terminating, window.isVisible,
+              filePicker == nil, directoryPicker == nil, window.attachedSheet == nil else {
+            completionHandler(nil)
+            return
+        }
+        let panel = NSOpenPanel()
+        panel.title = parameters.allowsDirectories ? "选择要上传的文件夹" : "选择要上传的文件"
+        panel.prompt = "选择"
+        panel.canChooseFiles = !parameters.allowsDirectories
+        panel.canChooseDirectories = parameters.allowsDirectories
+        panel.allowsMultipleSelection = parameters.allowsMultipleSelection
+        panel.canCreateDirectories = false
+        filePicker = panel
+        filePickerCompletion = completionHandler
+        panel.beginSheetModal(for: window) { [weak self, weak webView] response in
+            guard let self = self, self.filePicker === panel else { return }
+            let completion = self.filePickerCompletion
+            self.filePicker = nil
+            self.filePickerCompletion = nil
+            let accepted = response == .OK && webView === self.webView &&
+                self.sameOrigin(webView?.url) && !self.stopping && !self.terminating
+            completion?(accepted ? panel.urls : nil)
+        }
+    }
+
+    private func cancelFilePicker() {
+        let panel = filePicker
+        let completion = filePickerCompletion
+        // Clear first: cancelling the sheet also invokes its completion block.
+        filePicker = nil
+        filePickerCompletion = nil
+        panel?.cancel(nil)
+        completion?(nil)
+    }
+
+    func webView(_ webView: WKWebView, didStartProvisionalNavigation navigation: WKNavigation!) {
+        if webView === self.webView { cancelFilePicker() }
+    }
 
     func webView(_ webView: WKWebView, runJavaScriptAlertPanelWithMessage message: String,
                  initiatedByFrame frame: WKFrameInfo, completionHandler: @escaping () -> Void) {
@@ -686,9 +793,18 @@ final class PanelApp: NSObject, NSApplicationDelegate, NSWindowDelegate,
     @objc private func newWorkspace() { sendNativeAction("new-workspace") }
     @objc private func search() { sendNativeAction("search") }
     @objc private func reload() { webView?.reload() }
-    @objc private func resetZoom() { webView?.pageZoom = 1 }
-    @objc private func zoomIn() { if let view = webView { view.pageZoom = min(1.8, view.pageZoom + 0.1) } }
-    @objc private func zoomOut() { if let view = webView { view.pageZoom = max(0.7, view.pageZoom - 0.1) } }
+    @objc private func resetZoom() {
+        webView?.pageZoom = 1
+        syncDesktopState()
+    }
+    @objc private func zoomIn() {
+        if let view = webView { view.pageZoom = min(1.8, view.pageZoom + 0.1) }
+        syncDesktopState()
+    }
+    @objc private func zoomOut() {
+        if let view = webView { view.pageZoom = max(0.7, view.pageZoom - 0.1) }
+        syncDesktopState()
+    }
     @objc private func about() {
         NSApp.orderFrontStandardAboutPanel(options: [
             .applicationName: "Panel", .applicationVersion: Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0.1.0",
@@ -707,6 +823,22 @@ final class PanelApp: NSObject, NSApplicationDelegate, NSWindowDelegate,
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
 
+    func windowWillClose(_ notification: Notification) {
+        if notification.object as? NSWindow === window { cancelFilePicker() }
+    }
+
+    func windowDidResize(_ notification: Notification) {
+        if notification.object as? NSWindow === window { syncDesktopState() }
+    }
+
+    func windowDidEnterFullScreen(_ notification: Notification) {
+        if notification.object as? NSWindow === window { syncDesktopState() }
+    }
+
+    func windowDidExitFullScreen(_ notification: Notification) {
+        if notification.object as? NSWindow === window { syncDesktopState() }
+    }
+
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
         if !flag { window?.makeKeyAndOrderFront(nil) }
         return true
@@ -714,6 +846,7 @@ final class PanelApp: NSObject, NSApplicationDelegate, NSWindowDelegate,
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         if terminating { return .terminateLater }
+        cancelFilePicker()
         guard service?.isRunning == true else { return .terminateNow }
         terminating = true
         activeNodeCount { [weak self] count in
@@ -735,6 +868,7 @@ final class PanelApp: NSObject, NSApplicationDelegate, NSWindowDelegate,
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+        cancelFilePicker()
         readinessTimer?.invalidate()
         forceStopWork?.cancel()
         if let process = service, process.isRunning { process.terminate() }

@@ -2,6 +2,7 @@ import { useEffect, useId, useRef, useState, type DragEvent } from "react";
 import { Download, FileText, ImageIcon, Paperclip, X } from "lucide-react";
 import {
   ATTACHMENT_ACCEPT,
+  ATTACHMENT_PATH_HINT,
   MAX_ATTACHMENT_COUNT,
   MAX_ATTACHMENT_BYTES,
   attachmentKind,
@@ -187,6 +188,8 @@ export function AttachmentPicker({
       <p id={helpId} className="attachment-help">
         文本、代码、PDF、图片 · 最多 {MAX_ATTACHMENT_COUNT} 个 · 单个{" "}
         {formatAttachmentSize(MAX_ATTACHMENT_BYTES)}
+        <br />
+        文件较大时，{ATTACHMENT_PATH_HINT}
       </p>
       {files.length > 0 && (
         <ul className="attachment-file-list" aria-label="待上传文件">
@@ -222,39 +225,46 @@ export function AttachmentList({
 }) {
   if (!attachments.length) return null;
   return (
-    <ul
-      className="attachment-file-list attachment-uploaded-list"
-      aria-label="已上传文件"
-    >
-      {attachments.map((attachment) => (
-        <li className="attachment-file" key={attachment.id}>
-          <span className="attachment-file-icon" aria-hidden="true">
-            {attachment.kind === "image" ? (
-              <ImageIcon size={17} />
-            ) : (
-              <FileText size={17} />
-            )}
-          </span>
-          <span className="attachment-file-info">
-            <span className="attachment-file-name" title={attachment.name}>
-              {attachment.name}
+    <>
+      <ul
+        className="attachment-file-list attachment-uploaded-list"
+        aria-label="已上传文件"
+      >
+        {attachments.map((attachment) => (
+          <li className="attachment-file" key={attachment.id}>
+            <span className="attachment-file-icon" aria-hidden="true">
+              {attachment.kind === "image" ? (
+                <ImageIcon size={17} />
+              ) : (
+                <FileText size={17} />
+              )}
             </span>
-            <span className="attachment-file-detail">
-              {formatAttachmentSize(attachment.size)}
-              {attachment.truncated ? " · 内容过长，已截取" : ""}
+            <span className="attachment-file-info">
+              <span className="attachment-file-name" title={attachment.name}>
+                {attachment.name}
+              </span>
+              <span className="attachment-file-detail">
+                {formatAttachmentSize(attachment.size)}
+                {attachment.truncated ? " · 内容过长，已截取" : ""}
+              </span>
             </span>
-          </span>
-          <a
-            className="attachment-download"
-            href={`/api/workspaces/${encodeURIComponent(workspaceId)}/nodes/${encodeURIComponent(nodeId)}/attachments/${encodeURIComponent(attachment.id)}`}
-            download={attachment.name}
-            aria-label={`下载附件「${attachment.name}」`}
-            title="下载原文件"
-          >
-            <Download size={13} />
-          </a>
-        </li>
-      ))}
-    </ul>
+            <a
+              className="attachment-download"
+              href={`/api/workspaces/${encodeURIComponent(workspaceId)}/nodes/${encodeURIComponent(nodeId)}/attachments/${encodeURIComponent(attachment.id)}`}
+              download={attachment.name}
+              aria-label={`下载附件「${attachment.name}」`}
+              title="下载原文件"
+            >
+              <Download size={13} />
+            </a>
+          </li>
+        ))}
+      </ul>
+      {attachments.some((attachment) => attachment.truncated) && (
+        <p className="attachment-help">
+          部分附件未完整放入上下文。{ATTACHMENT_PATH_HINT}
+        </p>
+      )}
+    </>
   );
 }
