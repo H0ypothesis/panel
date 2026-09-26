@@ -593,7 +593,7 @@ test("restart completes an interrupted file restoration without rerunning any ol
   assert.equal(e.runs.length, 1);
 });
 
-test("an overlapping workspace run blocks rollback without interrupting that run", async (t) => {
+test("an overlapping workspace run permits file-scoped rollback without interrupting that run", async (t) => {
   const e = await fixture(t);
   const node = await e.submit();
   await e.invoke("write", { path: "partial.txt", content: "partial" });
@@ -608,14 +608,17 @@ test("an overlapping workspace run blocks rollback without interrupting that run
     requestId: randomUUID(),
   });
   await until(() => e.runs.length === 2);
-  await assert.rejects(e.retry(node), /目录|运行|排队|占用/);
-  assert.equal(
-    await readFile(join(e.project, "partial.txt"), "utf8"),
-    "partial",
-  );
+  const retried = await e.retry(node);
+  await until(() => e.runs.length === 3);
+  await assert.rejects(readFile(join(e.project, "partial.txt")), {
+    code: "ENOENT",
+  });
   assert.equal(otherNode.status, "running");
-  assert.equal(e.runs.length, 2);
-  await e.finish(otherNode);
+  assert.equal(e.runs[1].signal.aborted, false);
+  assert.equal(retried.status, "running");
+  await e.finish(retried);
+  e.runs[1].release();
+  await until(() => otherNode.status === "completed");
 });
 
 test("retry API validates revisions, origin and state and returns the same node ID", async (t) => {

@@ -17,6 +17,7 @@ export type RunStatus =
   | "cancelled";
 export type BranchColor = "sage" | "violet" | "blue" | "amber";
 export type ApprovalMode = "ask" | "auto";
+export type ToolApprovalDecision = "approve" | "approve_tool" | "deny";
 
 export interface SafetyReviewRequest {
   model: string;
@@ -64,7 +65,13 @@ export interface ToolCall {
   output?: string;
   error?: string;
   sources?: { title: string; url: string }[];
-  approval?: "auto" | "policy" | "safety_model" | "approved" | "denied";
+  approval?:
+    | "auto"
+    | "policy"
+    | "safety_model"
+    | "approved"
+    | "approved_tool"
+    | "denied";
   /** Whether an executed file tool has a complete, restorable Git audit. */
   fileSnapshot?: "unchanged" | "recorded" | "failed";
   safetyReview?: SafetyReview;
@@ -141,6 +148,12 @@ export interface ContextRequestUsage {
   estimated?: boolean;
 }
 
+/** Readable model-provided thinking; private signatures are never UI content. */
+export interface ThinkingContent {
+  text: string;
+  active: boolean;
+}
+
 export interface TurnNode {
   id: string;
   /** In-place regeneration revision; legacy nodes start at zero. */
@@ -152,6 +165,7 @@ export interface TurnNode {
   attachments?: Attachment[];
   contextReferences?: ContextReference[];
   response: string;
+  thinking?: ThinkingContent;
   status: RunStatus;
   config: RunConfig;
   color: BranchColor;
@@ -254,6 +268,7 @@ export interface ModelOption {
 }
 
 export interface WebCapabilities {
+  toolBatchApproval?: boolean;
   /** Missing on older backends, which silently discard referenceNodeIds. */
   cardReferences?: boolean;
   webFetch: boolean;

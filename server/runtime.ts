@@ -27,15 +27,18 @@ import type {
   SafetyReviewRequest,
   SafetyReviewResult,
   ToolCall,
+  ThinkingContent,
   TurnNode,
 } from "../shared/types.ts";
 import { ContextCompactor, estimateContextInputTokens } from "./compaction.ts";
 import { SYSTEM_PROMPT } from "./context.ts";
 import { paperbypassProvider } from "./paperbypass.ts";
 import { atriaProvider } from "./atria.ts";
+import { xiaomiTokenPlanProvider } from "./xiaomi.ts";
 import { createPanelTools } from "./coding-tools.ts";
 import { reviewSafetyTool } from "./safety-review.ts";
 import { requestUsage } from "./request-context-usage.ts";
+import { thinkingText } from "./thinking.ts";
 import { createWebTools, isWebTool, type WebToolOptions } from "./web-tools.ts";
 
 export interface RunEnvironment {
@@ -104,6 +107,7 @@ function toolText(result: unknown, toolName: string): string {
 export interface RunResult {
   messages: Message[];
   response: string;
+  thinking?: ThinkingContent;
   usage?: TurnNode["usage"];
 }
 
@@ -121,6 +125,8 @@ export interface RunContextOptions {
   onCheckpoint?: (checkpoint: ContextCheckpoint) => Promise<void>;
   /** The active provider request, including its own growing assistant output. */
   onRequestUsage?: (usage: ContextRequestUsage) => void;
+  /** Readable thinking is streamed separately from the answer. */
+  onThinking?: (thinking: ThinkingContent) => void;
   /** Only the current run's original messages, never the input projection. */
   onMessages?: (messages: Message[]) => Promise<void>;
 }
@@ -165,7 +171,9 @@ function summaryUsage(usage: Usage, provider: string): TurnNode["usage"] {
     output: usage.output,
     total: usage.totalTokens,
     cost:
-      provider === "paperbypass" || provider === "atria"
+      provider === "paperbypass" ||
+      provider === "atria" ||
+      provider === "xiaomi-token-plan-cn"
         ? undefined
         : usage.cost.total,
   };
@@ -276,6 +284,12 @@ async function summarizeContext(
 
 const providers = [
   {
+    id: "xiaomi-token-plan-cn",
+    name: "小米 MiMo Token Plan",
+    env: "XIAOMI_TOKEN_PLAN_CN_API_KEY",
+    keys: ["XIAOMI_TOKEN_PLAN_CN_API_KEY"],
+  },
+  {
     id: "atria",
     name: "Atria",
     env: "ATRIA_API_KEY",
@@ -339,6 +353,7 @@ export class PiRuntime implements Runtime {
     }
     this.registry.setProvider(paperbypassProvider());
     this.registry.setProvider(atriaProvider());
+    this.registry.setProvider(xiaomiTokenPlanProvider());
     this.registry.setProvider(anthropicProvider());
     this.registry.setProvider(openaiProvider());
     this.registry.setProvider(googleProvider());
@@ -614,6 +629,9 @@ export class PiRuntime implements Runtime {
     const abort = () => agent.abort();
     signal.addEventListener("abort", abort, { once: true });
     let response = "";
+    let thinking: ThinkingContent | undefined;
+    const completedThinking: string[] = [];
+    const activeThinkingBlocks = new Set<number>();
     agent.subscribe((event) => {
       if (
         (event.type === "message_start" ||
@@ -621,6 +639,29 @@ export class PiRuntime implements Runtime {
           event.type === "message_end") &&
         event.message.role === "assistant"
       ) {
+        const currentThinking = thinkingText([event.message]);
+        const text = [...completedThinking, currentThinking]
+          .filter(Boolean)
+          .join("\n\n");
+        if (event.type === "message_update") {
+          const update = event.assistantMessageEvent;
+          if (
+            update.type === "thinking_start" ||
+            update.type === "thinking_delta"
+          )
+            activeThinkingBlocks.add(update.contentIndex);
+          else if (update.type === "thinking_end")
+            activeThinkingBlocks.delete(update.contentIndex);
+        } else {
+          activeThinkingBlocks.clear();
+        }
+        const active = activeThinkingBlocks.size > 0;
+        if (text && (text !== thinking?.text || active !== thinking?.active)) {
+          thinking = { text, active };
+          options.onThinking?.({ ...thinking });
+        }
+        if (event.type === "message_end" && currentThinking)
+          completedThinking.push(currentThinking);
         const usage = requestUsage(
           event.message,
           config.model,
@@ -692,6 +733,7 @@ export class PiRuntime implements Runtime {
       return {
         messages: structuredClone(messages),
         response,
+        ...(thinking ? { thinking: { ...thinking, active: false } } : {}),
         usage:
           provider === "demo"
             ? undefined
@@ -713,7 +755,9 @@ export class PiRuntime implements Runtime {
                   0,
                 ),
                 cost:
-                  provider === "paperbypass" || provider === "atria"
+                  provider === "paperbypass" ||
+                  provider === "atria" ||
+                  provider === "xiaomi-token-plan-cn"
                     ? undefined
                     : assistants.reduce(
                         (sum, item) => sum + item.usage.cost.total,

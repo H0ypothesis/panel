@@ -25,22 +25,20 @@ export function paperbypassProvider() {
         },
       },
     },
-    models: [
-      {
-        id,
-        name: id === "openai/gpt-5.6-luna-pro" ? "Luna Pro" : id,
-        api: "anthropic-messages",
-        provider: "paperbypass",
-        baseUrl,
-        // Text-only input; Pi's Messages adapter also handles tools and tool-result history.
-        reasoning: false,
-        input: ["text"],
-        // Local conservative limits; gateway pricing is not available here.
-        contextWindow: 128000,
-        maxTokens: 8192,
-        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-      },
-    ],
+    models: [...new Set([id, "Atria-Dawn-Preview"])].map((id) => ({
+      id,
+      name: id === "openai/gpt-5.6-luna-pro" ? "Luna Pro" : id,
+      api: "anthropic-messages",
+      provider: "paperbypass",
+      baseUrl,
+      // Text-only input; Pi's Messages adapter also handles tools and tool-result history.
+      reasoning: false,
+      input: ["text"],
+      // Atria's documented context window; other gateway models use a conservative budget.
+      contextWindow: id === "Atria-Dawn-Preview" ? 256000 : 128000,
+      maxTokens: 8192,
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+    })),
     api: anthropicMessagesApi(),
   });
 }

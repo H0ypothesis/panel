@@ -17,6 +17,7 @@ import { createPanelTools } from "./coding-tools.ts";
 import {
   FileOperationLocks,
   resolveFileOperationResource,
+  resolveRestoreFileResource,
   validateFileOperationResource,
   type FileOperationResource,
 } from "./file-operation-locks.ts";
@@ -37,6 +38,83 @@ function file(path: string, mode: "read" | "write" = "write") {
     canonicalPath: join("/workspace", path),
   } satisfies FileOperationResource;
 }
+
+test("restores lock literal Git filenames and do not lock empty changes", async (t) => {
+  const { cwd, root } = await fixture(t);
+  assert.equal(await resolveRestoreFileResource(cwd, []), undefined);
+  const resource = await resolveRestoreFileResource(cwd, [
+    "@a.txt",
+    "new/b.txt",
+    "@a.txt",
+  ]);
+  assert.deepEqual(resource, {
+    global: false,
+    mode: "write",
+    workingDirectory: root,
+    canonicalPaths: [join(root, "@a.txt"), join(root, "new/b.txt")],
+  });
+  for (const path of [
+    "../outside",
+    "/outside",
+    ".git/config",
+    "node_modules/a",
+    "a/../b",
+  ])
+    await assert.rejects(resolveRestoreFileResource(cwd, [path]), /回溯路径/);
+  await symlink("@a.txt", join(cwd, "dangling"));
+  assert.equal(
+    (await resolveRestoreFileResource(cwd, ["dangling"]))?.global,
+    true,
+  );
+  await writeFile(join(cwd, "linked.txt"), "shared inode");
+  await link(join(cwd, "linked.txt"), join(cwd, "alias.txt"));
+  assert.equal(
+    (await resolveRestoreFileResource(cwd, ["linked.txt"]))?.global,
+    true,
+  );
+});
+
+test("multi-file restore locks wait atomically and allow unrelated paths through", async () => {
+  const locks = new FileOperationLocks();
+  const releaseB = await locks.acquire(file("b.txt"));
+  const paths = ["a.txt", "b.txt"].map((path) => join("/workspace", path));
+  let waited = false;
+  const pendingRestore = locks.acquire(
+    {
+      global: false,
+      mode: "write",
+      workingDirectory: "/workspace",
+      canonicalPaths: paths,
+    },
+    undefined,
+    () => {
+      waited = true;
+    },
+  );
+  assert.equal(waited, true);
+  // Mutating the caller's list must not shrink a pending reservation.
+  paths.splice(0);
+  let readWaited = false;
+  const pendingRead = locks.acquire(file("a.txt", "read"), undefined, () => {
+    readWaited = true;
+  });
+  assert.equal(readWaited, true);
+  (await locks.acquire(file("unrelated.txt")))();
+  releaseB();
+  const releaseRestore = await pendingRestore;
+  let globalWaited = false;
+  const pendingShell = locks.acquire(
+    { global: true, mode: "write", workingDirectory: "/elsewhere" },
+    undefined,
+    () => {
+      globalWaited = true;
+    },
+  );
+  assert.equal(globalWaited, true);
+  releaseRestore();
+  (await pendingRead)();
+  (await pendingShell)();
+});
 
 test("resolve new paths from a canonical workspace and internal symlink ancestors", async (t) => {
   const { directory, cwd, root } = await fixture(t);

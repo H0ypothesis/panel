@@ -238,6 +238,54 @@ test("automatic web search and fetch each require independent safety review in t
   );
 });
 
+test("batch approval after a review timeout permits later searches but still asks for web fetch", async (t) => {
+  const search = (id: string) =>
+    fauxAssistantMessage(
+      fauxToolCall("web_search", { query: `article ${id}` }, { id }),
+      { stopReason: "toolUse" },
+    );
+  const env = await fixture(t, "auto", [
+    search("search-1"),
+    search("search-2"),
+    fetchCall,
+    search("search-3"),
+    fauxAssistantMessage("检索完成"),
+  ]);
+  env.runtime.reviewTool = async (request) => {
+    env.runtime.reviews.push(structuredClone(request));
+    throw new Error("安全模型审核超时，需要请求人工批准。");
+  };
+  const node = await env.submit();
+  await until(() => node.toolCalls?.[0]?.status === "awaiting_approval");
+  assert.equal(env.requests.length, 0);
+  await env.scheduler.approve(
+    env.workspace.id,
+    node.id,
+    "search-1",
+    "approve_tool",
+  );
+  await until(() => node.toolCalls?.[2]?.status === "awaiting_approval");
+  assert.equal(env.requests.length, 2);
+  assert.deepEqual(
+    env.runtime.reviews.map((request) => request.tool.name),
+    ["web_search", "web_fetch"],
+  );
+  await env.scheduler.approve(env.workspace.id, node.id, "fetch-1", "deny");
+  await until(() => node.status === "completed" || node.status === "failed");
+  assert.equal(node.status, "completed", node.error);
+  assert.equal(env.requests.length, 3);
+  const searches = node.toolCalls!.filter((call) => call.name === "web_search");
+  assert.ok(
+    searches.every(
+      (call) =>
+        call.approval === "approved_tool" && call.authorization?.consumedAt,
+    ),
+  );
+  assert.equal(new Set(searches.map((call) => call.authorization?.id)).size, 3);
+  assert.equal(node.toolCalls![2].status, "denied");
+  assert.equal(env.workspace.approvalMode, "auto");
+});
+
 test("full web results reach the next model request and survive records and restart", async (t) => {
   const body = `RESULT_BEGIN\n${"long public content ".repeat(1600)}\nRESULT_END`;
   const sources = Array.from({ length: 25 }, (_, index) => ({

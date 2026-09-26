@@ -18,6 +18,7 @@ import type {
   ContextState,
   GitHistoryEntry,
   RunConfig,
+  ToolApprovalDecision,
   ToolCall,
 } from "../shared/types.ts";
 import type { GitBaseline } from "./git-snapshots.ts";
@@ -40,8 +41,11 @@ import { validateApprovalSettings } from "./approval-settings.ts";
 import { isWebTool } from "./web-tools.ts";
 import {
   FileOperationLocks,
+  fileOperationsConflict,
   resolveFileOperationResource,
+  resolveRestoreFileResource,
   validateFileOperationResource,
+  type FileOperationResource,
 } from "./file-operation-locks.ts";
 import {
   ToolAuthorizationRegistry,
@@ -73,6 +77,8 @@ export class Scheduler {
   private deletingDirectories = new Map<string, string>();
   private configuringDirectories = new Map<string, string>();
   private approvals = new Map<string, (allow: boolean) => void>();
+  // Live grants only: one exact tool name, one card run, one approval configuration.
+  private approvedTools = new Map<string, Map<string, string>>();
   private settingsChanges = new Map<string, Promise<void>>();
   private mutations = new Map<string, Promise<unknown>>();
   private approvalVersions = new Map<string, number>();
@@ -188,9 +194,7 @@ export class Scheduler {
         );
       })
     )
-      throw new NodeMutationConflict(
-        "此路径仍在收尾，请等待结束后继续。",
-      );
+      throw new NodeMutationConflict("此路径仍在收尾，请等待结束后继续。");
     const contextReferences = resolveContextReferences(workspace, references);
     const parent = workspace.nodes.find((node) => node.id === input.parentId)!;
     const selection = this.contextSelection(workspace, parent, input);
@@ -948,23 +952,50 @@ export class Scheduler {
             "本卡片原工作目录的实际路径已改变，未启动原地重试。",
           );
         this.assertDirectoryAvailable(directory);
-        if (this.directoryInUse(directory, workspace.id, Boolean(pending)))
-          throw new NodeMutationConflict(
-            "原工作目录或其子目录仍有任务运行、排队或回溯，请等待结束后原地重试。",
-          );
+        this.assertNoPendingRestore(directory, workspace.id);
       }
+      if (
+        pending &&
+        (pending.workingDirectory !== directory ||
+          pending.plan.workingDirectory !== directory ||
+          pending.plan.workspaceId !== workspaceId)
+      )
+        throw new NodeMutationConflict(
+          "文件回溯计划与本卡片原工作目录不一致。",
+        );
+      const toRestore = history.filter((entry) => !entry.restoredAt);
+      const restorePaths = pending
+        ? pending.plan.files.map((file) => file.path)
+        : toRestore.flatMap((entry) => entry.files.map((file) => file.path));
       const lock = `retry:${workspaceId}:${input.requestId}`;
       if (directory) this.activeDirectories.set(lock, directory);
       let releaseFiles: (() => void) | undefined;
       try {
-        if (directory)
+        if (directory && restorePaths.length) {
+          // Completed history lists are checked against the actual Git trees by
+          // prepareRestore before any write. No changes means no file lock.
+          const resource = await resolveRestoreFileResource(
+            directory,
+            restorePaths,
+          );
           releaseFiles = await this.fileOperations.acquire(
-            { global: true, mode: "write", workingDirectory: directory },
+            resource,
             this.maintenanceController.signal,
           );
+          const current = await resolveRestoreFileResource(
+            directory,
+            restorePaths,
+          );
+          if (
+            resource?.workingDirectory !== directory ||
+            JSON.stringify(resource) !== JSON.stringify(current)
+          )
+            throw new NodeMutationConflict(
+              "等待期间回溯文件路径或工作目录已变化，请重新原地重试。",
+            );
+        }
         if (this.closed) throw new Error("服务正在关闭，未启动文件回溯。");
         let journal: PendingNodeRetry | undefined = pending;
-        const toRestore = history.filter((entry) => !entry.restoredAt);
         if (!journal && toRestore.length) {
           try {
             const plan = await this.store.gitSnapshots.prepareRestore(
@@ -1084,7 +1115,7 @@ export class Scheduler {
     });
   }
 
-  private assertNoPendingRestore(directory: string) {
+  private assertNoPendingRestore(directory: string, ownWorkspaceId?: string) {
     if (
       [...this.activeDirectories.entries()].some(
         ([id, active]) =>
@@ -1092,6 +1123,7 @@ export class Scheduler {
       ) ||
       this.store.data.workspaces.some(
         (workspace) =>
+          workspace.id !== ownWorkspaceId &&
           workspace.pendingNodeRetry &&
           directoriesOverlap(
             directory,
@@ -1104,30 +1136,43 @@ export class Scheduler {
       );
   }
 
-  private directoryInUse(
-    directory: string,
-    ownWorkspaceId: string,
-    continuingRestore = false,
-  ) {
+  private async assertNoPendingFileRestore(resource: FileOperationResource) {
+    for (const workspace of this.store.data.workspaces) {
+      const pending = workspace.pendingNodeRetry;
+      if (!pending) continue;
+      const restore = await resolveRestoreFileResource(
+        pending.workingDirectory,
+        pending.plan.files.map((file) => file.path),
+      );
+      if (
+        workspace.pendingNodeRetry === pending &&
+        restore &&
+        fileOperationsConflict(resource, restore)
+      )
+        throw new NodeMutationConflict(
+          "此文件还有未完成的回溯，请先完成对应卡片的原地重试。",
+        );
+    }
+  }
+
+  private directoryInUse(directory: string, ownWorkspaceId: string) {
     return (
       [...this.activeDirectories.values()].some((active) =>
         directoriesOverlap(directory, active),
       ) ||
-      (!continuingRestore &&
-        this.store.data.workspaces.some((workspace) =>
-          workspace.nodes.some(
-            (node) =>
-              (node.status === "running" || node.status === "queued") &&
-              node.execution?.workingDirectory &&
-              directoriesOverlap(directory, node.execution.workingDirectory),
-          ),
-        )) ||
-      (!continuingRestore &&
-        this.queue.some(
-          (job) =>
-            job.node.execution?.workingDirectory &&
-            directoriesOverlap(directory, job.node.execution.workingDirectory),
-        )) ||
+      this.store.data.workspaces.some((workspace) =>
+        workspace.nodes.some(
+          (node) =>
+            (node.status === "running" || node.status === "queued") &&
+            node.execution?.workingDirectory &&
+            directoriesOverlap(directory, node.execution.workingDirectory),
+        ),
+      ) ||
+      this.queue.some(
+        (job) =>
+          job.node.execution?.workingDirectory &&
+          directoriesOverlap(directory, job.node.execution.workingDirectory),
+      ) ||
       this.store.data.workspaces.some(
         (workspace) =>
           workspace.id !== ownWorkspaceId &&
@@ -1454,7 +1499,8 @@ export class Scheduler {
       for (const node of workspace.nodes) {
         if (node.status === "running" || node.status === "queued") {
           node.status = "failed";
-          node.error = "运行被服务关闭中断。可以在新节点继续，或在当前卡片原地重试。";
+          node.error =
+            "运行被服务关闭中断。可以在新节点继续，或在当前卡片原地重试。";
           node.finishedAt = Date.now();
           this.interruptTools(node);
           this.store.touch(workspace);
@@ -1518,6 +1564,7 @@ export class Scheduler {
   }
 
   private interruptTools(node: StoredNode) {
+    this.approvedTools.delete(node.id);
     this.authorizations.revokeNode(node.id);
     for (const call of node.toolCalls ?? []) {
       call.waitingFor = undefined;
@@ -1575,6 +1622,26 @@ export class Scheduler {
     );
   }
 
+  private toolApprovalScope(workspace: StoredWorkspace, node: StoredNode) {
+    return JSON.stringify({
+      ...this.authorizationScope(workspace, node),
+      revision: node.revision ?? 0,
+    });
+  }
+
+  private hasToolApproval(
+    workspace: StoredWorkspace,
+    node: StoredNode,
+    name: string,
+  ) {
+    const grants = this.approvedTools.get(node.id);
+    const scope = grants?.get(name);
+    if (!scope) return false;
+    if (scope === this.toolApprovalScope(workspace, node)) return true;
+    grants!.delete(name);
+    return false;
+  }
+
   private invalidateAuthorization(call: ToolCall, reason: string) {
     if (!call.authorization) return;
     this.authorizations.revoke(call.authorization.id);
@@ -1609,7 +1676,9 @@ export class Scheduler {
         !call.authorization ||
         call.authorization.invalidatedAt ||
         call.authorization.consumedAt !== undefined ||
-        !["policy", "safety_model", "approved"].includes(call.approval ?? "")
+        !["policy", "safety_model", "approved", "approved_tool"].includes(
+          call.approval ?? "",
+        )
       )
         throw new Error("工具缺少有效的单次执行授权，未执行。");
       const directory = node.execution?.workingDirectory;
@@ -1641,6 +1710,9 @@ export class Scheduler {
           input.name,
           input.arguments,
         );
+        // A failed or interrupted restore releases its live lock, but the
+        // durable journal must still protect those files from existing runs.
+        await this.assertNoPendingFileRestore(resource);
       }
       while (this.settingsChanges.has(workspace.id))
         await this.settingsChanges.get(workspace.id);
@@ -1781,7 +1853,7 @@ export class Scheduler {
     workspaceId: string,
     nodeId: string,
     toolId: string,
-    decision: "approve" | "deny",
+    decision: ToolApprovalDecision,
     expectedRevision?: number,
   ) {
     const workspace = this.store.workspace(workspaceId);
@@ -1800,25 +1872,65 @@ export class Scheduler {
       !resume
     )
       throw new Error("这次审批已失效，请刷新查看最新状态。");
-    const allowed = decision === "approve";
-    call.approval = allowed ? "approved" : "denied";
-    call.status = allowed ? "running" : "denied";
-    if (!allowed) call.finishedAt = Date.now();
+    const allowed = decision !== "deny";
+    const batch = decision === "approve_tool";
+    const controller = this.active.get(nodeId);
+    const batchScope = batch
+      ? this.toolApprovalScope(workspace, node)
+      : undefined;
+    const calls = batch
+      ? node.toolCalls!.filter(
+          (item) =>
+            item.name === call.name &&
+            item.status === "awaiting_approval" &&
+            this.approvals.has(`${nodeId}:${item.id}`),
+        )
+      : [call];
+    const resumes = calls.map(
+      (item) => this.approvals.get(`${nodeId}:${item.id}`)!,
+    );
     try {
-      if (allowed) this.issueAuthorization(workspace, node, call);
+      for (const item of calls) {
+        item.approval = batch
+          ? "approved_tool"
+          : allowed
+            ? "approved"
+            : "denied";
+        item.status = allowed ? "running" : "denied";
+        if (!allowed) item.finishedAt = Date.now();
+        if (allowed) this.issueAuthorization(workspace, node, item);
+      }
       this.store.touch(workspace);
       await this.store.save();
+      if (batch) {
+        while (this.settingsChanges.has(workspace.id))
+          await this.settingsChanges.get(workspace.id);
+        if (
+          !controller ||
+          controller.signal.aborted ||
+          this.active.get(nodeId) !== controller ||
+          node.status !== "running" ||
+          batchScope !== this.toolApprovalScope(workspace, node)
+        )
+          throw new Error("本轮运行或审批设置已改变，批量同意未生效。");
+        const grants =
+          this.approvedTools.get(nodeId) ?? new Map<string, string>();
+        grants.set(call.name, batchScope!);
+        this.approvedTools.set(nodeId, grants);
+      }
     } catch (error) {
-      this.invalidateAuthorization(call, safeError(error));
-      if (node.status === "running") {
-        call.status = "awaiting_approval";
-        call.approval = undefined;
-        call.finishedAt = undefined;
+      for (const item of calls) {
+        this.invalidateAuthorization(item, safeError(error));
+        if (node.status === "running") {
+          item.status = "awaiting_approval";
+          item.approval = undefined;
+          item.finishedAt = undefined;
+        }
       }
       this.store.touch(workspace);
       throw error;
     }
-    resume(allowed);
+    for (const finish of resumes) finish(allowed);
   }
 
   private async beforeToolCall(
@@ -1830,17 +1942,22 @@ export class Scheduler {
     while (this.settingsChanges.has(workspace.id))
       await this.settingsChanges.get(workspace.id);
     signal.throwIfAborted();
-    const automatic = workspace.approvalMode === "auto";
+    const batchApproved = this.hasToolApproval(workspace, node, input.name);
+    const automatic = !batchApproved && workspace.approvalMode === "auto";
     const safetyModel = workspace.safetyModel;
     const approvalVersion = this.approvalVersions.get(workspace.id) ?? 0;
     const call: ToolCall = {
       ...structuredClone(input),
       status: automatic
         ? "reviewing"
-        : input.name === "read"
+        : batchApproved || input.name === "read"
           ? "running"
           : "awaiting_approval",
-      approval: !automatic && input.name === "read" ? "policy" : undefined,
+      approval: batchApproved
+        ? "approved_tool"
+        : !automatic && input.name === "read"
+          ? "policy"
+          : undefined,
       fileSnapshot: ["write", "edit", "bash"].includes(input.name)
         ? "unchanged"
         : undefined,
@@ -1964,7 +2081,7 @@ export class Scheduler {
       // never grants execution. Keep the exact call pending for a human decision.
       return this.waitForApproval(workspace, node, call, signal);
     }
-    if (input.name === "read") {
+    if (batchApproved || input.name === "read") {
       this.issueAuthorization(workspace, node, call);
       this.store.touch(workspace);
       await this.store.save();
@@ -1999,6 +2116,19 @@ export class Scheduler {
     this.store.touch(workspace);
     try {
       await this.store.save();
+      // A grant may have been saved while this call was still being reviewed
+      // or while its pending state was queued for persistence.
+      if (
+        call.status === "awaiting_approval" &&
+        this.hasToolApproval(workspace, node, call.name)
+      )
+        await this.approve(
+          workspace.id,
+          node.id,
+          call.id,
+          "approve_tool",
+          node.revision ?? 0,
+        );
       const allowed = await approved;
       signal.throwIfAborted();
       if (this.store.storageError) throw new Error(this.store.storageError);
@@ -2100,6 +2230,12 @@ export class Scheduler {
           requestedCheckpointId:
             node.effectiveContextCheckpointId ??
             node.requestedContextCheckpointId,
+          onThinking: (thinking) => {
+            if (node.status !== "running" || !workspace.nodes.includes(node))
+              return;
+            node.thinking = { ...thinking };
+            this.store.touch(workspace);
+          },
           onRequestUsage: (usage) => {
             if (!workspace.nodes.includes(node)) return;
             node.lastRequestUsage = { ...usage };
@@ -2150,6 +2286,7 @@ export class Scheduler {
       );
       if (node.status === "running") {
         node.response = result.response;
+        node.thinking = result.thinking ?? node.thinking;
         node.messages = result.messages;
         node.usage = result.usage;
         node.status = "completed";
@@ -2157,7 +2294,8 @@ export class Scheduler {
     } catch (error) {
       if (this.closed) {
         node.status = "failed";
-        node.error = "运行被服务关闭中断。可以在新节点继续，或在当前卡片原地重试。";
+        node.error =
+          "运行被服务关闭中断。可以在新节点继续，或在当前卡片原地重试。";
       } else if (node.status !== "cancelled") {
         node.status = controller.signal.aborted ? "cancelled" : "failed";
         node.error = controller.signal.aborted ? undefined : safeError(error);

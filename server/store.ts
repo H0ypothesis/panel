@@ -17,6 +17,7 @@ import {
 } from "./git-snapshots.ts";
 import { exampleWorkspace } from "./seed.ts";
 import { snapshotRequestUsage } from "./request-context-usage.ts";
+import { snapshotThinking } from "./thinking.ts";
 import { preparedContextCheckpoints } from "./context.ts";
 import type { StoredAttachment } from "./attachments.ts";
 import {
@@ -127,7 +128,8 @@ export class Store extends EventEmitter {
           }
           if (node.status === "running" || node.status === "queued") {
             node.status = "failed";
-            node.error = "运行被服务重启中断。可以在新节点继续，或在当前卡片原地重试。";
+            node.error =
+              "运行被服务重启中断。可以在新节点继续，或在当前卡片原地重试。";
             node.finishedAt = Date.now();
           }
           for (const call of node.toolCalls ?? []) {
@@ -222,6 +224,7 @@ export class Store extends EventEmitter {
               ...node
             }) => ({
               ...node,
+              thinking: snapshotThinking(node, _messages),
               preparedCompactions: preparedContextCheckpoints({
                 ...node,
                 preparationRequests: _preparationRequests,

@@ -46,6 +46,7 @@ import {
   type RunConfig,
 } from "../shared/types";
 import { readPreference, savePreference } from "./api";
+import { responseText } from "../shared/response-parts";
 import { canBranchFrom } from "../shared/node-branching";
 import {
   buildContextUsageMap,
@@ -235,7 +236,11 @@ const TurnCard = memo(function TurnCard({ data }: NodeProps<TurnGraphNode>) {
       </div>
       <h3>{turn.prompt}</h3>
       <p className="card-preview">
-        {plainText(turn.response) ||
+        {plainText(
+          root
+            ? turn.response
+            : responseText(turn.response, turn.status === "running"),
+        ) ||
           (root
             ? "从一个问题开始探索，文件默认保存在空间临时目录。"
             : pendingApproval

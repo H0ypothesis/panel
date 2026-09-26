@@ -5,8 +5,6 @@ import {
   useState,
   type FormEvent,
 } from "react";
-import ReactMarkdown from "react-markdown";
-import remarkGfm from "remark-gfm";
 import {
   ArrowDownToLine,
   ArrowRight,
@@ -53,6 +51,7 @@ import {
   type ApprovalMode,
   type ModelOption,
   type RunConfig,
+  type ToolApprovalDecision,
   type TurnNode,
   type WebCapabilities,
   type Workspace,
@@ -67,6 +66,10 @@ import { Graph, StatusIcon } from "./Graph";
 import { ResizableWorkspace } from "./ResizableWorkspace";
 import { ToolActivity } from "./CodingControls";
 import { GenerationIndicator } from "./GenerationIndicator";
+import { AssistantResponse } from "./AssistantResponse";
+import "./assistant-response.css";
+import { Markdown } from "./Markdown";
+import { responseText } from "../shared/response-parts";
 import { getGenerationActivity } from "./generation-activity";
 import { canBranchFrom } from "../shared/node-branching";
 import { ContextCompression } from "./ContextCompression";
@@ -128,14 +131,6 @@ function Logo({ small = false }: { small?: boolean }) {
         </b>
       )}
     </span>
-  );
-}
-
-function Markdown({ text }: { text: string }) {
-  return (
-    <div className="markdown">
-      <ReactMarkdown remarkPlugins={[remarkGfm]}>{text}</ReactMarkdown>
-    </div>
   );
 }
 
@@ -1216,7 +1211,7 @@ export function App() {
 
   const decideApproval = async (
     toolId: string,
-    decision: "approve" | "deny",
+    decision: ToolApprovalDecision,
   ) => {
     if (!workspace || !selected) return;
     apply(
@@ -1265,7 +1260,9 @@ export function App() {
 
   const copyAnswer = async () => {
     try {
-      await navigator.clipboard.writeText(selected?.response ?? "");
+      await navigator.clipboard.writeText(
+        responseText(selected?.response ?? "", selected?.status === "running"),
+      );
       setCopied(true);
       setTimeout(() => setCopied(false), 1800);
     } catch {
@@ -1937,9 +1934,17 @@ export function App() {
                         calls={selected.toolCalls}
                         workingDirectory={selected.execution?.workingDirectory}
                         onDecision={decideApproval}
+                        batchApprovalAvailable={
+                          webCapabilities?.toolBatchApproval === true
+                        }
                       />
                     )}
-                    {selected.response && <Markdown text={selected.response} />}
+                    <AssistantResponse
+                      key={`${selected.id}:${selected.revision ?? 0}`}
+                      response={selected.response}
+                      thinking={selected.thinking}
+                      status={selected.status}
+                    />
                     {selected.status === "running" ||
                     selected.status === "queued" ? (
                       <GenerationIndicator
@@ -1957,7 +1962,7 @@ export function App() {
                                 : undefined
                         }
                       />
-                    ) : !selected.response ? (
+                    ) : !selected.response && !selected.thinking?.text ? (
                       <div className="waiting-response">
                         这次运行没有生成回答。
                       </div>
@@ -1983,7 +1988,10 @@ export function App() {
                       </div>
                     )}
                     <div className="answer-actions">
-                      {selected.response && (
+                      {responseText(
+                        selected.response,
+                        selected.status === "running",
+                      ).trim() && (
                         <button onClick={copyAnswer}>
                           {copied ? <Check size={13} /> : <Copy size={13} />}
                           {copied ? "已复制" : "复制"}
@@ -2103,7 +2111,16 @@ export function App() {
                           nodes={workspace.nodes}
                           onLocate={locate}
                         />
-                        <Markdown text={node.response || "没有额外背景。"} />
+                        {node.status === "root" ? (
+                          <Markdown text={node.response || "没有额外背景。"} />
+                        ) : (
+                          <AssistantResponse
+                            key={`${node.id}:${node.revision ?? 0}`}
+                            response={node.response}
+                            thinking={node.thinking}
+                            status={node.status}
+                          />
+                        )}
                         <button onClick={() => locate(node.id)}>
                           在画布上定位
                           <ArrowUpRight size={12} />

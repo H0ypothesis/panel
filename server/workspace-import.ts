@@ -444,7 +444,14 @@ function toolCalls(value: unknown, label: string, now: number): ToolCall[] {
         ? undefined
         : enumeration(
             source.approval,
-            ["auto", "policy", "safety_model", "approved", "denied"] as const,
+            [
+              "auto",
+              "policy",
+              "safety_model",
+              "approved",
+              "approved_tool",
+              "denied",
+            ] as const,
             `${label}历史审批`,
           );
     const reviewReason =
@@ -670,6 +677,17 @@ export function importWorkspace(value: unknown): StoredWorkspace {
         original.parentId === null ? null : remap(original.parentId, label),
       prompt,
       response,
+      ...(original.thinking === undefined
+        ? {}
+        : {
+            thinking: {
+              text: string(
+                object(original.thinking, `${label}思考过程`).text,
+                `${label}思考内容`,
+              ),
+              active: false,
+            },
+          }),
       ...(contextReferences === undefined ? {} : { contextReferences }),
       ...(attachmentData?.length
         ? {

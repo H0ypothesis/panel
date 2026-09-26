@@ -55,6 +55,34 @@ function fixture() {
   return { version: 1, exportedAt: "2026-09-19T00:00:00.000Z", workspace };
 }
 
+test("imports batch approval as historical metadata without restoring execution authority", () => {
+  const source = fixture();
+  source.workspace.nodes[1].toolCalls = [
+    {
+      id: "batch-search",
+      name: "web_search",
+      arguments: { query: "example" },
+      status: "completed",
+      approval: "approved_tool",
+      startedAt: 10,
+      finishedAt: 12,
+      authorization: {
+        id: "old-grant",
+        actionHash: "old-hash",
+        policyVersion: "old-policy",
+        issuedAt: 10,
+        expiresAt: 20,
+        consumedAt: 11,
+      },
+    },
+  ];
+  Object.assign(source.workspace.nodes[1], { approvedTools: ["web_search"] });
+  const imported = importWorkspace(source);
+  assert.equal(imported.nodes[1].toolCalls![0].approval, "approved_tool");
+  assert.equal(imported.nodes[1].toolCalls![0].authorization, undefined);
+  assert.equal("approvedTools" in imported.nodes[1], false);
+});
+
 test("imports content, layout and complete messages with independent workspace/node IDs", () => {
   const original = fixture();
   const before = structuredClone(original);

@@ -10,10 +10,13 @@ import {
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { Readable } from "node:stream";
+import type { IncomingMessage, ServerResponse } from "node:http";
 import { setTimeout as delay } from "node:timers/promises";
 import test, { type TestContext } from "node:test";
 import type { ModelOption, RunConfig, ToolCall } from "../shared/types.ts";
 import { createPanelTools } from "./coding-tools.ts";
+import { createApi } from "./api.ts";
 import type { RunEnvironment, Runtime } from "./runtime.ts";
 import { Scheduler } from "./scheduler.ts";
 import { createWorkspace } from "./seed.ts";
@@ -57,7 +60,7 @@ async function fixture(t: TestContext) {
   await mkdir(project);
   const store = new Store(join(directory, "state"));
   await store.init(false);
-  const workspace = createWorkspace(
+  const workspace: StoredWorkspace = createWorkspace(
     "Parallel",
     "Shared files, independent contexts",
   );
@@ -220,7 +223,6 @@ test("different file writes overlap, have isolated Git records and retry restore
     ]);
   }
   await e.finish(a, "retry this branch");
-  await e.finish(b);
   const previous = e.runs.get("a");
   const retried = await e.scheduler.retry(e.workspace.id, a.id, {
     expectedRevision: 0,
@@ -230,6 +232,193 @@ test("different file writes overlap, have isolated Git records and retry restore
   assert.equal(retried.status, "running");
   assert.equal(await readFile(join(e.project, "a.txt"), "utf8"), "old a");
   assert.equal(await readFile(join(e.project, "b.txt"), "utf8"), "new b");
+  assert.equal(b.status, "running");
+  assert.equal(e.runs.get("b")!.signal.aborted, false);
+});
+
+test("retry without file changes proceeds while another branch holds the shell lock", async (t) => {
+  for (const operation of ["none", "read", "unchanged write"] as const) {
+    await t.test(operation, { timeout: 10_000 }, async (t) => {
+      const e = await fixture(t);
+      await writeFile(join(e.project, "a.txt"), "original");
+      const a = await e.submit("failed");
+      if (operation !== "none") {
+        await e.invoke(a, operation === "read" ? "read" : "write", {
+          path: "a.txt",
+          content: "original",
+        });
+        if (operation === "unchanged write")
+          assert.equal(a.toolCalls?.[0].fileSnapshot, "unchanged");
+      }
+      await e.finish(a, "retry without a rollback");
+      const b = await e.submit("busy shell");
+      const hold = e.hold();
+      let entered = false;
+      const shell = e.invoke(
+        b,
+        "bash",
+        { command: "long-running task" },
+        async () => {
+          entered = true;
+          await hold.promise;
+        },
+      );
+      await until(() => entered);
+      const previous = e.runs.get(a.prompt);
+      const retried = await e.scheduler.retry(e.workspace.id, a.id, {
+        expectedRevision: 0,
+        requestId: randomUUID(),
+      });
+      await until(() => e.runs.get(a.prompt) !== previous);
+      assert.equal(retried.id, a.id);
+      assert.equal(retried.status, "running");
+      assert.equal(b.status, "running");
+      assert.equal(b.toolCalls?.[0].status, "running");
+      assert.equal(
+        await readFile(join(e.project, "a.txt"), "utf8"),
+        "original",
+      );
+      hold.release();
+      await shell;
+    });
+  }
+});
+
+test(
+  "retry restores its files while an unrelated file write is still executing",
+  { timeout: 10_000 },
+  async (t) => {
+    const e = await fixture(t);
+    await writeFile(join(e.project, "a.txt"), "original a");
+    const a = await e.submit("retry a");
+    await e.invoke(a, "write", { path: "a.txt", content: "partial a" });
+    await e.finish(a, "failed after writing");
+    const b = await e.submit("write b");
+    const hold = e.hold();
+    let entered = false;
+    const write = e.invoke(
+      b,
+      "write",
+      { path: "b.txt", content: "final b" },
+      async () => {
+        entered = true;
+        await hold.promise;
+        await writeFile(join(e.project, "b.txt"), "final b");
+      },
+    );
+    await until(() => entered);
+    const previous = e.runs.get(a.prompt);
+    const retried = await e.scheduler.retry(e.workspace.id, a.id, {
+      expectedRevision: 0,
+      requestId: randomUUID(),
+    });
+    await until(() => e.runs.get(a.prompt) !== previous);
+    assert.equal(retried.status, "running");
+    assert.equal(b.toolCalls?.[0].status, "running");
+    assert.equal(
+      await readFile(join(e.project, "a.txt"), "utf8"),
+      "original a",
+    );
+    hold.release();
+    await write;
+    assert.equal(await readFile(join(e.project, "b.txt"), "utf8"), "final b");
+    assert.deepEqual(
+      e.workspace.gitHistory!.find((entry) => entry.nodeId === b.id)!.files,
+      [{ path: "b.txt", status: "added" }],
+    );
+  },
+);
+
+test(
+  "retry waits for a conflicting write and preserves its newer contents",
+  { timeout: 10_000 },
+  async (t) => {
+    const e = await fixture(t);
+    await writeFile(join(e.project, "shared.txt"), "original");
+    const a = await e.submit("failed writer");
+    await e.invoke(a, "write", { path: "shared.txt", content: "partial" });
+    await e.finish(a, "failed after writing");
+    const b = await e.submit("newer writer");
+    const hold = e.hold();
+    let entered = false;
+    const write = e.invoke(
+      b,
+      "write",
+      { path: "shared.txt", content: "newer" },
+      async () => {
+        entered = true;
+        await hold.promise;
+        await writeFile(join(e.project, "shared.txt"), "newer");
+      },
+    );
+    await until(() => entered);
+    let settled = false;
+    const retry = e.scheduler.retry(e.workspace.id, a.id, {
+      expectedRevision: 0,
+      requestId: randomUUID(),
+    });
+    void retry.then(
+      () => {
+        settled = true;
+      },
+      () => {
+        settled = true;
+      },
+    );
+    await delay(50);
+    assert.equal(settled, false);
+    assert.equal(
+      await readFile(join(e.project, "shared.txt"), "utf8"),
+      "partial",
+    );
+    hold.release();
+    await write;
+    await assert.rejects(retry, /后续操作|修改|冲突/);
+    assert.equal(
+      await readFile(join(e.project, "shared.txt"), "utf8"),
+      "newer",
+    );
+    assert.equal(b.status, "running");
+    assert.equal(a.revision ?? 0, 0);
+  },
+);
+
+test("a failed restore protects its files from existing runs while unrelated tools continue", async (t) => {
+  const e = await fixture(t);
+  await writeFile(join(e.project, "a.txt"), "original a");
+  const a = await e.submit("restore a");
+  await e.invoke(a, "write", { path: "a.txt", content: "partial a" });
+  await e.finish(a, "failed after writing");
+  const b = await e.submit("existing sibling");
+  const input = { expectedRevision: 0, requestId: randomUUID() };
+  const applyRestore = e.store.gitSnapshots.applyRestore.bind(
+    e.store.gitSnapshots,
+  );
+  e.store.gitSnapshots.applyRestore = async () => {
+    throw new Error("restore interrupted");
+  };
+  try {
+    await assert.rejects(
+      e.scheduler.retry(e.workspace.id, a.id, input),
+      /restore interrupted/,
+    );
+  } finally {
+    e.store.gitSnapshots.applyRestore = applyRestore;
+  }
+  assert.equal(e.workspace.pendingNodeRetry?.status, "failed");
+  await e.invoke(b, "write", { path: "b.txt", content: "unrelated" });
+  await assert.rejects(
+    e.invoke(b, "write", { path: "a.txt", content: "must not overwrite" }),
+    /回溯/,
+  );
+  assert.equal(await readFile(join(e.project, "a.txt"), "utf8"), "partial a");
+  const previous = e.runs.get(a.prompt);
+  const retried = await e.scheduler.retry(e.workspace.id, a.id, input);
+  await until(() => e.runs.get(a.prompt) !== previous);
+  assert.equal(retried.status, "running");
+  assert.equal(e.workspace.pendingNodeRetry, undefined);
+  assert.equal(await readFile(join(e.project, "a.txt"), "utf8"), "original a");
+  assert.equal(await readFile(join(e.project, "b.txt"), "utf8"), "unrelated");
 });
 
 test("Pi path aliases share locks and Git records with the actual written file", async (t) => {
@@ -507,4 +696,274 @@ test("a failed file effect retains its partial snapshot and releases the lock fo
     edits: [{ oldText: "partial", newText: "next" }],
   });
   assert.equal(await readFile(join(e.project, "shared.txt"), "utf8"), "next");
+});
+
+test("batch approval releases only matching pending tools and future calls on the same card", async (t) => {
+  const e = await fixture(t);
+  e.workspace.approvalMode = "ask";
+  const a = await e.submit("batch-card");
+  const b = await e.submit("other-card");
+  const effects: string[] = [];
+  const effect = (value: string) => async () => {
+    effects.push(value);
+  };
+  const first = e.invoke(a, "web_search", { query: "one" }, effect("first"));
+  const second = e.invoke(a, "web_search", { query: "two" }, effect("second"));
+  const fetch = e.invoke(
+    a,
+    "web_fetch",
+    { url: "https://example.com" },
+    effect("fetch"),
+  );
+  const sibling = e.invoke(
+    b,
+    "web_search",
+    { query: "sibling" },
+    effect("sibling"),
+  );
+  await until(() => a.toolCalls?.length === 3 && b.toolCalls?.length === 1);
+  await e.scheduler.approve(
+    e.workspace.id,
+    a.id,
+    a.toolCalls![0].id,
+    "approve_tool",
+  );
+  await Promise.all([first, second]);
+  await e.invoke(a, "web_search", { query: "later" }, effect("later"));
+  assert.deepEqual([...effects].sort(), ["first", "later", "second"]);
+  assert.equal(a.toolCalls![2].status, "awaiting_approval");
+  assert.equal(b.toolCalls![0].status, "awaiting_approval");
+  const grants = a.toolCalls!.filter((call) => call.name === "web_search");
+  assert.ok(
+    grants.every(
+      (call) =>
+        call.approval === "approved_tool" && call.authorization?.consumedAt,
+    ),
+  );
+  assert.equal(new Set(grants.map((call) => call.authorization?.id)).size, 3);
+  await e.scheduler.approve(e.workspace.id, a.id, a.toolCalls![2].id, "deny");
+  await e.scheduler.approve(e.workspace.id, b.id, b.toolCalls![0].id, "deny");
+  await Promise.all([fetch, sibling]);
+});
+
+test("a batch grant never survives a failed save and single approval does not grant later calls", async (t) => {
+  const e = await fixture(t);
+  e.workspace.approvalMode = "ask";
+  const node = await e.submit("failed-batch-save");
+  let effects = 0;
+  const effect = async () => {
+    effects++;
+  };
+  const first = e.invoke(node, "web_search", { query: "one" }, effect);
+  await until(() => node.toolCalls?.[0]?.status === "awaiting_approval");
+  const save = e.store.save.bind(e.store);
+  e.store.save = async () => {
+    throw new Error("batch save failed");
+  };
+  await assert.rejects(
+    e.scheduler.approve(
+      e.workspace.id,
+      node.id,
+      node.toolCalls![0].id,
+      "approve_tool",
+    ),
+    /batch save failed/,
+  );
+  assert.equal(effects, 0);
+  assert.equal(node.toolCalls![0].status, "awaiting_approval");
+  e.store.save = save;
+  await e.scheduler.approve(
+    e.workspace.id,
+    node.id,
+    node.toolCalls![0].id,
+    "approve",
+  );
+  await first;
+  const next = e.invoke(node, "web_search", { query: "two" }, effect);
+  await until(() => node.toolCalls?.[1]?.status === "awaiting_approval");
+  assert.equal(effects, 1);
+  await e.scheduler.approve(
+    e.workspace.id,
+    node.id,
+    node.toolCalls![1].id,
+    "deny",
+  );
+  await next;
+});
+
+test("batch approval cannot take effect when cancelled while persistence is pending", async (t) => {
+  const e = await fixture(t);
+  e.workspace.approvalMode = "ask";
+  const node = await e.submit("cancel-batch-save");
+  let executed = false;
+  const invocation = e.invoke(
+    node,
+    "web_search",
+    { query: "one" },
+    async () => {
+      executed = true;
+    },
+  );
+  await until(() => node.toolCalls?.[0]?.status === "awaiting_approval");
+  const held = e.hold();
+  const save = e.store.save.bind(e.store);
+  let saving = false;
+  e.store.save = async (...args) => {
+    if (!saving && node.toolCalls![0].approval === "approved_tool") {
+      saving = true;
+      await held.promise;
+    }
+    return save(...args);
+  };
+  const approval = e.scheduler.approve(
+    e.workspace.id,
+    node.id,
+    node.toolCalls![0].id,
+    "approve_tool",
+  );
+  void approval.catch(() => {});
+  await until(() => saving);
+  await e.scheduler.cancel(e.workspace.id, node.id);
+  held.release();
+  await assert.rejects(approval, /批量同意未生效/);
+  await assert.rejects(invocation, /abort/i);
+  assert.equal(executed, false);
+  assert.equal(node.toolCalls![0].status, "cancelled");
+});
+
+test("batch approval expires when approval settings change and does not return after toggling back", async (t) => {
+  const e = await fixture(t);
+  e.workspace.approvalMode = "ask";
+  e.runtime.reviewTool = async () => {
+    throw new Error("review unavailable");
+  };
+  const node = await e.submit("settings-batch");
+  let effects = 0;
+  const effect = async () => {
+    effects++;
+  };
+  const first = e.invoke(node, "web_search", { query: "one" }, effect);
+  await until(() => node.toolCalls?.[0]?.status === "awaiting_approval");
+  await e.scheduler.approve(
+    e.workspace.id,
+    node.id,
+    node.toolCalls![0].id,
+    "approve_tool",
+  );
+  await first;
+  await e.scheduler.configureWorkspace(e.workspace.id, {
+    approvalMode: "auto",
+  });
+  await e.scheduler.configureWorkspace(e.workspace.id, { approvalMode: "ask" });
+  const next = e.invoke(node, "web_search", { query: "two" }, effect);
+  await until(() => node.toolCalls?.[1]?.status === "awaiting_approval");
+  assert.equal(effects, 1);
+  await e.scheduler.approve(
+    e.workspace.id,
+    node.id,
+    node.toolCalls![1].id,
+    "deny",
+  );
+  await next;
+});
+
+test("retrying a card drops its batch grant and rejects approvals from the previous revision", async (t) => {
+  const e = await fixture(t);
+  e.workspace.approvalMode = "ask";
+  const node = await e.submit("retry-batch");
+  let effects = 0;
+  const effect = async () => {
+    effects++;
+  };
+  const first = e.invoke(node, "web_search", { query: "one" }, effect);
+  await until(() => node.toolCalls?.[0]?.status === "awaiting_approval");
+  await e.scheduler.approve(
+    e.workspace.id,
+    node.id,
+    node.toolCalls![0].id,
+    "approve_tool",
+  );
+  await first;
+  const oldRun = e.runs.get(node.prompt);
+  await e.finish(node, "test failure");
+  const retried = await e.scheduler.retry(e.workspace.id, node.id, {
+    expectedRevision: 0,
+    requestId: randomUUID(),
+  });
+  await until(() => e.runs.get(node.prompt) !== oldRun);
+  const next = e.invoke(retried, "web_search", { query: "two" }, effect);
+  await until(() => retried.toolCalls?.[0]?.status === "awaiting_approval");
+  assert.equal(effects, 1);
+  await assert.rejects(
+    e.scheduler.approve(
+      e.workspace.id,
+      retried.id,
+      retried.toolCalls![0].id,
+      "approve_tool",
+      0,
+    ),
+    /已失效/,
+  );
+  await e.scheduler.approve(
+    e.workspace.id,
+    retried.id,
+    retried.toolCalls![0].id,
+    "deny",
+    retried.revision,
+  );
+  await next;
+});
+
+test("the batch approval API validates origin, decision and revision before granting the named tool", async (t) => {
+  const e = await fixture(t);
+  e.workspace.approvalMode = "ask";
+  const node = await e.submit("http-batch");
+  let effects = 0;
+  const effect = async () => {
+    effects++;
+  };
+  const first = e.invoke(node, "web_search", { query: "one" }, effect);
+  await until(() => node.toolCalls?.[0]?.status === "awaiting_approval");
+  const api = createApi(e.store, e.runtime, e.scheduler);
+  const request = async (body: unknown, origin?: string) => {
+    const incoming = Readable.from([
+      Buffer.from(JSON.stringify(body)),
+    ]) as IncomingMessage;
+    Object.assign(incoming, {
+      method: "POST",
+      url: `/api/workspaces/${e.workspace.id}/nodes/${node.id}/approvals/${node.toolCalls![0].id}`,
+      headers: {
+        host: "127.0.0.1:9999",
+        "content-type": "application/json",
+        ...(origin ? { origin } : {}),
+      },
+    });
+    let status = 0;
+    const outgoing = {
+      setHeader() {},
+      writeHead(value: number) {
+        status = value;
+      },
+      end() {},
+    } as unknown as ServerResponse;
+    await api(incoming, outgoing);
+    return status;
+  };
+  assert.equal(
+    await request({ decision: "approve_tool" }, "https://foreign.example"),
+    403,
+  );
+  assert.equal(await request({ decision: "approve_all" }), 400);
+  assert.equal(
+    await request({ decision: "approve_tool", expectedRevision: 1 }),
+    409,
+  );
+  assert.equal(effects, 0);
+  assert.equal(
+    await request({ decision: "approve_tool", expectedRevision: 0 }),
+    200,
+  );
+  await first;
+  await e.invoke(node, "web_search", { query: "two" }, effect);
+  assert.equal(effects, 2);
 });

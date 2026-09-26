@@ -1,7 +1,6 @@
 import type { ContextReference, TurnNode } from "../shared/types";
 import { ArrowUpRight, AtSign } from "lucide-react";
-import ReactMarkdown from "react-markdown";
-import remarkGfm from "remark-gfm";
+import { AssistantResponse } from "./AssistantResponse";
 import "./card-reference-list.css";
 
 /** Show the saved input, even when the source has since changed or disappeared. */
@@ -58,11 +57,10 @@ export function CardReferenceList({
               <b>问题</b>
               <p className="card-reference-question">{reference.prompt}</p>
               <b>回答</b>
-              <div className="markdown">
-                <ReactMarkdown remarkPlugins={[remarkGfm]}>
-                  {reference.response || "（空回答）"}
-                </ReactMarkdown>
-              </div>
+              <AssistantResponse
+                response={reference.response || "（空回答）"}
+                status="completed"
+              />
             </div>
           </details>
         );

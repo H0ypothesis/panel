@@ -2,6 +2,7 @@ import { useCallback, useEffect, useId, useRef, useState } from "react";
 import {
   ArrowUp,
   Check,
+  CheckCheck,
   ChevronDown,
   ChevronRight,
   ExternalLink,
@@ -16,7 +17,11 @@ import {
   Terminal,
   X,
 } from "lucide-react";
-import type { ApprovalMode, ToolCall } from "../shared/types";
+import type {
+  ApprovalMode,
+  ToolApprovalDecision,
+  ToolCall,
+} from "../shared/types";
 import { api } from "./api";
 import { getDesktopBridge } from "./desktop";
 
@@ -303,6 +308,7 @@ const approvalLabels: Record<NonNullable<ToolCall["approval"]>, string> = {
   policy: "只读策略放行",
   safety_model: "安全模型已批准",
   approved: "你已批准此操作",
+  approved_tool: "你已批量同意此卡片本轮的同名工具操作",
   denied: "你已拒绝此操作",
 };
 const reviewLabels = {
@@ -329,16 +335,18 @@ function sourceUrl(value: string) {
 function ToolCallCard({
   call,
   onDecision,
+  batchApprovalAvailable,
 }: {
   call: ToolCall;
-  onDecision: (toolId: string, decision: "approve" | "deny") => Promise<void>;
+  onDecision: (toolId: string, decision: ToolApprovalDecision) => Promise<void>;
+  batchApprovalAvailable: boolean;
 }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const pending = call.status === "awaiting_approval";
   const reviewing = call.status === "reviewing";
   const waitingFor = call.status === "running" ? call.waitingFor : undefined;
-  const decide = async (decision: "approve" | "deny") => {
+  const decide = async (decision: ToolApprovalDecision) => {
     setBusy(true);
     setError("");
     try {
@@ -468,6 +476,10 @@ function ToolCallCard({
                     ? "批准后将读取以上文件并交给对话模型。"
                     : "批准后将修改工作目录中的文件。"}
           </p>
+          <p className="tool-batch-hint">
+            批量同意后，此卡片本轮的「{toolLabels[call.name] ?? call.name}
+            」将直接执行，其他工具仍按原规则审批。
+          </p>
           <div>
             <button
               type="button"
@@ -491,7 +503,26 @@ function ToolCallCard({
               )}
               批准这次操作
             </button>
+            <button
+              type="button"
+              className="tool-approve-batch"
+              disabled={busy || !batchApprovalAvailable}
+              title={
+                batchApprovalAvailable
+                  ? `同意此卡片本轮所有「${toolLabels[call.name] ?? call.name}」操作，运行结束后失效`
+                  : "重启 Panel 服务后可使用批量同意"
+              }
+              onClick={() => void decide("approve_tool")}
+            >
+              <CheckCheck size={13} />
+              批量同意
+            </button>
           </div>
+          {!batchApprovalAvailable && (
+            <p className="tool-batch-hint">
+              批量同意将在 Panel 服务重启后可用。
+            </p>
+          )}
         </div>
       )}
       {error && (
@@ -507,10 +538,12 @@ export function ToolActivity({
   calls,
   workingDirectory,
   onDecision,
+  batchApprovalAvailable = true,
 }: {
   calls: ToolCall[];
   workingDirectory?: string;
-  onDecision: (toolId: string, decision: "approve" | "deny") => Promise<void>;
+  onDecision: (toolId: string, decision: ToolApprovalDecision) => Promise<void>;
+  batchApprovalAvailable?: boolean;
 }) {
   const pending = calls.filter(
     (call) => call.status === "awaiting_approval",
@@ -572,7 +605,12 @@ export function ToolActivity({
             </div>
           )}
           {calls.map((call) => (
-            <ToolCallCard key={call.id} call={call} onDecision={onDecision} />
+            <ToolCallCard
+              key={call.id}
+              call={call}
+              onDecision={onDecision}
+              batchApprovalAvailable={batchApprovalAvailable}
+            />
           ))}
         </div>
       </details>

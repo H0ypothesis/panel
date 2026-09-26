@@ -3780,6 +3780,9 @@ button {
   flex-wrap: wrap;
   gap: 7px;
 }
+.tool-approval-actions .tool-batch-hint {
+  color: var(--text-secondary);
+}
 .tool-approval-actions button {
   display: flex;
   align-items: center;
@@ -3797,6 +3800,14 @@ button {
 .tool-approve {
   background: var(--primary-background);
   color: var(--primary-foreground);
+}
+.tool-approve-batch {
+  background: var(--surface);
+  border: 1px solid var(--line-strong);
+  color: var(--text-accent-strong);
+}
+.tool-approve-batch:hover {
+  background: var(--surface-hover);
 }
 .tool-call > .inline-error {
   margin: 0 10px 10px;

@@ -1,5 +1,12 @@
 import { lstat, realpath, stat } from "node:fs/promises";
-import { dirname, isAbsolute, relative, resolve, sep } from "node:path";
+import {
+  basename,
+  dirname,
+  isAbsolute,
+  relative,
+  resolve,
+  sep,
+} from "node:path";
 import {
   BACKGROUND_CONTEXT,
   type Context,
@@ -16,6 +23,8 @@ export interface FileOperationResource {
   mode: "read" | "write";
   workingDirectory: string;
   canonicalPath?: string;
+  /** A restore reserves all of its affected paths in one atomic lock request. */
+  canonicalPaths?: string[];
   /** Undefined means a full workspace snapshot; ordinary files use one path. */
   snapshotPaths?: string[];
 }
@@ -146,14 +155,75 @@ export async function validateFileOperationResource(
   }
 }
 
-function conflicts(a: FileOperationResource, b: FileOperationResource) {
+/** Git paths are literal filenames, not Pi tool aliases such as @ or file URLs. */
+export async function resolveRestoreFileResource(
+  cwd: string,
+  paths: readonly string[],
+): Promise<FileOperationResource | undefined> {
+  if (!paths.length) return undefined;
+  const workingDirectory = await realpath(cwd);
+  if (!(await stat(workingDirectory)).isDirectory())
+    throw new Error("Git 回溯工作目录必须是文件夹。");
+  const canonicalPaths = new Set<string>();
+  let global = false;
+  for (const path of paths) {
+    if (
+      !path ||
+      isAbsolute(path) ||
+      path.includes("\0") ||
+      path.includes("\\") ||
+      path
+        .split("/")
+        .some(
+          (part) =>
+            !part ||
+            part === "." ||
+            part === ".." ||
+            [".git", "node_modules"].includes(part.toLowerCase()),
+        )
+    )
+      throw new Error(`Git 回溯路径无效：${path}`);
+    const absolute = resolve(workingDirectory, path);
+    const parent = await boundedCanonicalPath(
+      workingDirectory,
+      dirname(absolute),
+    );
+    canonicalPaths.add(resolve(parent, basename(absolute)));
+    try {
+      const info = await lstat(absolute);
+      // Restoring a link can redirect a tool whose resolved target lies outside
+      // this path set. Keep these uncommon cases mutually exclusive with tools.
+      global ||=
+        info.isSymbolicLink() || (!info.isDirectory() && info.nlink > 1);
+    } catch (error) {
+      if (!isMissing(error)) throw error;
+    }
+  }
+  return {
+    global,
+    mode: "write",
+    workingDirectory,
+    canonicalPaths: [...canonicalPaths].sort(),
+  };
+}
+
+export function fileOperationsConflict(
+  a: FileOperationResource,
+  b: FileOperationResource,
+) {
   if (a.global || b.global) return true;
   if (a.mode === "read" && b.mode === "read") return false;
+  const aPaths = a.canonicalPaths ?? (a.canonicalPath ? [a.canonicalPath] : []);
+  const bPaths = b.canonicalPaths ?? (b.canonicalPath ? [b.canonicalPath] : []);
   // A malformed resource must never accidentally omit synchronization.
-  if (!a.canonicalPath || !b.canonicalPath) return true;
-  const aPath = lockPath(a.canonicalPath);
-  const bPath = lockPath(b.canonicalPath);
-  return isWithin(aPath, bPath) || isWithin(bPath, aPath);
+  if (!aPaths.length || !bPaths.length) return true;
+  return aPaths.some((a) =>
+    bPaths.some((b) => {
+      const aPath = lockPath(a);
+      const bPath = lockPath(b);
+      return isWithin(aPath, bPath) || isWithin(bPath, aPath);
+    }),
+  );
 }
 
 interface LockRequest {
@@ -182,7 +252,12 @@ export class FileOperationLocks {
     return new Promise((grant, reject) => {
       const request: LockRequest = {
         // Callers cannot alter which resource a pending or active lock covers.
-        resource: { ...resource },
+        resource: {
+          ...resource,
+          ...(resource.canonicalPaths
+            ? { canonicalPaths: [...resource.canonicalPaths] }
+            : {}),
+        },
         grant,
         reject,
         cleanup: () => signal?.removeEventListener("abort", abort),
@@ -220,7 +295,7 @@ export class FileOperationLocks {
       const request = this.waiting[index];
       if (
         [...this.active, ...earlier].some((other) =>
-          conflicts(request.resource, other.resource),
+          fileOperationsConflict(request.resource, other.resource),
         )
       ) {
         earlier.push(request);

@@ -160,7 +160,11 @@ export function createApi(
       else if (request.method === "GET" && url.pathname === "/api/models")
         json(response, 200, runtime.models());
       else if (request.method === "GET" && url.pathname === "/api/capabilities")
-        json(response, 200, { ...webCapabilities(), cardReferences: true });
+        json(response, 200, {
+          ...webCapabilities(),
+          cardReferences: true,
+          toolBatchApproval: true,
+        });
       else if (request.method === "GET" && url.pathname === "/api/directories")
         json(
           response,
@@ -367,8 +371,12 @@ export function createApi(
         );
         if (request.method === "POST" && approval) {
           const body = await readJson(request);
-          if (body.decision !== "approve" && body.decision !== "deny")
-            throw new Error("请选择批准或拒绝。");
+          if (
+            body.decision !== "approve" &&
+            body.decision !== "approve_tool" &&
+            body.decision !== "deny"
+          )
+            throw new Error("请选择批准、批量同意或拒绝。");
           await scheduler.approve(
             decodeURIComponent(approval[1]),
             decodeURIComponent(approval[2]),
