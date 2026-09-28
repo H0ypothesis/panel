@@ -114,6 +114,7 @@ export interface ContextReference {
 export interface ContextCheckpoint {
   id: string;
   version: 1;
+  purpose?: "merge";
   sourceHash: string;
   /** Number of original messages covered, including the separately retained root. */
   messageCount: number;
@@ -154,6 +155,14 @@ export interface ThinkingContent {
   active: boolean;
 }
 
+/** One frozen branch input. Order is significant; the first input is parentId. */
+export interface ContextParent {
+  nodeId: string;
+  contextCheckpointId?: string;
+  contextMode?: "raw";
+  revision?: number;
+}
+
 export interface TurnNode {
   id: string;
   /** In-place regeneration revision; legacy nodes start at zero. */
@@ -161,6 +170,7 @@ export interface TurnNode {
   /** An ancestor was regenerated; this answer must be regenerated before reuse. */
   contextStale?: boolean;
   parentId: string | null;
+  contextParents?: ContextParent[];
   prompt: string;
   attachments?: Attachment[];
   contextReferences?: ContextReference[];
@@ -271,6 +281,10 @@ export interface WebCapabilities {
   toolBatchApproval?: boolean;
   /** Missing on older backends, which silently discard referenceNodeIds. */
   cardReferences?: boolean;
+  /** Supports complete multi-branch model context inputs. */
+  branchMerging?: boolean;
+  /** Supports manual aggregate compression before a merged card is submitted. */
+  mergeContextPreparation?: boolean;
   webFetch: boolean;
   webSearch: boolean;
   searchProvider: "Exa API" | "Exa MCP";
@@ -305,18 +319,38 @@ export const DEFAULT_CONFIG: RunConfig = {
   thinking: "medium",
 };
 
+export function directParentIds(
+  node: Pick<TurnNode, "parentId" | "contextParents">,
+): string[] {
+  return (
+    node.contextParents?.map((parent) => parent.nodeId) ??
+    (node.parentId ? [node.parentId] : [])
+  );
+}
+
+/** Deterministic parents-first DAG order; shared ancestors appear exactly once. */
 export function ancestorPath(nodes: TurnNode[], nodeId: string): TurnNode[] {
   const byId = new Map(nodes.map((node) => [node.id, node]));
-  const seen = new Set<string>();
+  const visited = new Set<string>();
+  const visiting = new Set<string>();
   const path: TurnNode[] = [];
-  let current: string | null = nodeId;
-  while (current) {
-    if (seen.has(current)) throw new Error("对话图存在循环。");
-    seen.add(current);
-    const node = byId.get(current);
+  const stack: { id: string; exit: boolean }[] = [{ id: nodeId, exit: false }];
+  while (stack.length) {
+    const { id, exit } = stack.pop()!;
+    if (visited.has(id)) continue;
+    const node = byId.get(id);
     if (!node) throw new Error("上下文节点不存在。");
-    path.unshift(node);
-    current = node.parentId;
+    if (exit) {
+      visiting.delete(id);
+      visited.add(id);
+      path.push(node);
+      continue;
+    }
+    if (visiting.has(id)) throw new Error("对话图存在循环。");
+    visiting.add(id);
+    stack.push({ id, exit: true });
+    for (const parent of [...directParentIds(node)].reverse())
+      stack.push({ id: parent, exit: false });
   }
   if (!path.length || path[0].status !== "root")
     throw new Error("上下文缺少根节点。");
@@ -347,5 +381,42 @@ export function layoutTree(
   };
   const root = nodes.find((node) => node.parentId === null);
   if (root) visit(root, 80);
+  // Keep primary-tree vertical grouping while ensuring every secondary input is
+  // to the left of a merged answer, including descendants after auto-layout.
+  const byId = new Map(nodes.map((node) => [node.id, node]));
+  const settled = new Set<string>();
+  const visiting = new Set<string>();
+  for (const node of nodes) {
+    const stack = [{ id: node.id, exit: false }];
+    while (stack.length) {
+      const { id, exit } = stack.pop()!;
+      if (settled.has(id)) continue;
+      const current = byId.get(id)!;
+      if (exit) {
+        visiting.delete(id);
+        settled.add(id);
+        const parents = directParentIds(current);
+        const position = positions.get(id);
+        if (parents.length && position)
+          position.x =
+            Math.max(
+              ...parents.map((parent) => positions.get(parent)?.x ?? 80),
+            ) +
+            (parents.length > 1 ||
+            current.requestedContextCheckpointId ||
+            current.contextParents?.[0]?.contextCheckpointId
+              ? 500
+              : 360);
+        continue;
+      }
+      if (visiting.has(id)) throw new Error("对话图存在循环。");
+      visiting.add(id);
+      stack.push({ id, exit: true });
+      for (const parent of directParentIds(current).reverse()) {
+        if (!byId.has(parent)) throw new Error("上下文节点不存在。");
+        stack.push({ id: parent, exit: false });
+      }
+    }
+  }
   return positions;
 }

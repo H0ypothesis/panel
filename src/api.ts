@@ -37,11 +37,65 @@ async function requireCardReferences() {
   }
 }
 
+async function requireBranchMerging(preparation = false) {
+  let capabilities: {
+    branchMerging?: boolean;
+    mergeContextPreparation?: boolean;
+  };
+  try {
+    const response = await fetch("/api/capabilities", { cache: "no-store" });
+    if (!response.ok) throw new Error("Capability request failed");
+    capabilities = await response.json();
+  } catch {
+    throw new Error(
+      "无法确认当前后端支持多分支融合，请检查连接后重试。问题尚未发送。",
+    );
+  }
+  if (capabilities?.branchMerging !== true)
+    throw new Error(
+      "当前后端尚未加载多分支融合功能，请重启 Panel 服务后重试。问题尚未发送。",
+    );
+  if (preparation && capabilities.mergeContextPreparation !== true)
+    throw new Error(
+      "当前后端尚未加载整体主动压缩功能，请重启 Panel 服务后重试。问题尚未发送。",
+    );
+}
+
+export class ApiError extends Error {
+  constructor(
+    message: string,
+    readonly status: number,
+  ) {
+    super(message);
+    this.name = "ApiError";
+  }
+}
+
 export async function api<T>(
   path: string,
   body?: unknown,
   method = "POST",
 ): Promise<T> {
+  const usesMergedCheckpoint = !!(
+    body &&
+    typeof body === "object" &&
+    "mergedContextCheckpointId" in body &&
+    body.mergedContextCheckpointId
+  );
+  if (
+    method === "POST" &&
+    (/^\/workspaces\/[^/]+\/merge-context\/compact$/.test(path) ||
+      (/^\/workspaces\/[^/]+\/nodes$/.test(path) &&
+        (usesMergedCheckpoint ||
+          (body &&
+            typeof body === "object" &&
+            "contextParents" in body &&
+            Array.isArray(body.contextParents) &&
+            body.contextParents.length > 0))))
+  )
+    await requireBranchMerging(
+      usesMergedCheckpoint || path.endsWith("/merge-context/compact"),
+    );
   if (needsCardReferences(path, body, method)) await requireCardReferences();
   const response = await fetch(
     `/api${path}`,
@@ -54,7 +108,8 @@ export async function api<T>(
         },
   );
   const data = await response.json();
-  if (!response.ok) throw new Error(data.error ?? "请求失败，请稍后重试。");
+  if (!response.ok)
+    throw new ApiError(data.error ?? "请求失败，请稍后重试。", response.status);
   return data as T;
 }
 

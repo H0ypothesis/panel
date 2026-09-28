@@ -1,7 +1,17 @@
-import type { BranchColor, RunConfig, TurnNode } from "../shared/types";
+import type {
+  BranchColor,
+  ContextCheckpoint,
+  ContextParent,
+  RunConfig,
+  TurnNode,
+} from "../shared/types";
+import { ancestorPath } from "../shared/types";
+import { canBranchFrom } from "../shared/node-branching";
 import {
   buildCompressionNodes,
   COMPRESSION_NODE_SIZE,
+  preparedCheckpoints,
+  type CompressionGraphEntry,
 } from "../shared/context-graph";
 
 export type CanvasBranchDraft = {
@@ -15,6 +25,10 @@ export type CanvasBranchDraft = {
   contextCheckpointId?: string;
   /** An explicit card entry before a summary retains its original context. */
   contextMode?: "raw";
+  /** Complete, ordered branch inputs, including the original parent. */
+  contextParents?: ContextParent[];
+  /** A prepared summary of all branch inputs, used for this draft's answer. */
+  mergedCheckpoint?: ContextCheckpoint;
   color: BranchColor;
   text: string;
   files: File[];
@@ -26,9 +40,17 @@ export type CanvasBranchDraft = {
 };
 
 /** Include the bounded, scrollable attachment list when reserving canvas space. */
-export function branchDraftHeight(fileCount: number, referenceCount = 0) {
+export function branchDraftHeight(
+  fileCount: number,
+  referenceCount = 0,
+  parentCount = 1,
+  mergedSummaryOpen = false,
+) {
   return (
-    350 +
+    374 +
+    (parentCount > 1 ? Math.min(parentCount * 28, 112) + 24 : 0) +
+    (parentCount >= 2 ? 44 : 0) +
+    (parentCount >= 2 && mergedSummaryOpen ? 160 : 0) +
     (fileCount ? Math.min(fileCount * 47, 158) + 7 : 0) +
     (referenceCount ? Math.min(referenceCount * 34, 110) + 25 : 0)
   );
@@ -41,9 +63,17 @@ export function branchDraftPosition(
   compressionPosition?: { x: number; y: number },
   fileCount = 0,
   referenceCount = 0,
+  parentCount = 1,
+  mergedSummaryOpen = false,
 ) {
   // Leave extra room for multiline validation or submission feedback.
-  const height = branchDraftHeight(fileCount, referenceCount) + 48;
+  const height =
+    branchDraftHeight(
+      fileCount,
+      referenceCount,
+      parentCount,
+      mergedSummaryOpen,
+    ) + 48;
   const x = compressionPosition
     ? Math.max(
         parentPosition.x + 500,
@@ -76,4 +106,65 @@ export function branchDraftPosition(
     if (!collisions.length) return { x, y };
     y = Math.max(...collisions.map((node) => node.y + node.height + 32));
   }
+}
+
+export function draftContextParents(
+  draft: Pick<
+    CanvasBranchDraft,
+    | "contextParents"
+    | "parentId"
+    | "parentRevision"
+    | "contextCheckpointId"
+    | "contextMode"
+  >,
+): ContextParent[] {
+  return draft.contextParents?.length
+    ? draft.contextParents
+    : [
+        {
+          nodeId: draft.parentId,
+          revision: draft.parentRevision,
+          contextCheckpointId: draft.contextCheckpointId,
+          contextMode: draft.contextMode,
+        },
+      ];
+}
+
+/** Translate the visible output connector into the exact branch entry it represents. */
+export function draftConnectionParent(
+  sourceId: string,
+  nodes: TurnNode[],
+  compressionNodes: CompressionGraphEntry[],
+): ContextParent | undefined {
+  const compression = compressionNodes.find((entry) => entry.id === sourceId);
+  if (compression && (!compression.usable || compression.kind === "merge"))
+    return;
+  const node = nodes.find(
+    (entry) => entry.id === (compression?.parentId ?? sourceId),
+  );
+  if (!canBranchFrom(node) || !node) return;
+  if (!ancestorPath(nodes, node.id).every(canBranchFrom)) return;
+  return {
+    nodeId: node.id,
+    revision: node.revision ?? 0,
+    ...(compression
+      ? { contextCheckpointId: compression.checkpoint.id }
+      : preparedCheckpoints(node).length
+        ? { contextMode: "raw" as const }
+        : {}),
+  };
+}
+
+/** Switching between a card and one of its summaries replaces that input. */
+export function canConnectDraftParent(
+  parents: ContextParent[],
+  candidate: ContextParent,
+): boolean {
+  return !parents.some(
+    (parent) =>
+      parent.nodeId === candidate.nodeId &&
+      parent.contextCheckpointId === candidate.contextCheckpointId &&
+      parent.contextMode === candidate.contextMode &&
+      parent.revision === candidate.revision,
+  );
 }

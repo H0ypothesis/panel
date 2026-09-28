@@ -44,11 +44,14 @@ import {
 } from "lucide-react";
 import {
   ancestorPath,
+  directParentIds,
   DEFAULT_CONFIG,
   statusLabels,
   thinkingLabels,
   type AppState,
   type ApprovalMode,
+  type ContextCheckpoint,
+  type ContextParent,
   type ModelOption,
   type RunConfig,
   type ToolApprovalDecision,
@@ -58,11 +61,14 @@ import {
 } from "../shared/types";
 import {
   api,
+  ApiError,
   readPreference,
   savePreference,
   type MutationResult,
 } from "./api";
 import { Graph, StatusIcon } from "./Graph";
+import { applyStatePatch, reconcileAppState } from "./state-sync";
+import type { AppStatePatch } from "../shared/state-events";
 import { ResizableWorkspace } from "./ResizableWorkspace";
 import { ToolActivity } from "./CodingControls";
 import { GenerationIndicator } from "./GenerationIndicator";
@@ -138,6 +144,7 @@ function Logo({ small = false }: { small?: boolean }) {
 export function App() {
   const { preference: theme, colorMode, changeTheme } = useTheme();
   const [state, setState] = useState<AppState | null>(null);
+  const streamInstanceId = useRef<string | undefined>(undefined);
   const [models, setModels] = useState<ModelOption[]>([]);
   const [webCapabilities, setWebCapabilities] =
     useState<WebCapabilities | null>(null);
@@ -201,6 +208,25 @@ export function App() {
   const [canvasSubmittingId, setCanvasSubmittingId] = useState<string | null>(
     null,
   );
+  const [canvasCompactingIds, setCanvasCompactingIds] = useState<
+    Record<string, boolean>
+  >({});
+  const canvasCompactionJobs = useRef(
+    new Map<
+      string,
+      {
+        requestId: string;
+        workspaceId: string;
+        key: string;
+        requestKey: string;
+        cancelled: boolean;
+        cancellation?: Promise<void>;
+        cancellationPending?: boolean;
+        cancellationConfirmed?: boolean;
+      }
+    >(),
+  );
+  const canvasCompactionRequests = useRef(new Map<string, string>());
   const [nodeAction, setNodeAction] = useState<NodeActionTarget | null>(null);
   const [workspaceToDelete, setWorkspaceToDelete] = useState<Workspace | null>(
     null,
@@ -226,17 +252,12 @@ export function App() {
     setSidebar(false);
     requestAnimationFrame(() => sidebarToggleRef.current?.focus());
   }, []);
-  const apply = useCallback(
-    (next: AppState) =>
-      setState((current) =>
-        !current ||
-        next.instanceId !== current.instanceId ||
-        next.revision >= current.revision
-          ? next
-          : current,
-      ),
-    [],
-  );
+  const apply = useCallback((next: AppState, fromStream = false) => {
+    if (fromStream) streamInstanceId.current = next.instanceId;
+    setState((current) =>
+      reconcileAppState(current, next, streamInstanceId.current),
+    );
+  }, []);
   const fail = useCallback(
     (reason: unknown) =>
       setError(reason instanceof Error ? reason.message : "操作失败，请重试。"),
@@ -258,29 +279,72 @@ export function App() {
         }
       })
       .catch(fail);
-    const events = new EventSource("/api/events");
-    events.onmessage = (event) => {
-      apply(JSON.parse(event.data));
-      setOnline(true);
-    };
-    events.onopen = () => {
-      setOnline(true);
-      void Promise.all([
-        api<ModelOption[]>("/models"),
-        api<WebCapabilities>("/capabilities"),
-      ])
-        .then(([options, capabilities]) => {
-          if (mounted) {
-            setModels(options);
-            setWebCapabilities(capabilities);
+    let events: EventSource;
+    let reconnect: ReturnType<typeof setTimeout> | undefined;
+    const connect = () => {
+      if (!mounted) return;
+      let streamState: AppState | null = null;
+      events = new EventSource("/api/events?patches=1");
+      const source = events;
+      const recover = () => {
+        source.close();
+        if (!mounted || source !== events) return;
+        setOnline(false);
+        clearTimeout(reconnect);
+        reconnect = setTimeout(connect, 250);
+      };
+      source.onmessage = (event) => {
+        if (!mounted || source !== events) return;
+        try {
+          streamState = JSON.parse(event.data) as AppState;
+          apply(streamState, true);
+          setOnline(true);
+        } catch {
+          recover();
+        }
+      };
+      source.addEventListener("state-patch", (event) => {
+        if (!mounted || source !== events) return;
+        try {
+          const next = applyStatePatch(
+            streamState,
+            JSON.parse((event as MessageEvent).data) as AppStatePatch,
+          );
+          if (!next) {
+            recover();
+            return;
           }
-        })
-        .catch(fail);
+          streamState = next;
+          apply(next, true);
+          setOnline(true);
+        } catch {
+          recover();
+        }
+      });
+      source.onopen = () => {
+        if (!mounted || source !== events) return;
+        setOnline(true);
+        void Promise.all([
+          api<ModelOption[]>("/models"),
+          api<WebCapabilities>("/capabilities"),
+        ])
+          .then(([options, capabilities]) => {
+            if (mounted && source === events) {
+              setModels(options);
+              setWebCapabilities(capabilities);
+            }
+          })
+          .catch(fail);
+      };
+      source.onerror = () => {
+        if (mounted && source === events) setOnline(false);
+      };
     };
-    events.onerror = () => setOnline(false);
+    connect();
     return () => {
       mounted = false;
-      events.close();
+      clearTimeout(reconnect);
+      events?.close();
     };
   }, [apply, fail]);
 
@@ -298,49 +362,95 @@ export function App() {
   currentWorkspaceId.current = workspace?.id;
   const canvasDraftKey = `${workspace?.id}:${workspace ? canvasDraftParents[workspace.id] : ""}`;
   const canvasDraft = canvasDrafts[canvasDraftKey] ?? null;
+  const canvasCompacting =
+    !!canvasDraft && !!canvasCompactingIds[canvasDraft.id];
   const canvasParent = workspace?.nodes.find(
     (node) => node.id === canvasDraft?.parentId,
   );
   const canvasModel = models.find(
     (item) => item.id === canvasDraft?.config.model,
   );
-  const canvasDraftBlockedReason = !canvasDraft
-    ? ""
-    : !canvasParent
-      ? "来源节点已删除，请取消草稿后重新选择节点。"
-      : canvasParent.contextStale ||
-          (canvasParent.revision ?? 0) !== canvasDraft.parentRevision
-        ? "来源上下文已更新，请点击来源节点的加号重新确认。"
-        : canvasDraft.contextCheckpointId &&
-            !preparedCheckpoints(canvasParent).some(
-              (checkpoint) =>
-                checkpoint.id === canvasDraft.contextCheckpointId &&
-                checkpointMatchesPath(
-                  checkpoint,
-                  workspace!.nodes,
-                  canvasParent.id,
-                ),
-            )
-          ? "此压缩节点已失效，请取消草稿后重新选择来源。"
-          : !canBranchFrom(canvasParent)
-            ? canvasParent.retryRestore
-              ? "请先完成来源节点的文件恢复与重试，再生成分支。"
-              : "请等待来源节点结束后再生成分支。"
-            : !online
-              ? "连接已断开，恢复连接后可继续生成。"
-              : directoryDirty || directoryBusy
-                ? "请先完成工作目录设置。"
-                : changingApproval
-                  ? "正在保存审批设置，请稍候。"
-                  : submitting && canvasSubmittingId !== canvasDraft.id
-                    ? "另一条问题正在提交，请稍候。"
-                    : !canvasModel?.available
-                      ? "请选择一个已连接的模型。"
-                      : !canvasModel.thinkingLevels.includes(
-                            canvasDraft.config.thinking,
-                          )
-                        ? "请选择该模型支持的思考深度。"
-                        : "";
+  const canvasInputs =
+    canvasDraft?.contextParents ??
+    (canvasDraft
+      ? [
+          {
+            nodeId: canvasDraft.parentId,
+            revision: canvasDraft.parentRevision,
+            contextCheckpointId: canvasDraft.contextCheckpointId,
+            contextMode: canvasDraft.contextMode,
+          },
+        ]
+      : []);
+  const canvasInputIssue = canvasInputs
+    .map((input) => {
+      const source = workspace?.nodes.find((node) => node.id === input.nodeId);
+      if (!source) return "接入的分支已删除，请移除后重新连接。";
+      if (
+        input.revision !== undefined &&
+        input.revision !== (source.revision ?? 0)
+      )
+        return "接入的分支已更新，请重新连接以确认最新上下文。";
+      if (
+        ancestorPath(workspace!.nodes, source.id).some(
+          (node) => !canBranchFrom(node),
+        )
+      )
+        return "接入的分支尚未结束或上下文已失效，请完成后重新连接。";
+      if (
+        input.contextCheckpointId &&
+        !preparedCheckpoints(source).some(
+          (checkpoint) =>
+            checkpoint.id === input.contextCheckpointId &&
+            checkpointMatchesPath(checkpoint, workspace!.nodes, source.id),
+        )
+      )
+        return "接入的压缩摘要已失效，请移除后重新连接。";
+      return "";
+    })
+    .find(Boolean);
+  const canvasDraftBlockedReason =
+    canvasInputIssue ||
+    (!canvasDraft
+      ? ""
+      : !canvasParent
+        ? "来源节点已删除，请取消草稿后重新选择节点。"
+        : canvasParent.contextStale ||
+            (canvasParent.revision ?? 0) !== canvasDraft.parentRevision
+          ? "来源上下文已更新，请点击来源节点的加号重新确认。"
+          : canvasDraft.contextCheckpointId &&
+              !preparedCheckpoints(canvasParent).some(
+                (checkpoint) =>
+                  checkpoint.id === canvasDraft.contextCheckpointId &&
+                  checkpointMatchesPath(
+                    checkpoint,
+                    workspace!.nodes,
+                    canvasParent.id,
+                  ),
+              )
+            ? "此压缩节点已失效，请取消草稿后重新选择来源。"
+            : !canBranchFrom(canvasParent)
+              ? canvasParent.retryRestore
+                ? "请先完成来源节点的文件恢复与重试，再生成分支。"
+                : "请等待来源节点结束后再生成分支。"
+              : !online
+                ? "连接已断开，恢复连接后可继续生成。"
+                : directoryDirty || directoryBusy
+                  ? "请先完成工作目录设置。"
+                  : changingApproval
+                    ? "正在保存审批设置，请稍候。"
+                    : submitting && canvasSubmittingId !== canvasDraft.id
+                      ? "另一条问题正在提交，请稍候。"
+                      : !canvasModel?.available
+                        ? "请选择一个已连接的模型。"
+                        : !canvasModel.thinkingLevels.includes(
+                              canvasDraft.config.thinking,
+                            )
+                          ? "请选择该模型支持的思考深度。"
+                          : "");
+  const canvasCompactBlockedReason =
+    canvasDraftBlockedReason ||
+    (canvasModel?.demo ? "整体压缩需要选择已配置的真实模型。" : "");
   const selected =
     workspace?.nodes.find((node) => node.id === selectedId) ??
     workspace?.nodes[0];
@@ -372,7 +482,10 @@ export function App() {
     selectedCompression.workspaceId === workspace.id &&
     selectedCompression.parentId === selected.id &&
     selectedCompression.revision === (selected.revision ?? 0)
-      ? preparedCheckpoints(selected).find(
+      ? [
+          ...preparedCheckpoints(selected),
+          ...(selected.compactions ?? []),
+        ].find(
           (checkpoint) => checkpoint.id === selectedCompression.checkpointId,
         )
       : undefined;
@@ -381,6 +494,9 @@ export function App() {
     workspace &&
     selected &&
     selected.status === "completed" &&
+    preparedCheckpoints(selected).some(
+      (item) => item.id === selectedPreparedCheckpoint.id,
+    ) &&
     checkpointMatchesPath(
       selectedPreparedCheckpoint,
       workspace.nodes,
@@ -459,7 +575,9 @@ export function App() {
     workspace?.nodes.filter(
       (node) =>
         node.parentId &&
-        !workspace.nodes.some((child) => child.parentId === node.id),
+        !workspace.nodes.some((child) =>
+          directParentIds(child).includes(node.id),
+        ),
     ).length ?? 0;
   const pendingApprovals =
     state?.workspaces.flatMap((item) =>
@@ -664,6 +782,14 @@ export function App() {
       const colors = ["sage", "violet", "blue", "amber"] as const;
       setCanvasDrafts((current) => {
         const existing = current[key];
+        // Opening another view of an active draft must not change its sources.
+        if (existing && canvasCompactionJobs.current.has(existing.id))
+          return current;
+        const sameSource =
+          existing &&
+          existing.parentRevision === (source.revision ?? 0) &&
+          existing.contextCheckpointId === contextCheckpointId &&
+          existing.contextMode === contextMode;
         return {
           ...current,
           [key]: {
@@ -672,6 +798,19 @@ export function App() {
             parentId: id,
             contextCheckpointId,
             contextMode,
+            contextParents: existing?.contextParents
+              ? [
+                  {
+                    nodeId: id,
+                    revision: source.revision ?? 0,
+                    contextCheckpointId,
+                    contextMode,
+                  },
+                  ...existing.contextParents.filter(
+                    (input) => input.nodeId !== id,
+                  ),
+                ]
+              : undefined,
             parentRevision: source.revision ?? 0,
             parentTitle: source.prompt,
             parentPosition: { ...source.position },
@@ -688,12 +827,10 @@ export function App() {
                 ? initial.thinking
                 : (initialModel?.thinkingLevels[0] ?? initial.thinking),
             },
-            requestId:
-              existing &&
-              existing.parentRevision === (source.revision ?? 0) &&
-              existing.contextMode === contextMode
-                ? existing.requestId
-                : crypto.randomUUID(),
+            mergedCheckpoint: sameSource
+              ? existing.mergedCheckpoint
+              : undefined,
+            requestId: sameSource ? existing.requestId : crypto.randomUUID(),
             error: "",
             focusVersion: (existing?.focusVersion ?? 0) + 1,
           },
@@ -719,22 +856,107 @@ export function App() {
   );
   const changeCanvasDraft = (
     change: Partial<
-      Pick<CanvasBranchDraft, "text" | "config" | "files" | "referenceNodeIds">
+      Pick<
+        CanvasBranchDraft,
+        | "text"
+        | "config"
+        | "files"
+        | "referenceNodeIds"
+        | "contextParents"
+        | "contextCheckpointId"
+        | "contextMode"
+        | "parentRevision"
+      >
     >,
   ) => {
-    if (!canvasDraft || canvasSubmittingId === canvasDraft.id) return;
+    if (
+      !canvasDraft ||
+      canvasSubmittingId === canvasDraft.id ||
+      canvasCompactionJobs.current.has(canvasDraft.id)
+    )
+      return;
+    const changesContext =
+      "config" in change ||
+      "contextParents" in change ||
+      "contextCheckpointId" in change ||
+      "contextMode" in change ||
+      "parentRevision" in change;
     setCanvasDrafts((current) => ({
       ...current,
       [canvasDraftKey]: {
         ...current[canvasDraftKey],
         ...change,
+        mergedCheckpoint: changesContext
+          ? undefined
+          : current[canvasDraftKey].mergedCheckpoint,
         requestId: crypto.randomUUID(),
         error: "",
       },
     }));
   };
+  const connectCanvasDraft = (input: ContextParent) => {
+    if (
+      !canvasDraft ||
+      !workspace ||
+      canvasSubmittingId === canvasDraft.id ||
+      canvasCompactionJobs.current.has(canvasDraft.id)
+    )
+      return;
+    const source = workspace.nodes.find((node) => node.id === input.nodeId);
+    if (
+      !source ||
+      ancestorPath(workspace.nodes, source.id).some(
+        (node) => !canBranchFrom(node),
+      )
+    )
+      return;
+    if (
+      input.contextCheckpointId &&
+      !preparedCheckpoints(source).some(
+        (checkpoint) =>
+          checkpoint.id === input.contextCheckpointId &&
+          checkpointMatchesPath(checkpoint, workspace.nodes, source.id),
+      )
+    )
+      return;
+    const next: ContextParent = {
+      nodeId: source.id,
+      revision: source.revision ?? 0,
+      contextCheckpointId: input.contextCheckpointId,
+      contextMode: input.contextCheckpointId
+        ? undefined
+        : (input.contextMode ??
+          (preparedCheckpoints(source).length ? "raw" : undefined)),
+    };
+    const exists = canvasInputs.some((entry) => entry.nodeId === next.nodeId);
+    changeCanvasDraft({
+      contextParents: exists
+        ? canvasInputs.map((entry) =>
+            entry.nodeId === next.nodeId ? next : entry,
+          )
+        : [...canvasInputs, next],
+      ...(next.nodeId === canvasDraft.parentId
+        ? {
+            parentRevision: next.revision ?? 0,
+            contextCheckpointId: next.contextCheckpointId,
+            contextMode: next.contextMode,
+          }
+        : {}),
+    });
+  };
+  const disconnectCanvasDraft = (nodeId: string) => {
+    if (!canvasDraft || nodeId === canvasDraft.parentId) return;
+    changeCanvasDraft({
+      contextParents: canvasInputs.filter((entry) => entry.nodeId !== nodeId),
+    });
+  };
   const cancelCanvasDraft = () => {
-    if (!canvasDraft || canvasSubmittingId === canvasDraft.id) return;
+    if (
+      !canvasDraft ||
+      canvasSubmittingId === canvasDraft.id ||
+      canvasCompactionJobs.current.has(canvasDraft.id)
+    )
+      return;
     setCanvasDrafts((current) => {
       const next = { ...current };
       delete next[canvasDraftKey];
@@ -748,11 +970,151 @@ export function App() {
       }));
     }
   };
+  const compactCanvasDraft = async () => {
+    if (
+      !canvasDraft ||
+      canvasInputs.length < 2 ||
+      canvasCompactBlockedReason ||
+      canvasSubmittingId === canvasDraft.id ||
+      canvasCompactionJobs.current.has(canvasDraft.id)
+    )
+      return;
+    const submitted = canvasDraft;
+    const key = canvasDraftKey;
+    const requestKey = JSON.stringify([
+      submitted.workspaceId,
+      submitted.id,
+      canvasInputs,
+      submitted.config,
+    ]);
+    const requestId =
+      canvasCompactionRequests.current.get(requestKey) ?? crypto.randomUUID();
+    canvasCompactionRequests.current.set(requestKey, requestId);
+    const job: {
+      requestId: string;
+      workspaceId: string;
+      key: string;
+      requestKey: string;
+      cancelled: boolean;
+      cancellation?: Promise<void>;
+      cancellationPending?: boolean;
+      cancellationConfirmed?: boolean;
+    } = {
+      requestId,
+      workspaceId: submitted.workspaceId,
+      key,
+      requestKey,
+      cancelled: false,
+    };
+    canvasCompactionJobs.current.set(submitted.id, job);
+    setCanvasCompactingIds((current) => ({ ...current, [submitted.id]: true }));
+    setCanvasDrafts((current) => ({
+      ...current,
+      [key]: { ...current[key], error: "" },
+    }));
+    try {
+      const result = await api<
+        MutationResult & { checkpoint: ContextCheckpoint }
+      >(`/workspaces/${submitted.workspaceId}/merge-context/compact`, {
+        parentId: submitted.parentId,
+        contextParents: canvasInputs,
+        config: submitted.config,
+        requestId,
+      });
+      apply(result.state);
+      // Preserve cancellation intent even if its acknowledgement is lost.
+      if (job.cancellation) await job.cancellation;
+      if (!job.cancelled) {
+        canvasCompactionRequests.current.delete(requestKey);
+        setCanvasDrafts((current) =>
+          current[key]?.requestId === submitted.requestId
+            ? {
+                ...current,
+                [key]: {
+                  ...current[key],
+                  mergedCheckpoint: result.checkpoint,
+                  requestId: crypto.randomUUID(),
+                  error: "",
+                },
+              }
+            : current,
+        );
+      }
+    } catch (reason) {
+      // An explicit API failure is terminal; a lost network response can safely
+      // retry the same preparation ID without making a second model call.
+      if (reason instanceof ApiError || job.cancellationConfirmed)
+        canvasCompactionRequests.current.delete(requestKey);
+      setCanvasDrafts((current) =>
+        current[key]?.requestId === submitted.requestId
+          ? {
+              ...current,
+              [key]: {
+                ...current[key],
+                error: job.cancelled
+                  ? "已请求停止整体压缩，未采用本次结果。"
+                  : reason instanceof Error
+                    ? reason.message
+                    : "整体压缩失败，请重试。",
+              },
+            }
+          : current,
+      );
+    } finally {
+      if (canvasCompactionJobs.current.get(submitted.id) === job) {
+        canvasCompactionJobs.current.delete(submitted.id);
+        setCanvasCompactingIds((current) => {
+          const next = { ...current };
+          delete next[submitted.id];
+          return next;
+        });
+      }
+    }
+  };
+  const cancelCanvasCompaction = async () => {
+    if (!canvasDraft) return;
+    const job = canvasCompactionJobs.current.get(canvasDraft.id);
+    if (!job || job.cancellationPending || job.cancellationConfirmed) return;
+    job.cancelled = true;
+    job.cancellationPending = true;
+    job.cancellation = (async () => {
+      try {
+        apply(
+          await api<AppState>(
+            `/workspaces/${job.workspaceId}/merge-context/compact/${encodeURIComponent(job.requestId)}/cancel`,
+            {},
+          ),
+        );
+        job.cancellationConfirmed = true;
+        canvasCompactionRequests.current.delete(job.requestKey);
+      } catch (reason) {
+        if (canvasCompactionJobs.current.get(canvasDraft.id) !== job) return;
+        setCanvasDrafts((current) =>
+          current[job.key]
+            ? {
+                ...current,
+                [job.key]: {
+                  ...current[job.key],
+                  error:
+                    reason instanceof Error
+                      ? reason.message
+                      : "停止失败，请重试。",
+                },
+              }
+            : current,
+        );
+      } finally {
+        job.cancellationPending = false;
+      }
+    })();
+    await job.cancellation;
+  };
   const sendCanvasDraft = async () => {
     if (
       !canvasDraft ||
       (!canvasDraft.text.trim() && !canvasDraft.files.length) ||
       canvasDraftBlockedReason ||
+      canvasCompactionJobs.current.has(canvasDraft.id) ||
       submissionLock.current
     )
       return;
@@ -767,6 +1129,7 @@ export function App() {
         `/workspaces/${submitted.workspaceId}/nodes`,
         {
           parentId: submitted.parentId,
+          contextParents: submitted.contextParents,
           prompt: submitted.text,
           attachments,
           referenceNodeIds: submitted.referenceNodeIds,
@@ -774,6 +1137,7 @@ export function App() {
           requestId: submitted.requestId,
           contextCheckpointId: submitted.contextCheckpointId,
           contextMode: submitted.contextMode,
+          mergedContextCheckpointId: submitted.mergedCheckpoint?.id,
         },
       );
       apply(result.state);
@@ -1727,7 +2091,13 @@ export function App() {
               onBranch={branch}
               branchDisabled={submitting}
               draft={canvasDraft}
-              draftBusy={canvasSubmittingId === canvasDraft?.id}
+              draftBusy={
+                canvasSubmittingId === canvasDraft?.id || canvasCompacting
+              }
+              draftCompacting={canvasCompacting}
+              draftCompactBlockedReason={canvasCompactBlockedReason}
+              onDraftCompact={() => void compactCanvasDraft()}
+              onDraftCompactCancel={() => void cancelCanvasCompaction()}
               draftBlockedReason={canvasDraftBlockedReason}
               onDraftTextChange={(text) => changeCanvasDraft({ text })}
               onDraftConfigChange={(config) => changeCanvasDraft({ config })}
@@ -1735,6 +2105,8 @@ export function App() {
               onDraftReferencesChange={(referenceNodeIds) =>
                 changeCanvasDraft({ referenceNodeIds })
               }
+              onDraftConnect={connectCanvasDraft}
+              onDraftDisconnect={disconnectCanvasDraft}
               onDraftSubmit={() => void sendCanvasDraft()}
               onDraftCancel={cancelCanvasDraft}
               onEdit={(id) => openNodeAction("edit", id)}
@@ -2087,13 +2459,13 @@ export function App() {
                       {selected.contextStale
                         ? "更新后的上下文路径"
                         : canBranch
-                          ? "下一轮的原始父链档案"
-                          : "本轮的原始父链档案"}
+                          ? "下一轮的原始上下文档案"
+                          : "本轮的原始上下文档案"}
                     </b>
                     <p>
                       {selected.contextStale
                         ? "当前回答仍基于修改前的上下文。请先更新上游待生成节点，再重新生成这一轮。"
-                        : "这里保留从起点到当前分支的原文，以及每轮显式引用的卡片快照。实际请求可能使用上方摘要与近期消息，未引用的其他分支不会被带入。"}
+                        : "这里保留所有接入分支的原文，共同祖先只计入一次，并保留每轮显式引用的卡片快照。实际请求可能使用上方摘要与近期消息，未接入或引用的分支不会被带入。"}
                     </p>
                     <span>
                       原文约 {contextEstimate.toLocaleString()} tokens · 估算

@@ -338,3 +338,33 @@ test("invalid input estimates fall back to explicitly labelled archive estimates
   assert.equal(usage.source, "archive");
   assert.equal(usage.compressionStatus, "failed");
 });
+
+test("merged context rings include every branch and count common ancestors once", () => {
+  const root = node("root", null, "root", "background");
+  const a = node("a", root.id, "alpha", "answer A");
+  const b = node("b", root.id, "beta", "answer B");
+  const merged = node("merged", a.id, "merge", "both answers");
+  merged.contextParents = [{ nodeId: a.id }, { nodeId: b.id }];
+  const next = node("next", merged.id, "next", "continuation");
+  const untouched = node("untouched", a.id, "other", "alone");
+  b.contextStale = true;
+  const usage = buildContextUsageMap(
+    [next, b, untouched, merged, root, a],
+    [model(DEFAULT_CONFIG.model, 1000)],
+    DEFAULT_CONFIG.model,
+  );
+  assert.equal(
+    usage.get(merged.id)?.rawTokens,
+    estimatePathContextTokens([root, a, b, merged]),
+  );
+  assert.equal(
+    usage.get(next.id)?.rawTokens,
+    estimatePathContextTokens([root, a, b, merged, next]),
+  );
+  assert.equal(
+    usage.get(untouched.id)?.rawTokens,
+    estimatePathContextTokens([root, a, untouched]),
+  );
+  assert.equal(usage.get(next.id)?.stale, true);
+  assert.equal(usage.get(untouched.id)?.stale, false);
+});

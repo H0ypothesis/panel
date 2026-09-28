@@ -26,6 +26,12 @@ export interface ContextCompactorOptions {
   autoCompact: boolean;
   checkpoints?: ContextCheckpoint[];
   requestedCheckpointId?: string;
+  /** Explicit summaries for individual inputs of a merged branch. */
+  branchCheckpoints?: ContextCheckpoint[];
+  /** Explicit raw inputs take precedence when summaries overlap their history. */
+  rawSourceIds?: string[];
+  /** Merged inputs compact only when they exceed the usable input window. */
+  mergeContext?: boolean;
   summarize: (
     messages: Message[],
     previousSummary: string | undefined,
@@ -237,6 +243,91 @@ function projectContext(
   ];
 }
 
+/** Resolve a branch's prefix inside a deduplicated DAG without treating it as
+ * the prefix of the entire merge. Hashes still verify the exact original text. */
+export function projectBranchCheckpoints(
+  messages: Message[],
+  sources: ContextSource[],
+  checkpoints: ContextCheckpoint[],
+  currentPromptIndex?: number,
+  rawSourceIds: string[] = [],
+): { messages: Message[]; coveredMessageCount: number } {
+  const ranges = new Map<string, { source: ContextSource; start: number }>();
+  const preserveSources = new Set(rawSourceIds);
+  const preserved = new Set<number>();
+  let position = 0;
+  for (const source of contextPrefixSources(
+    sources,
+    messages.length,
+    messages.length,
+  )) {
+    if (ranges.has(source.nodeId))
+      throw new Error("合并上下文包含重复来源，无法安全应用分支摘要。");
+    ranges.set(source.nodeId, { source, start: position });
+    if (preserveSources.has(source.nodeId))
+      for (let offset = 0; offset < source.messageCount; offset++)
+        preserved.add(position + offset);
+    position += source.messageCount;
+  }
+  const hidden = new Set<number>();
+  const insertions = new Map<number, Message[]>();
+  let coveredMessageCount = 1;
+  for (const checkpoint of new Map(
+    checkpoints.map((item) => [item.id, item]),
+  ).values()) {
+    const covered: Message[] = [];
+    const indices: number[] = [];
+    for (const source of checkpoint.sources) {
+      const range = ranges.get(source.nodeId);
+      if (
+        !range ||
+        range.source.revision !== source.revision ||
+        source.messageCount > range.source.messageCount ||
+        source.messageCount < 1
+      )
+        throw new Error(
+          "指定的分支摘要已过期或不属于当前合并路径，请重新压缩。",
+        );
+      for (let offset = 0; offset < source.messageCount; offset++) {
+        const index = range.start + offset;
+        indices.push(index);
+        covered.push(messages[index]);
+      }
+    }
+    if (
+      indices[0] !== 0 ||
+      !checkpointMatches(checkpoint, covered, checkpoint.sources)
+    )
+      throw new Error("指定的分支摘要已过期或不属于当前合并路径，请重新压缩。");
+    const summaryIndices = indices.filter(
+      (index) => index !== 0 && index !== currentPromptIndex,
+    );
+    if (!summaryIndices.length) continue;
+    const replaced = summaryIndices.filter((index) => !preserved.has(index));
+    const anchor = summaryIndices.reduce(
+      (minimum, index) => Math.min(minimum, index),
+      messages.length,
+    );
+    for (const index of indices)
+      coveredMessageCount = Math.max(coveredMessageCount, index + 1);
+    for (const index of replaced) hidden.add(index);
+    const summaries = insertions.get(anchor) ?? [];
+    summaries.push({
+      role: "user",
+      content: `以下是接入分支的历史摘要（来源：${checkpoint.sources.map((source) => source.nodeId).join("、")}）。结合其他分支和保留的原始消息回答；保留不同分支之间的分歧。\n<summary>\n${checkpoint.summary}\n</summary>`,
+      timestamp: checkpoint.createdAt,
+    });
+    insertions.set(anchor, summaries);
+  }
+  return {
+    messages: messages.flatMap((message, index) => [
+      ...(insertions.get(index) ?? []),
+      ...(hidden.has(index) ? [] : [message]),
+    ]),
+    coveredMessageCount,
+  };
+}
+
 /** Legal boundaries keep every assistant tool-call batch with all its results. */
 function completeBoundaries(messages: Message[]): number[] {
   const pending = new Set<string>();
@@ -278,6 +369,8 @@ export class ContextCompactor {
       ...options,
       sources: structuredClone(options.sources),
       checkpoints: structuredClone(options.checkpoints ?? []),
+      branchCheckpoints: structuredClone(options.branchCheckpoints ?? []),
+      rawSourceIds: [...(options.rawSourceIds ?? [])],
     };
     this.budget = contextBudget(options);
   }
@@ -334,6 +427,10 @@ export class ContextCompactor {
   ): Promise<Message[]> {
     const raw = structuredClone(messages);
     const { options, budget } = this;
+    const thresholdTokens = options.mergeContext
+      ? budget.maxInputTokens
+      : budget.thresholdTokens;
+    const autoCompact = options.mergeContext || options.autoCompact;
     const estimate = (projection: Message[]) =>
       estimateContextInputTokens(
         projection,
@@ -342,6 +439,7 @@ export class ContextCompactor {
       );
     const originalTokens = estimate(raw);
     let projection = raw;
+    let branchCoverage = 1;
     let recoverableSummaryFailure = false;
     const calibratedTokens = () =>
       Math.max(
@@ -359,7 +457,9 @@ export class ContextCompactor {
         originalTokens,
         inputTokens,
         contextWindow: budget.contextWindow,
-        reservedTokens: budget.reservedTokens,
+        reservedTokens: options.mergeContext
+          ? budget.outputTokens
+          : budget.reservedTokens,
         ...(this.activeCheckpoint
           ? { checkpointId: this.activeCheckpoint.id }
           : {}),
@@ -391,11 +491,24 @@ export class ContextCompactor {
           this.activeCheckpoint,
           options.currentPromptIndex,
         );
+      } else if (options.branchCheckpoints?.length) {
+        const projected = projectBranchCheckpoints(
+          raw,
+          options.sources,
+          options.branchCheckpoints,
+          options.currentPromptIndex,
+          options.rawSourceIds,
+        );
+        projection = projected.messages;
+        branchCoverage = projected.coveredMessageCount;
       }
-      const needsCompaction = calibratedTokens() > budget.thresholdTokens;
+      const needsCompaction = calibratedTokens() > thresholdTokens;
       const shouldActivate =
         Boolean(options.requestedCheckpointId) ||
-        (!force && options.autoCompact && needsCompaction);
+        (!force &&
+          autoCompact &&
+          needsCompaction &&
+          !options.branchCheckpoints?.length);
       if (!this.activeCheckpoint && shouldActivate) {
         completeBoundaries(raw);
         const requested = options.requestedCheckpointId;
@@ -417,12 +530,26 @@ export class ContextCompactor {
           );
           if (estimate(candidate) < originalTokens) {
             signal.throwIfAborted();
+            const candidateTokens = estimate(candidate);
+            const adopted = structuredClone(selected);
+            if (
+              !force &&
+              options.mergeContext &&
+              needsCompaction &&
+              options.currentPromptIndex === raw.length - 1
+            ) {
+              // Record the transition for this merged request without changing
+              // the ancestor's cached summary or its raw-message provenance.
+              adopted.purpose = "merge";
+              adopted.tokensBefore = calibratedTokens();
+              adopted.tokensAfter = candidateTokens;
+            }
             // A checkpoint from a larger model may need further compaction.
             // Publish its adoption only if this projection can actually run.
-            if (estimate(candidate) <= budget.maxInputTokens)
-              await options.onCheckpoint?.(structuredClone(selected));
+            if (candidateTokens <= budget.maxInputTokens)
+              await options.onCheckpoint?.(structuredClone(adopted));
             signal.throwIfAborted();
-            this.activeCheckpoint = selected;
+            this.activeCheckpoint = adopted;
             this.usageCorrection = 0;
             projection = candidate;
           } else if (requested) {
@@ -432,23 +559,21 @@ export class ContextCompactor {
       }
 
       const inputTokens = calibratedTokens();
-      if (
-        !force &&
-        this.activeCheckpoint &&
-        inputTokens <= budget.thresholdTokens
-      ) {
+      if (!force && this.activeCheckpoint && inputTokens <= thresholdTokens) {
         await state("compacted", inputTokens);
         signal.throwIfAborted();
         this.rememberRequest(raw, projection);
         return projection;
       }
-      if (
-        !force &&
-        (!options.autoCompact || inputTokens <= budget.thresholdTokens)
-      ) {
+      if (!force && (!autoCompact || inputTokens <= thresholdTokens)) {
         if (inputTokens > budget.maxInputTokens)
           throw new Error("上下文超过模型可用窗口，请先手动压缩或缩小输入。");
-        await state(this.activeCheckpoint ? "compacted" : "full", inputTokens);
+        await state(
+          this.activeCheckpoint || options.branchCheckpoints?.length
+            ? "compacted"
+            : "full",
+          inputTokens,
+        );
         signal.throwIfAborted();
         this.rememberRequest(raw, projection);
         return projection;
@@ -485,20 +610,23 @@ export class ContextCompactor {
       if (cut === undefined)
         throw new Error("当前上下文没有可安全压缩的历史消息。");
       if (force && options.currentPromptIndex === undefined) {
-        // Manual preparation summarizes completed turns. If Pi's recent-token
-        // budget would keep everything, summarize the whole selected path;
-        // otherwise include the answer paired with the final summarized user.
+        // A manual merge summarizes every selected branch together, including
+        // the last branch even when Pi would normally retain its recent tail.
+        // Other manual preparations keep complete question-answer turns.
         cut =
-          suggested <= minimum
+          options.mergeContext || suggested <= minimum
             ? raw.length
             : (viable.find(
                 (boundary) =>
                   boundary >= cut! && raw[boundary]?.role === "user",
               ) ?? raw.length);
       }
+      if (!previous && branchCoverage > cut)
+        cut =
+          viable.find((boundary) => boundary >= branchCoverage) ?? raw.length;
       const summaryAllowance = Math.max(
         64,
-        Math.min(2048, Math.floor(budget.thresholdTokens / 8)),
+        Math.min(2048, Math.floor(thresholdTokens / 8)),
       );
       while (cut < raw.length) {
         const provisional: ContextCheckpoint = {
@@ -519,7 +647,7 @@ export class ContextCompactor {
             projectContext(raw, provisional, options.currentPromptIndex),
           ) +
             summaryAllowance <=
-          budget.thresholdTokens
+          thresholdTokens
         )
           break;
         const next = viable.find((boundary) => boundary > cut!);
@@ -529,8 +657,18 @@ export class ContextCompactor {
       const sources = contextPrefixSources(options.sources, cut, raw.length);
       const sourceHash = contextSourceHash(raw, options.sources, cut);
       recoverableSummaryFailure = true;
+      const summaryMessages =
+        !previous && options.branchCheckpoints?.length
+          ? projectBranchCheckpoints(
+              raw.slice(0, cut),
+              sources,
+              options.branchCheckpoints,
+              options.currentPromptIndex,
+              options.rawSourceIds,
+            ).messages.slice(1)
+          : raw.slice(minimum, cut);
       const summarized = await options.summarize(
-        structuredClone(raw.slice(minimum, cut)),
+        structuredClone(summaryMessages),
         previous?.summary,
         signal,
       );
@@ -549,6 +687,10 @@ export class ContextCompactor {
         createdAt: Date.now(),
         tokensBefore: inputTokens,
         tokensAfter: 0,
+        ...(options.mergeContext &&
+        options.currentPromptIndex === raw.length - 1
+          ? { purpose: "merge" as const }
+          : {}),
         ...(summarized.usage ? { usage: summarized.usage } : {}),
       };
       const compacted = projectContext(

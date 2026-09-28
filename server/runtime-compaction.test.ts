@@ -20,6 +20,7 @@ import {
   type RunContextOptions,
   type RunEnvironment,
 } from "./runtime.ts";
+import { contextSourceHash } from "./compaction.ts";
 
 const config = { model: "openai/context-test", thinking: "medium" as const };
 const summary =
@@ -452,9 +453,22 @@ test("manual context preparation creates only a summary, even below the automati
   const history = historyFixture();
   const original = structuredClone(history.messages);
   const observed = callbacks(history.sources);
+  observed.options.contextBranches = [
+    {
+      nodeId: "turn-4",
+      sourceIds: history.sources.slice(0, 6).map((source) => source.nodeId),
+    },
+    {
+      nodeId: "turn-9",
+      sourceIds: history.sources.map((source) => source.nodeId),
+    },
+  ];
   faux.setResponses([
     (context) => {
       assert.match(text(context), /conversation/);
+      assert.match(text(context), /接入来源/);
+      assert.match(text(context), /turn-4/);
+      assert.match(text(context), /turn-9/);
       const system = context.messages[0];
       if (system.role === "system")
         assert.equal(system.toolsAdded?.length ?? 0, 0);
@@ -575,4 +589,127 @@ test("an oversized summary request fails before calling the provider", async () 
   );
   assert.equal(observed.checkpoints.length, 0);
   assert.equal(faux.state.callCount, 0);
+});
+
+test("runtime merges selected summaries from separate source ranges without a new summary request", async () => {
+  const { faux, runtime } = fixture(128000);
+  const root = user("ROOT PROJECT GOAL");
+  const a = [user("A OLD QUESTION"), fauxAssistantMessage("A OLD ANSWER")];
+  const b = [user("B OLD QUESTION"), fauxAssistantMessage("B OLD ANSWER")];
+  const sources: ContextSource[] = [
+    { nodeId: "root", revision: 0, messageCount: 1 },
+    { nodeId: "a", revision: 0, messageCount: 2 },
+    { nodeId: "b", revision: 0, messageCount: 2 },
+  ];
+  const checkpoint = (
+    branch: "a" | "b",
+    messages: Message[],
+  ): ContextCheckpoint => {
+    const source = sources.find((item) => item.nodeId === branch)!;
+    const branchSources = [sources[0], source];
+    return {
+      id: `${branch}-summary`,
+      version: 1,
+      sourceHash: contextSourceHash([root, ...messages], branchSources, 3),
+      sources: branchSources,
+      messageCount: 3,
+      summary: `${branch.toUpperCase()} SELECTED SUMMARY`,
+      model: config.model,
+      thinking: config.thinking,
+      createdAt: 1,
+      tokensBefore: 100,
+      tokensAfter: 20,
+    };
+  };
+  const observed = callbacks(sources);
+  observed.options.branchCheckpoints = [checkpoint("a", a), checkpoint("b", b)];
+  observed.options.mergeContext = true;
+  observed.options.autoCompact = false;
+  faux.setResponses([
+    (context) => {
+      assert.match(text(context), /A SELECTED SUMMARY/);
+      assert.match(text(context), /B SELECTED SUMMARY/);
+      assert.doesNotMatch(text(context), /A OLD|B OLD/);
+      return fauxAssistantMessage("MERGED ANSWER");
+    },
+  ]);
+  const history = [root, ...a, ...b];
+  const original = structuredClone(history);
+  const result = await runtime.run(
+    config,
+    history,
+    "MERGE EXACT REQUEST",
+    signal(),
+    () => {},
+    undefined,
+    observed.options,
+  );
+  assert.equal(result.response, "MERGED ANSWER");
+  assert.equal(faux.state.callCount, 1);
+  assert.equal(observed.checkpoints.length, 0);
+  assert.equal(observed.states.at(-1)?.status, "compacted");
+  assert.deepEqual(history, original);
+  assert.doesNotMatch(JSON.stringify(result.messages), /SELECTED SUMMARY/);
+});
+
+test("oversized merged histories are summarized in bounded parts and publish a checkpoint before the answer", async () => {
+  const { faux, runtime } = fixture();
+  const messages = [
+    user("ROOT EXACT PROJECT GOAL"),
+    user(`BRANCH A START ${"a".repeat(40000)} BRANCH A END`),
+    fauxAssistantMessage("A ANSWER"),
+    user(`BRANCH B START ${"b".repeat(40000)} BRANCH B END`),
+    fauxAssistantMessage("B ANSWER"),
+  ];
+  const original = structuredClone(messages);
+  const observed = callbacks([
+    { nodeId: "root", revision: 0, messageCount: 1 },
+    { nodeId: "a", revision: 0, messageCount: 2 },
+    { nodeId: "b", revision: 0, messageCount: 2 },
+  ]);
+  observed.options.mergeContext = true;
+  observed.options.autoCompact = false;
+  const summaryInputs: string[] = [];
+  faux.setResponses(
+    Array.from({ length: 30 }, () => (context: TranscriptContext) => {
+      const serialized = text(context);
+      if (serialized.includes("<history-part>")) {
+        assert.equal(
+          observed.checkpoints.length,
+          0,
+          "partial summaries never become visible checkpoints",
+        );
+        summaryInputs.push(serialized);
+        return fauxAssistantMessage(summary);
+      }
+      assert.equal(observed.checkpoints.length, 1);
+      assert.equal(observed.checkpoints[0].purpose, "merge");
+      assert.match(serialized, /SUMMARY:/);
+      assert.match(serialized, /ROOT EXACT PROJECT GOAL/);
+      assert.match(serialized, /CURRENT EXACT MERGE REQUEST/);
+      return fauxAssistantMessage("MERGED ANSWER");
+    }),
+  );
+  const result = await runtime.run(
+    config,
+    messages,
+    "CURRENT EXACT MERGE REQUEST",
+    signal(),
+    () => {},
+    undefined,
+    observed.options,
+  );
+  assert.equal(result.response, "MERGED ANSWER");
+  assert.ok(summaryInputs.length > 1);
+  assert.match(summaryInputs.join(""), /BRANCH A START/);
+  assert.match(summaryInputs.join(""), /BRANCH A END/);
+  assert.match(summaryInputs.join(""), /BRANCH B START/);
+  assert.match(summaryInputs.join(""), /BRANCH B END/);
+  assert.ok((observed.checkpoints[0].usage?.total ?? 0) > 0);
+  assert.deepEqual(messages, original);
+  assert.doesNotMatch(JSON.stringify(result.messages), /history-part|SUMMARY:/);
+  assert.deepEqual(
+    result.messages.map((message) => message.role),
+    ["user", "assistant"],
+  );
 });

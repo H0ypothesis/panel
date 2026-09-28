@@ -1,3 +1,5 @@
+import { ancestorPath, directParentIds } from "../shared/types.ts";
+import { contextParentInput } from "./context-parents.ts";
 import { randomUUID } from "node:crypto";
 import type {
   AssistantMessage,
@@ -550,6 +552,15 @@ export function importWorkspace(value: unknown): StoredWorkspace {
     throw new Error("导入失败：探索必须包含且仅包含一个有效的起点。");
   const root = roots[0];
   for (const node of originals) {
+    if (node.contextParents !== undefined) {
+      const parents = contextParentInput(node.contextParents)!;
+      if (
+        node === root ||
+        parents[0].nodeId !== node.parentId ||
+        parents.some((parent) => !byId.has(parent.nodeId))
+      )
+        throw new Error("导入失败：融合分支接入口无效。");
+    }
     if (node === root) continue;
     if (
       node.status === "root" ||
@@ -557,17 +568,28 @@ export function importWorkspace(value: unknown): StoredWorkspace {
     )
       throw new Error("导入失败：存在无效或缺失的父节点。");
   }
-  // Iterative colouring proves every node reaches the unique root in O(nodes).
-  const visited = new Set<string>([root.id as string]);
-  for (const node of originals) {
-    const path = new Set<string>();
-    let current = node.id as string;
-    while (!visited.has(current)) {
-      if (path.has(current)) throw new Error("导入失败：节点关系存在循环。");
-      path.add(current);
-      current = byId.get(current)!.parentId as string;
+  // Colour every direct edge, including secondary inputs; shared ancestors are not cycles.
+  const visited = new Set<string>();
+  const visiting = new Set<string>();
+  for (const original of originals) {
+    const stack = [{ id: original.id as string, exit: false }];
+    while (stack.length) {
+      const { id, exit } = stack.pop()!;
+      if (visited.has(id)) continue;
+      const node = byId.get(id)!;
+      if (exit) {
+        visiting.delete(id);
+        visited.add(id);
+        continue;
+      }
+      if (visiting.has(id)) throw new Error("导入失败：节点关系存在循环。");
+      visiting.add(id);
+      stack.push({ id, exit: true });
+      for (const parent of directParentIds(
+        node as unknown as TurnNode,
+      ).reverse())
+        stack.push({ id: parent, exit: false });
     }
-    for (const id of path) visited.add(id);
   }
   const now = Date.now();
   // Deleted sources remain immutable historical references. Give them IDs in
@@ -617,14 +639,14 @@ export function importWorkspace(value: unknown): StoredWorkspace {
     const contextIds = array(original.contextIds, `${label}上下文`).map((id) =>
       string(id, `${label}上下文 ID`, true),
     );
-    // Validate the exported context against the actual parent chain, walking only
-    // the IDs already present in the payload, never recursively expanding trees.
-    let parent = original.parentId;
-    for (let i = contextIds.length - 1; i >= 0; i--) {
-      if (contextIds[i] !== parent) invalid(`${label}上下文父链`);
-      parent = byId.get(contextIds[i])?.parentId;
-    }
-    if (parent !== null) invalid(`${label}上下文父链`);
+    const expectedIds = ancestorPath(
+      originals as unknown as TurnNode[],
+      original.id as string,
+    )
+      .filter((node) => node.id !== original.id)
+      .map((node) => node.id);
+    if (JSON.stringify(contextIds) !== JSON.stringify(expectedIds))
+      invalid(`${label}上下文父链`);
     const contextSet = new Set(contextIds);
     const sources: ContextSource[] | undefined =
       original.contextSources === undefined
@@ -675,6 +697,16 @@ export function importWorkspace(value: unknown): StoredWorkspace {
       id: remap(original.id, label),
       parentId:
         original.parentId === null ? null : remap(original.parentId, label),
+      ...(original.contextParents === undefined
+        ? {}
+        : {
+            contextParents: contextParentInput(original.contextParents)!.map(
+              (parent) => ({
+                ...parent,
+                nodeId: remap(parent.nodeId, label),
+              }),
+            ),
+          }),
       prompt,
       response,
       ...(original.thinking === undefined
@@ -837,6 +869,10 @@ function restoreImportedSummaries(
       ...node,
       id: reverseIds.get(node.id)!,
       parentId: node.parentId ? reverseIds.get(node.parentId)! : null,
+      contextParents: node.contextParents?.map((parent) => ({
+        ...parent,
+        nodeId: reverseIds.get(parent.nodeId)!,
+      })),
     })),
   };
   const remapped = new Map<string, ContextCheckpoint>();
@@ -860,6 +896,7 @@ function restoreImportedSummaries(
         const candidate: ContextCheckpoint = {
           id: string(source.id, "摘要 ID", true),
           version: 1,
+          ...(source.purpose === "merge" ? { purpose: "merge" as const } : {}),
           sourceHash: string(source.sourceHash, "摘要来源", true),
           messageCount: integer(source.messageCount, "摘要消息数"),
           sources: array(source.sources, "摘要来源").map((item) => {
@@ -955,6 +992,27 @@ function restoreImportedSummaries(
     const node = imported.nodes.find(
       (item) => item.id === ids.get(original.id as string),
     )!;
+    for (const run of [node, ...(node.previousRuns ?? [])]) {
+      if (!run.contextParents) continue;
+      run.contextParents = run.contextParents.map((parent) => ({
+        nodeId: parent.nodeId,
+        ...(parent.revision === undefined ? {} : { revision: parent.revision }),
+        ...(parent.contextMode ? { contextMode: parent.contextMode } : {}),
+        ...(parent.contextCheckpointId &&
+        remapped.has(parent.contextCheckpointId)
+          ? {
+              contextCheckpointId: remapped.get(parent.contextCheckpointId)!.id,
+            }
+          : parent.contextCheckpointId
+            ? { contextMode: "raw" as const }
+            : {}),
+      }));
+    }
+    if ((node.contextParents?.length ?? 0) > 1) {
+      node.contextAutoCompact = true;
+      delete node.contextMode;
+      delete node.effectiveContextMode;
+    }
     if ((node.effectiveContextMode ?? node.contextMode) === "raw") {
       node.contextAutoCompact = false;
       continue;
@@ -962,6 +1020,25 @@ function restoreImportedSummaries(
     const allowed = new Set(
       node.contextIds.flatMap((id) => [...(restoredByNode.get(id) ?? [])]),
     );
+    // A pre-answer aggregate belongs to the merged card itself. Restore its
+    // selection only when it still projects exactly that card's incoming history.
+    if (node.parentId && (node.contextParents?.length ?? 0) > 1) {
+      try {
+        const incoming = buildContext(
+          imported,
+          node.parentId,
+          node.contextParents,
+        );
+        for (const checkpoint of node.compactions ?? [])
+          if (
+            checkpoint.purpose === "merge" &&
+            checkpointMatches(checkpoint, incoming.messages, incoming.sources)
+          )
+            allowed.add(checkpoint.id);
+      } catch {
+        /* Invalid or stale input histories cannot select a summary. */
+      }
+    }
     const requested =
       typeof original.requestedContextCheckpointId === "string"
         ? remapped.get(original.requestedContextCheckpointId)

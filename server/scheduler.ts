@@ -1,3 +1,5 @@
+import { ancestorPath, directParentIds } from "../shared/types.ts";
+import { contextParentInput, contextParentsMatch } from "./context-parents.ts";
 import { randomUUID } from "node:crypto";
 import type { AttachmentUpload } from "../shared/attachments.ts";
 import {
@@ -15,6 +17,7 @@ import { realpath } from "node:fs/promises";
 import type {
   ApprovalMode,
   ContextCheckpoint,
+  ContextParent,
   ContextState,
   GitHistoryEntry,
   RunConfig,
@@ -73,6 +76,15 @@ export class Scheduler {
       promise: Promise<ContextCheckpoint | undefined>;
     }
   >();
+  private mergeContextJobs = new Map<
+    string,
+    {
+      workspaceId: string;
+      sourceIds: string[];
+      controller: AbortController;
+      promise: Promise<ContextCheckpoint>;
+    }
+  >();
   private activeDirectories = new Map<string, string>();
   private deletingDirectories = new Map<string, string>();
   private configuringDirectories = new Map<string, string>();
@@ -101,6 +113,8 @@ export class Scheduler {
     workspaceId: string,
     input: {
       parentId: string;
+      contextParents?: ContextParent[];
+      mergedContextCheckpointId?: string;
       prompt: string;
       attachments?: AttachmentUpload[];
       referenceNodeIds?: string[];
@@ -119,6 +133,8 @@ export class Scheduler {
     workspaceId: string,
     input: {
       parentId: string;
+      contextParents?: ContextParent[];
+      mergedContextCheckpointId?: string;
       prompt: string;
       attachments?: AttachmentUpload[];
       referenceNodeIds?: string[];
@@ -142,11 +158,20 @@ export class Scheduler {
     const duplicate = this.findRequest(workspace, input.requestId);
     const attachmentHash = attachmentInputHash(input.attachments);
     const references = referenceNodeIds(input.referenceNodeIds);
+    const requestedParents = contextParentInput(input.contextParents);
+    if (requestedParents && requestedParents[0].nodeId !== input.parentId)
+      throw new NodeMutationConflict("主分支必须是第一个接入节点。");
     if (duplicate) {
       if (
         duplicate.run.requestKind === "retry" ||
         (duplicate.run.revision ?? 0) !== 0 ||
         duplicate.run.parentId !== input.parentId ||
+        duplicate.run.mergedContextCheckpointId !==
+          input.mergedContextCheckpointId ||
+        !contextParentsMatch(
+          duplicate.run.contextParentsRequest ?? duplicate.run.contextParents,
+          requestedParents,
+        ) ||
         duplicate.run.prompt !== input.prompt ||
         duplicate.run.attachmentInputHash !== attachmentHash ||
         !referenceSelectionMatches(
@@ -155,9 +180,15 @@ export class Scheduler {
         ) ||
         duplicate.run.config.model !== input.config.model ||
         duplicate.run.config.thinking !== input.config.thinking ||
-        duplicate.run.requestedContextCheckpointId !==
-          input.contextCheckpointId ||
-        duplicate.run.contextMode !== input.contextMode
+        (duplicate.run.contextParentsRequest
+          ? duplicate.run.contextParentsRequest[0].contextCheckpointId
+          : duplicate.run.requestedContextCheckpointId) !==
+          (input.contextCheckpointId ??
+            requestedParents?.[0]?.contextCheckpointId) ||
+        (duplicate.run.contextParentsRequest
+          ? duplicate.run.contextParentsRequest[0].contextMode
+          : duplicate.run.contextMode) !==
+          (input.contextMode ?? requestedParents?.[0]?.contextMode)
       ) {
         throw new Error("请求 ID 已用于其他内容，请重新发送。");
       }
@@ -182,7 +213,13 @@ export class Scheduler {
       this.assertDirectoryAvailable(
         this.store.effectiveWorkingDirectory(workspace),
       );
-    const context = buildContext(workspace, input.parentId);
+    const contextParents = this.resolveContextParents(
+      workspace,
+      input.parentId,
+      requestedParents,
+      input,
+    );
+    const context = buildContext(workspace, input.parentId, contextParents);
     // Cancellation exposes its terminal status before the runtime flushes its
     // transcript. Completed turns already have their final messages assigned.
     if (
@@ -197,17 +234,50 @@ export class Scheduler {
       throw new NodeMutationConflict("此路径仍在收尾，请等待结束后继续。");
     const contextReferences = resolveContextReferences(workspace, references);
     const parent = workspace.nodes.find((node) => node.id === input.parentId)!;
-    const selection = this.contextSelection(workspace, parent, input);
+    const selection = this.contextSelection(
+      workspace,
+      parent,
+      input,
+      undefined,
+      requestedParents,
+    );
+    const mergedCheckpoint = this.mergedPreparationCheckpoint(
+      workspace,
+      input.mergedContextCheckpointId,
+      input.parentId,
+      requestedParents,
+      contextParents,
+      input.config,
+      context,
+    );
+    if (mergedCheckpoint) {
+      selection.requestedContextCheckpointId = mergedCheckpoint.id;
+      selection.effectiveContextCheckpointId = mergedCheckpoint.id;
+    }
     this.validateRequestedContext(
       workspace,
       selection.effectiveContextCheckpointId,
       context,
+      mergedCheckpoint ? [mergedCheckpoint] : [],
     );
     const siblings = workspace.nodes.filter(
       (node) => node.parentId === input.parentId,
     );
     const colors = ["sage", "violet", "blue", "amber"] as const;
-    const x = parent.position.x + (input.contextCheckpointId ? 500 : 360);
+    const x =
+      (contextParents?.length ?? 0) > 1
+        ? Math.max(
+            ...contextParents!.map(
+              (input) =>
+                workspace.nodes.find((node) => node.id === input.nodeId)!
+                  .position.x,
+            ),
+          ) + 500
+        : parent.position.x +
+          ((input.contextCheckpointId ??
+          contextParents?.[0]?.contextCheckpointId)
+            ? 500
+            : 360);
     let y = parent.position.y;
     while (
       workspace.nodes.some(
@@ -227,6 +297,11 @@ export class Scheduler {
     const node: StoredNode = {
       id: randomUUID(),
       parentId: parent.id,
+      contextParents,
+      contextParentsRequest: requestedParents?.map((parent, i) => ({
+        ...parent,
+        revision: contextParents![i].revision,
+      })),
       prompt: input.prompt,
       contextReferences,
       attachments: attachments.length
@@ -240,6 +315,10 @@ export class Scheduler {
       contextIds: context.ids,
       contextSources: context.sources,
       ...selection,
+      mergedContextCheckpointId: input.mergedContextCheckpointId,
+      compactions: mergedCheckpoint
+        ? [structuredClone(mergedCheckpoint)]
+        : undefined,
       requestId: input.requestId,
       color:
         parent.status === "root"
@@ -275,15 +354,154 @@ export class Scheduler {
     return node;
   }
 
+  private resolveContextParents(
+    workspace: StoredWorkspace,
+    parentId: string,
+    input: ContextParent[] | undefined,
+    selection: ContextSelectionInput,
+    refresh = false,
+  ): ContextParent[] | undefined {
+    if (!input) return undefined;
+    const parents = contextParentInput(input)!;
+    if (parents[0].nodeId !== parentId)
+      throw new NodeMutationConflict("主分支必须是第一个接入节点。");
+    if (
+      (selection.contextMode &&
+        selection.contextMode !== parents[0].contextMode) ||
+      (selection.contextCheckpointId &&
+        selection.contextCheckpointId !== parents[0].contextCheckpointId)
+    )
+      throw new NodeMutationConflict("主分支上下文选择不一致。");
+    return parents.map((input) => {
+      const source = workspace.nodes.find((node) => node.id === input.nodeId);
+      if (!source) throw new NodeMutationConflict("上下文分支节点不存在。");
+      if (
+        !refresh &&
+        input.revision !== undefined &&
+        input.revision !== (source.revision ?? 0)
+      )
+        throw new NodeMutationConflict("接入分支已更新，请重新选择。");
+      const context = buildContext(workspace, source.id);
+      let resolved = this.contextSelection(workspace, source, input);
+      if (refresh && resolved.effectiveContextCheckpointId) {
+        try {
+          this.validateRequestedContext(
+            workspace,
+            resolved.effectiveContextCheckpointId,
+            context,
+          );
+        } catch {
+          resolved = this.contextSelection(workspace, source, {
+            contextMode: "raw",
+          });
+        }
+      }
+      this.validateRequestedContext(
+        workspace,
+        resolved.effectiveContextCheckpointId,
+        context,
+      );
+      return {
+        nodeId: input.nodeId,
+        revision: source.revision ?? 0,
+        contextMode: resolved.effectiveContextMode,
+        contextCheckpointId: resolved.effectiveContextCheckpointId,
+      };
+    });
+  }
+
+  private contextBranches(workspace: StoredWorkspace, node: StoredNode) {
+    const branches = new Map<
+      string,
+      { nodeId: string; sourceIds: string[]; contextMode?: "raw" }
+    >();
+    const pending = [node];
+    const visited = new Set<string>();
+    while (pending.length) {
+      const owner = pending.pop()!;
+      if (visited.has(owner.id)) continue;
+      visited.add(owner.id);
+      if ((owner.effectiveContextMode ?? owner.contextMode) === "raw") continue;
+      const parents =
+        owner.contextParents ??
+        (owner.parentId ? [{ nodeId: owner.parentId }] : []);
+      for (const parent of parents) {
+        const source = workspace.nodes.find(
+          (item) => item.id === parent.nodeId,
+        )!;
+        if (parents.length > 1)
+          branches.set(`${owner.id}:${source.id}`, {
+            nodeId: source.id,
+            sourceIds: ancestorPath(workspace.nodes, source.id).map(
+              (item) => item.id,
+            ),
+            contextMode: parent.contextMode,
+          });
+        if (!parent.contextCheckpointId && parent.contextMode !== "raw")
+          pending.push(source);
+      }
+    }
+    return [...branches.values()];
+  }
+
+  private branchCheckpoints(
+    workspace: StoredWorkspace,
+    node: StoredNode,
+    _ids: string[],
+  ): ContextCheckpoint[] {
+    if ((node.effectiveContextMode ?? node.contextMode) === "raw") return [];
+    const checkpoints = new Map<string, ContextCheckpoint>();
+    const visited = new Set<string>();
+    const pending: ContextParent[] = [
+      ...(node.contextParents ??
+        (node.parentId ? [{ nodeId: node.parentId }] : [])),
+    ];
+    while (pending.length) {
+      const parent = pending.pop()!;
+      if (parent.contextMode === "raw") continue;
+      const source = workspace.nodes.find((item) => item.id === parent.nodeId)!;
+      const checkpointId =
+        parent.contextCheckpointId ??
+        source.effectiveContextCheckpointId ??
+        source.requestedContextCheckpointId;
+      if (checkpointId) {
+        const context = buildContext(workspace, parent.nodeId);
+        const checkpoint = contextCheckpoints(workspace, context.ids).find(
+          (item) => item.id === checkpointId,
+        );
+        if (
+          !checkpoint ||
+          !checkpointMatches(checkpoint, context.messages, context.sources)
+        )
+          throw new NodeMutationConflict("接入分支摘要已失效，请重新选择。");
+        checkpoints.set(checkpoint.id, checkpoint);
+        continue;
+      }
+      if (
+        visited.has(source.id) ||
+        (source.effectiveContextMode ?? source.contextMode) === "raw"
+      )
+        continue;
+      visited.add(source.id);
+      pending.push(
+        ...(source.contextParents ??
+          (source.parentId ? [{ nodeId: source.parentId }] : [])),
+      );
+    }
+    return [...checkpoints.values()];
+  }
+
   private validateRequestedContext(
     workspace: StoredWorkspace,
     checkpointId: string | undefined,
     context: ReturnType<typeof buildContext>,
+    additional: ContextCheckpoint[] = [],
   ) {
     if (!checkpointId) return;
-    const checkpoint = contextCheckpoints(workspace, context.ids).find(
-      (item) => item.id === checkpointId,
-    );
+    const checkpoint = [
+      ...contextCheckpoints(workspace, context.ids),
+      ...additional,
+    ].find((item) => item.id === checkpointId);
     if (
       !checkpoint ||
       !checkpointMatches(checkpoint, context.messages, context.sources)
@@ -305,8 +523,44 @@ export class Scheduler {
     parent: StoredNode,
     input: ContextSelectionInput,
     previous?: StoredNode | StoredRun,
+    contextParents = previous?.contextParents,
   ) {
     this.validateContextSelection(input);
+    if ((contextParents?.length ?? 0) > 1) {
+      const aggregateId =
+        previous?.effectiveContextCheckpointId ??
+        previous?.requestedContextCheckpointId;
+      const aggregate = previous?.compactions?.find(
+        (checkpoint) =>
+          checkpoint.id === aggregateId && checkpoint.purpose === "merge",
+      );
+      const context =
+        previous && buildContext(workspace, parent.id, contextParents);
+      const checkpointId =
+        !input.contextMode &&
+        !input.contextCheckpointId &&
+        aggregate &&
+        context &&
+        contextParentsMatch(previous?.contextParents, contextParents) &&
+        checkpointMatches(aggregate, context.messages, context.sources)
+          ? aggregate.id
+          : undefined;
+      return {
+        contextMode: undefined,
+        effectiveContextMode: undefined,
+        requestedContextCheckpointId: checkpointId,
+        effectiveContextCheckpointId: checkpointId,
+        contextAutoCompact: true,
+      };
+    }
+    if (contextParents?.length === 1 && !previous)
+      input = {
+        ...contextParents[0],
+        ...input,
+        contextMode: input.contextMode ?? contextParents[0].contextMode,
+        contextCheckpointId:
+          input.contextCheckpointId ?? contextParents[0].contextCheckpointId,
+      };
     if (
       previous?.contextStale &&
       !input.contextMode &&
@@ -343,9 +597,13 @@ export class Scheduler {
       input.contextMode === "raw" ||
       (!input.contextCheckpointId &&
         (parent.effectiveContextMode ?? parent.contextMode) === "raw");
+    const mergeCheckpoint = [...(parent.compactions ?? [])]
+      .reverse()
+      .find((checkpoint) => checkpoint.purpose === "merge");
     const previousCheckpoint =
       parent.effectiveContextCheckpointId ??
-      parent.requestedContextCheckpointId;
+      parent.requestedContextCheckpointId ??
+      mergeCheckpoint?.id;
     const latestCheckpoint =
       previousCheckpoint &&
       parent.contextState?.status === "compacted" &&
@@ -361,7 +619,11 @@ export class Scheduler {
       effectiveContextCheckpointId: raw
         ? undefined
         : (input.contextCheckpointId ?? latestCheckpoint),
-      contextAutoCompact: raw ? false : workspace.autoCompact !== false,
+      contextAutoCompact: raw
+        ? false
+        : ancestorPath(workspace.nodes, parent.id).some(
+            (node) => (node.contextParents?.length ?? 0) > 1,
+          ) || workspace.autoCompact !== false,
     };
   }
 
@@ -369,13 +631,294 @@ export class Scheduler {
     workspace: StoredWorkspace,
     requestId: string,
   ): boolean {
-    return workspace.nodes.some((node) =>
-      [node, ...(node.previousRuns ?? [])].some((run) =>
-        run.preparationRequests?.some(
+    return (
+      Boolean(workspace.cancelledMergePreparationIds?.includes(requestId)) ||
+      Boolean(
+        workspace.mergePreparationRequests?.some(
           (request) => request.requestId === requestId,
         ),
-      ),
+      ) ||
+      workspace.nodes.some((node) =>
+        [node, ...(node.previousRuns ?? [])].some((run) =>
+          run.preparationRequests?.some(
+            (request) => request.requestId === requestId,
+          ),
+        ),
+      )
     );
+  }
+
+  private mergedPreparationCheckpoint(
+    workspace: StoredWorkspace,
+    checkpointId: string | undefined,
+    parentId: string,
+    requestedParents: ContextParent[] | undefined,
+    resolvedParents: ContextParent[] | undefined,
+    config: RunConfig,
+    context: ReturnType<typeof buildContext>,
+  ) {
+    if (!checkpointId) return undefined;
+    const preparation = workspace.mergePreparationRequests?.find(
+      (request) =>
+        request.status === "completed" &&
+        request.checkpoint?.id === checkpointId,
+    );
+    if (
+      !preparation ||
+      !requestedParents ||
+      !resolvedParents ||
+      resolvedParents.length < 2 ||
+      preparation.parentId !== parentId ||
+      !contextParentsMatch(
+        preparation.contextParentsRequest,
+        requestedParents,
+      ) ||
+      !contextParentsMatch(preparation.contextParents, resolvedParents) ||
+      preparation.config.model !== config.model ||
+      preparation.config.thinking !== config.thinking ||
+      !checkpointMatches(
+        preparation.checkpoint!,
+        context.messages,
+        context.sources,
+      )
+    )
+      throw new NodeMutationConflict(
+        "整体摘要已失效或分支选择已改变，请重新整体压缩。",
+      );
+    return preparation.checkpoint!;
+  }
+
+  /** A draft aggregate is private until an answer adopts it; no source card owns it. */
+  async compactMergeContext(
+    workspaceId: string,
+    input: {
+      parentId: string;
+      contextParents: ContextParent[];
+      config: RunConfig;
+      requestId: string;
+    },
+  ): Promise<ContextCheckpoint> {
+    const task = await this.serializeMutation(workspaceId, async () => {
+      const workspace = this.store.workspace(workspaceId);
+      this.assertWorkspaceNotDeleting(workspace);
+      if (this.closed) throw new Error("服务正在关闭，请稍后重试。");
+      if (this.store.storageError) throw new Error(this.store.storageError);
+      if (workspace.cancelledMergePreparationIds?.includes(input.requestId))
+        throw new NodeMutationConflict("整体压缩已停止，请使用新的请求重试。");
+      const requestedParents = contextParentInput(input.contextParents)!;
+      if (requestedParents.length < 2)
+        throw new NodeMutationConflict("整体压缩需要接入至少两个分支。");
+      const contextParents = this.resolveContextParents(
+        workspace,
+        input.parentId,
+        requestedParents,
+        {},
+      )!;
+      const context = buildContext(workspace, input.parentId, contextParents);
+      if (context.ids.some((id) => this.active.has(id)))
+        throw new NodeMutationConflict("接入分支仍在收尾，请稍后重试。");
+      const key = `${workspace.id}:${input.requestId}`;
+      const previous = workspace.mergePreparationRequests?.find(
+        (request) => request.requestId === input.requestId,
+      );
+      if (previous) {
+        if (
+          previous.parentId !== input.parentId ||
+          !contextParentsMatch(
+            previous.contextParentsRequest,
+            requestedParents,
+          ) ||
+          !contextParentsMatch(previous.contextParents, contextParents) ||
+          previous.config.model !== input.config.model ||
+          previous.config.thinking !== input.config.thinking
+        )
+          throw new NodeMutationConflict("请求 ID 已用于其他整体压缩内容。");
+        const job = this.mergeContextJobs.get(key);
+        if (job) return { promise: job.promise };
+        if (previous.status !== "completed")
+          throw new NodeMutationConflict(
+            previous.error ?? "整体压缩已中断，请使用新的请求重试。",
+          );
+        const checkpoint = this.mergedPreparationCheckpoint(
+          workspace,
+          previous.checkpoint?.id,
+          input.parentId,
+          requestedParents,
+          contextParents,
+          input.config,
+          context,
+        );
+        if (!checkpoint)
+          throw new NodeMutationConflict("整体摘要不存在，请重新压缩。");
+        return { promise: Promise.resolve(checkpoint) };
+      }
+      if (
+        workspace.pendingNodeRetry ||
+        this.findRequest(workspace, input.requestId) ||
+        this.preparationRequestExists(workspace, input.requestId)
+      )
+        throw new NodeMutationConflict(
+          "已有未完成的文件回溯，或请求 ID 已用于其他任务。",
+        );
+      if (this.contextJobs.size + this.mergeContextJobs.size >= 3)
+        throw new Error("已有 3 条路径正在生成摘要，请稍后重试。");
+      const model = this.runtime
+        .models()
+        .find((item) => item.id === input.config.model);
+      if (!model?.available || model.demo)
+        throw new Error("生成摘要需要选择已配置的真实模型。");
+      if (!model.thinkingLevels.includes(input.config.thinking))
+        throw new Error("该模型不支持所选思考强度。");
+      if (!this.runtime.prepareContext)
+        throw new Error("当前运行时不支持上下文压缩。");
+      const controller = new AbortController();
+      const request: NonNullable<
+        StoredWorkspace["mergePreparationRequests"]
+      >[number] = {
+        requestId: input.requestId,
+        parentId: input.parentId,
+        contextParentsRequest: requestedParents.map((parent, i) => ({
+          ...parent,
+          revision: contextParents[i].revision,
+        })),
+        contextParents: structuredClone(contextParents),
+        config: { ...input.config },
+        status: "compacting",
+      };
+      const job = {
+        workspaceId,
+        sourceIds: [...context.ids],
+        controller,
+        promise: Promise.resolve(undefined as unknown as ContextCheckpoint),
+      };
+      this.mergeContextJobs.set(key, job);
+      (workspace.mergePreparationRequests ??= []).push(request);
+      this.store.touch(workspace);
+      try {
+        await this.store.save();
+      } catch (error) {
+        request.status = "failed";
+        request.error = safeError(error);
+        this.mergeContextJobs.delete(key);
+        this.store.touch(workspace);
+        throw error;
+      }
+      const assertCurrent = () => {
+        controller.signal.throwIfAborted();
+        const current = buildContext(workspace, input.parentId, contextParents);
+        const parents = this.resolveContextParents(
+          workspace,
+          input.parentId,
+          request.contextParentsRequest,
+          {},
+        );
+        if (
+          this.closed ||
+          !this.store.data.workspaces.includes(workspace) ||
+          !contextParentsMatch(contextParents, parents) ||
+          JSON.stringify(current.sources) !== JSON.stringify(context.sources) ||
+          JSON.stringify(current.messages) !== JSON.stringify(context.messages)
+        )
+          throw new NodeMutationConflict(
+            "接入分支已改变，未采用过期的整体摘要。",
+          );
+      };
+      const parent = workspace.nodes.find(
+        (node) => node.id === input.parentId,
+      )!;
+      const draft: StoredNode = {
+        ...parent,
+        id: `merge-preparation:${input.requestId}`,
+        parentId: input.parentId,
+        contextParents,
+        contextMode: undefined,
+        effectiveContextMode: undefined,
+      };
+      job.promise = (async () => {
+        try {
+          assertCurrent();
+          const prepared = await this.runtime.prepareContext!(
+            request.config,
+            structuredClone(context.messages),
+            controller.signal,
+            {
+              autoCompact: true,
+              mergeContext: true,
+              sources: context.sources,
+              checkpoints: contextCheckpoints(workspace, context.ids),
+              branchCheckpoints: this.branchCheckpoints(
+                workspace,
+                draft,
+                context.ids,
+              ),
+              contextBranches: this.contextBranches(workspace, draft),
+            },
+          );
+          assertCurrent();
+          if (
+            !prepared ||
+            prepared.messageCount !== context.messages.length ||
+            !checkpointMatches(prepared, context.messages, context.sources)
+          )
+            throw new Error("整体摘要来源校验失败，未保存压缩结果。");
+          const checkpoint: ContextCheckpoint = {
+            ...structuredClone(prepared),
+            purpose: "merge",
+          };
+          request.checkpoint = checkpoint;
+          request.status = "completed";
+          this.store.touch(workspace);
+          await this.store.save();
+          assertCurrent();
+          return checkpoint;
+        } catch (error) {
+          request.status = controller.signal.aborted ? "cancelled" : "failed";
+          request.checkpoint = undefined;
+          request.error = controller.signal.aborted
+            ? "整体压缩已停止，原始分支保持完整。"
+            : safeError(error);
+          this.store.touch(workspace);
+          await this.store.save().catch(() => {});
+          throw error;
+        } finally {
+          this.mergeContextJobs.delete(key);
+        }
+      })();
+      void job.promise.catch(() => {});
+      return { promise: job.promise };
+    });
+    return task.promise;
+  }
+
+  async cancelMergeContext(workspaceId: string, requestId: string) {
+    return this.serializeMutation(workspaceId, async () => {
+      const workspace = this.store.workspace(workspaceId);
+      const request = workspace.mergePreparationRequests?.find(
+        (item) => item.requestId === requestId,
+      );
+      if (
+        !request &&
+        (this.findRequest(workspace, requestId) ||
+          this.preparationRequestExists(workspace, requestId))
+      ) {
+        if (workspace.cancelledMergePreparationIds?.includes(requestId)) return;
+        throw new NodeMutationConflict(
+          "请求 ID 属于其他任务，不能停止整体压缩。",
+        );
+      }
+      if (!workspace.cancelledMergePreparationIds?.includes(requestId))
+        (workspace.cancelledMergePreparationIds ??= []).push(requestId);
+      this.mergeContextJobs
+        .get(`${workspaceId}:${requestId}`)
+        ?.controller.abort(new Error("整体压缩已停止。"));
+      if (request) {
+        request.status = "cancelled";
+        request.checkpoint = undefined;
+        request.error = "整体压缩已停止，原始分支保持完整。";
+      }
+      this.store.touch(workspace);
+      await this.store.save();
+    });
   }
 
   /** Manual preparation is an explicit request, not a mutation of the completed answer. */
@@ -426,7 +969,7 @@ export class Scheduler {
         throw new NodeMutationConflict(
           "此路径正在生成摘要，请等待或停止后再试。",
         );
-      if (this.contextJobs.size >= 3)
+      if (this.contextJobs.size + this.mergeContextJobs.size >= 3)
         throw new Error("已有 3 条路径正在生成摘要，请稍后重试。");
       const model = this.runtime
         .models()
@@ -496,6 +1039,17 @@ export class Scheduler {
             controller.signal,
             {
               autoCompact: true,
+              mergeContext: context.ids.some(
+                (id) =>
+                  (workspace.nodes.find((item) => item.id === id)
+                    ?.contextParents?.length ?? 0) > 1,
+              ),
+              branchCheckpoints: this.branchCheckpoints(
+                workspace,
+                node,
+                context.ids,
+              ),
+              contextBranches: this.contextBranches(workspace, node),
               sources: context.sources,
               checkpoints: contextCheckpoints(workspace, context.ids),
               onState: async (state) => {
@@ -595,7 +1149,10 @@ export class Scheduler {
     while (changed) {
       changed = false;
       for (const node of workspace.nodes) {
-        if (node.parentId && ids.has(node.parentId) && !ids.has(node.id)) {
+        if (
+          directParentIds(node).some((id) => ids.has(id)) &&
+          !ids.has(node.id)
+        ) {
           ids.add(node.id);
           changed = true;
         }
@@ -634,7 +1191,12 @@ export class Scheduler {
           item.status === "running" ||
           item.status === "queued" ||
           this.active.has(item.id) ||
-          this.contextJobs.has(item.id),
+          this.contextJobs.has(item.id) ||
+          [...this.mergeContextJobs.values()].some(
+            (job) =>
+              job.workspaceId === workspace.id &&
+              job.sourceIds.includes(item.id),
+          ),
       )
     )
       throw new NodeMutationConflict(
@@ -740,8 +1302,16 @@ export class Scheduler {
         this.assertDirectoryAvailable(
           this.store.effectiveWorkingDirectory(workspace),
         );
+      // Re-select current revisions when intentionally regenerating a stale answer.
+      const contextParents = this.resolveContextParents(
+        workspace,
+        node.parentId!,
+        node.contextParents,
+        {},
+        true,
+      );
       // Build from the parent; the old question, answer and transcript are never replayed.
-      const context = buildContext(workspace, node.parentId!);
+      const context = buildContext(workspace, node.parentId!, contextParents);
       const contextReferences = resolveContextReferences(
         workspace,
         references,
@@ -752,11 +1322,13 @@ export class Scheduler {
         workspace.nodes.find((item) => item.id === node.parentId)!,
         input,
         node,
+        contextParents,
       );
       this.validateRequestedContext(
         workspace,
         selection.effectiveContextCheckpointId,
         context,
+        node.compactions,
       );
       const { previousRuns = [], ...previous } = node;
       const archived: StoredRun = {
@@ -773,6 +1345,7 @@ export class Scheduler {
       const regenerated: StoredNode = {
         id: node.id,
         parentId: node.parentId,
+        contextParents,
         position: { ...node.position },
         color: node.color,
         createdAt: node.createdAt,
@@ -788,6 +1361,12 @@ export class Scheduler {
         contextIds: context.ids,
         contextSources: context.sources,
         ...selection,
+        compactions: structuredClone(
+          node.compactions?.filter(
+            (checkpoint) =>
+              checkpoint.id === selection.effectiveContextCheckpointId,
+          ),
+        ),
         preparedCompactions: structuredClone(preparedContextCheckpoints(node)),
         contextSelectionRequest: {
           contextCheckpointId: input.contextCheckpointId,
@@ -885,17 +1464,26 @@ export class Scheduler {
         );
       if (!model.thinkingLevels.includes(node.config.thinking))
         throw new Error("该模型不支持所选思考强度。");
-      const context = buildContext(workspace, node.parentId!);
+      const contextParents = this.resolveContextParents(
+        workspace,
+        node.parentId!,
+        node.contextParents,
+        {},
+        true,
+      );
+      const context = buildContext(workspace, node.parentId!, contextParents);
       const selection = this.contextSelection(
         workspace,
         workspace.nodes.find((item) => item.id === node.parentId)!,
         {},
         node,
+        contextParents,
       );
       this.validateRequestedContext(
         workspace,
         selection.effectiveContextCheckpointId,
         context,
+        node.compactions,
       );
 
       const directory = node.execution?.workingDirectory;
@@ -1060,6 +1648,7 @@ export class Scheduler {
         const retried: StoredNode = {
           id: node.id,
           parentId: node.parentId,
+          contextParents,
           position: { ...node.position },
           color: node.color,
           createdAt: node.createdAt,
@@ -1075,6 +1664,12 @@ export class Scheduler {
           contextIds: context.ids,
           contextSources: context.sources,
           ...selection,
+          compactions: structuredClone(
+            node.compactions?.filter(
+              (checkpoint) =>
+                checkpoint.id === selection.effectiveContextCheckpointId,
+            ),
+          ),
           preparedCompactions: structuredClone(
             preparedContextCheckpoints(node),
           ),
@@ -1237,7 +1832,10 @@ export class Scheduler {
               ),
             ),
         ) ||
-        this.queue.some((job) => job.workspace.id === workspaceId)
+        this.queue.some((job) => job.workspace.id === workspaceId) ||
+        [...this.mergeContextJobs.values()].some(
+          (job) => job.workspaceId === workspaceId,
+        )
       )
         throw new NodeMutationConflict(
           "此探索仍有任务运行、排队或收尾，请等待结束后再删除。",
@@ -1493,7 +2091,10 @@ export class Scheduler {
   shutdown() {
     this.closed = true;
     this.maintenanceController.abort();
-    for (const job of this.contextJobs.values())
+    for (const job of [
+      ...this.contextJobs.values(),
+      ...this.mergeContextJobs.values(),
+    ])
       job.controller.abort(new Error("服务关闭中断了摘要生成。"));
     for (const workspace of this.store.data.workspaces) {
       for (const node of workspace.nodes) {
@@ -2150,7 +2751,20 @@ export class Scheduler {
         if (current !== node.execution.workingDirectory)
           throw new Error("工作目录的实际路径已改变，请重新选择工作目录。");
       }
-      const context = buildContext(workspace, node.parentId!);
+      for (const parent of node.contextParents ?? []) {
+        const source = workspace.nodes.find(
+          (item) => item.id === parent.nodeId,
+        );
+        if (!source || (source.revision ?? 0) !== parent.revision)
+          throw new NodeMutationConflict(
+            "融合来源已更新，请重新生成当前卡片。",
+          );
+      }
+      const context = buildContext(
+        workspace,
+        node.parentId!,
+        node.contextParents,
+      );
       const sources = [
         ...context.sources,
         { nodeId: node.id, revision: node.revision ?? 0, messageCount: 0 },
@@ -2160,8 +2774,10 @@ export class Scheduler {
         if (
           node.status !== "running" ||
           !workspace.nodes.includes(node) ||
-          JSON.stringify(buildContext(workspace, node.parentId!).sources) !==
-            JSON.stringify(context.sources)
+          JSON.stringify(
+            buildContext(workspace, node.parentId!, node.contextParents)
+              .sources,
+          ) !== JSON.stringify(context.sources)
         )
           throw new NodeMutationConflict(
             "运行的上下文来源已改变，未继续调用模型。",
@@ -2220,13 +2836,30 @@ export class Scheduler {
             }
           : undefined,
         {
+          mergeContext:
+            (node.effectiveContextMode ?? node.contextMode) !== "raw" &&
+            ((node.contextParents?.length ?? 0) > 1 ||
+              context.ids.some(
+                (id) =>
+                  (workspace.nodes.find((item) => item.id === id)
+                    ?.contextParents?.length ?? 0) > 1,
+              )),
+          branchCheckpoints: this.branchCheckpoints(
+            workspace,
+            node,
+            context.ids,
+          ),
+          contextBranches: this.contextBranches(workspace, node),
           attachments: node.attachmentData,
           contextReferenceCount: node.contextReferences?.length,
           displayPrompt: node.prompt,
           autoCompact:
             node.contextAutoCompact ?? workspace.autoCompact !== false,
           sources,
-          checkpoints: contextCheckpoints(workspace, context.ids),
+          checkpoints: [
+            ...contextCheckpoints(workspace, context.ids),
+            ...(node.compactions ?? []),
+          ],
           requestedCheckpointId:
             node.effectiveContextCheckpointId ??
             node.requestedContextCheckpointId,

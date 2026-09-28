@@ -9,10 +9,15 @@ import {
   Panel,
   applyNodeChanges,
   useReactFlow,
+  useStore,
+  useStoreApi,
+  ViewportPortal,
+  getBezierPath,
   type Node,
   type NodeProps,
   type NodeChange,
   type Edge,
+  type Connection,
 } from "@xyflow/react";
 import {
   ArrowUpRight,
@@ -35,6 +40,7 @@ import {
   RefreshCw,
   Layers,
   Paperclip,
+  AtSign,
 } from "lucide-react";
 import {
   ancestorPath,
@@ -44,6 +50,7 @@ import {
   type Workspace,
   type ModelOption,
   type RunConfig,
+  type ContextParent,
 } from "../shared/types";
 import { readPreference, savePreference } from "./api";
 import { responseText } from "../shared/response-parts";
@@ -56,9 +63,14 @@ import { ContextUsageRing } from "./ContextUsageRing";
 import { formatContextWindow } from "./model-context";
 import { GitHistoryPanel } from "./GitHistoryPanel";
 import { BranchDraftCard, type BranchDraftNode } from "./BranchDraftCard";
+import { reconcileGraphNodes } from "./graph-nodes";
+import { buildReferenceEdges } from "./reference-edges";
 import {
   branchDraftHeight,
   branchDraftPosition,
+  draftContextParents,
+  draftConnectionParent,
+  canConnectDraftParent,
   type CanvasBranchDraft,
 } from "./branch-draft";
 import {
@@ -89,6 +101,8 @@ type CardData = {
   retry: (id: string) => void;
   retryBusy: boolean;
   retryDisabledReason: string;
+  connectable: boolean;
+  compressedEntry: boolean;
 };
 type TurnGraphNode = Node<CardData, "turn">;
 type CompressionGraphNode = Node<
@@ -101,6 +115,7 @@ type CompressionGraphNode = Node<
     branchDisabled: boolean;
     branch: (parentId: string, checkpointId: string) => void;
     show: (parentId: string, checkpointId: string) => void;
+    connectable: boolean;
   },
   "compression"
 >;
@@ -142,9 +157,17 @@ const TurnCard = memo(function TurnCard({ data }: NodeProps<TurnGraphNode>) {
   )?.waitingFor;
   return (
     <div
-      className={`turn-card ${root ? "root-card" : ""} color-${turn.color} ${active ? "active" : ""} ${inPath ? "in-path" : ""} ${turn.requestedContextCheckpointId ? "compression-entry-card" : ""} status-${turn.status}`}
+      className={`turn-card ${root ? "root-card" : ""} color-${turn.color} ${active ? "active" : ""} ${inPath ? "in-path" : ""} ${data.compressedEntry ? "compression-entry-card" : ""} status-${turn.status}`}
     >
-      {!root && <Handle type="target" position={Position.Left} />}
+      {!root && (
+        <Handle
+          type="target"
+          position={Position.Left}
+          isConnectable={false}
+          isConnectableStart={false}
+          isConnectableEnd={false}
+        />
+      )}
       <div className="card-topline">
         <span className="card-kind">
           {root ? <Sparkles size={13} /> : <span className="branch-dot" />}
@@ -358,7 +381,30 @@ const TurnCard = memo(function TurnCard({ data }: NodeProps<TurnGraphNode>) {
           />
         </div>
       </div>
-      <Handle type="source" position={Position.Right} />
+      <Handle
+        type="source"
+        position={Position.Right}
+        isConnectable={data.connectable}
+        isConnectableStart={false}
+        isConnectableEnd={data.connectable}
+        aria-label={`接入「${turn.prompt}」的分支`}
+      />
+      <Handle
+        id="reference-source"
+        type="source"
+        position={Position.Bottom}
+        className="reference-handle"
+        isConnectable={false}
+        aria-hidden="true"
+      />
+      <Handle
+        id="reference-target"
+        type="target"
+        position={Position.Top}
+        className="reference-handle"
+        isConnectable={false}
+        aria-hidden="true"
+      />
       {canBranchFrom(turn) && (
         <button
           type="button"
@@ -393,14 +439,20 @@ const CompressionNode = memo(function CompressionNode({
   const { entry } = data;
   return (
     <div
-      className={`compression-node ${data.active ? "active" : ""} ${data.inPath ? "in-path" : ""} ${entry.usable ? "" : "stale"}`}
+      className={`compression-node ${data.active ? "active" : ""} ${data.inPath ? "in-path" : ""} ${entry.usable || entry.kind === "merge" ? "" : "stale"}`}
     >
-      <Handle type="target" position={Position.Left} />
+      <Handle
+        type="target"
+        position={Position.Left}
+        isConnectable={false}
+        isConnectableStart={false}
+        isConnectableEnd={false}
+      />
       <button
         type="button"
         className="compression-node-body nodrag nopan"
-        aria-label={`查看「${data.parentTitle}」的压缩摘要 ${data.ordinal}`}
-        title={`压缩摘要 ${data.ordinal} · ${new Date(entry.checkpoint.createdAt).toLocaleString("zh-CN")}\n${entry.checkpoint.tokensBefore.toLocaleString("zh-CN")} → ${entry.checkpoint.tokensAfter.toLocaleString("zh-CN")} tokens\n${entry.usable ? "点击查看摘要，悬停右侧连接点可新增分支" : "原路径已更新，可查看摘要，请重新压缩后继续"}`}
+        aria-label={`查看「${data.parentTitle}」的${entry.kind === "merge" ? "融合压缩" : "压缩摘要"} ${data.ordinal}`}
+        title={`${entry.kind === "merge" ? "融合压缩" : "压缩摘要"} ${data.ordinal} · ${new Date(entry.checkpoint.createdAt).toLocaleString("zh-CN")}\n${entry.checkpoint.tokensBefore.toLocaleString("zh-CN")} → ${entry.checkpoint.tokensAfter.toLocaleString("zh-CN")} tokens\n${entry.kind === "merge" ? "多个分支已整体压缩，回答使用此摘要。点击查看摘要。" : entry.usable ? "点击查看摘要，悬停右侧连接点可新增分支" : "原路径已更新，可查看摘要，请重新压缩后继续"}`}
         onPointerDown={(event) => event.stopPropagation()}
         onKeyDown={(event) => event.stopPropagation()}
         onClick={(event) => {
@@ -410,30 +462,39 @@ const CompressionNode = memo(function CompressionNode({
       >
         <Layers size={20} aria-hidden="true" />
       </button>
-      <Handle type="source" position={Position.Right} />
-      <button
-        type="button"
-        className="card-branch-button compression-node-branch nodrag nopan"
-        disabled={data.branchDisabled || !entry.usable}
-        aria-label={`从「${data.parentTitle}」的压缩摘要 ${data.ordinal} 创建分支`}
-        title={
-          !entry.usable
-            ? "原路径已更新，请重新压缩"
-            : data.branchDisabled
-              ? "问题正在提交，请稍候"
-              : "使用此压缩摘要增加新问题"
-        }
-        onPointerDown={(event) => event.stopPropagation()}
-        onKeyDown={(event) => event.stopPropagation()}
-        onClick={(event) => {
-          event.stopPropagation();
-          data.branch(entry.parentId, entry.checkpoint.id);
-        }}
-      >
-        <span className="card-branch-circle">
-          <Plus size={17} aria-hidden="true" />
-        </span>
-      </button>
+      <Handle
+        type="source"
+        position={Position.Right}
+        isConnectable={data.connectable}
+        isConnectableStart={false}
+        isConnectableEnd={data.connectable}
+        aria-label={`接入「${data.parentTitle}」的压缩摘要 ${data.ordinal}`}
+      />
+      {entry.kind !== "merge" && (
+        <button
+          type="button"
+          className="card-branch-button compression-node-branch nodrag nopan"
+          disabled={data.branchDisabled || !entry.usable}
+          aria-label={`从「${data.parentTitle}」的压缩摘要 ${data.ordinal} 创建分支`}
+          title={
+            !entry.usable
+              ? "原路径已更新，请重新压缩"
+              : data.branchDisabled
+                ? "问题正在提交，请稍候"
+                : "使用此压缩摘要增加新问题"
+          }
+          onPointerDown={(event) => event.stopPropagation()}
+          onKeyDown={(event) => event.stopPropagation()}
+          onClick={(event) => {
+            event.stopPropagation();
+            data.branch(entry.parentId, entry.checkpoint.id);
+          }}
+        >
+          <span className="card-branch-circle">
+            <Plus size={17} aria-hidden="true" />
+          </span>
+        </button>
+      )}
     </div>
   );
 });
@@ -442,6 +503,62 @@ const nodeTypes = {
   branchDraft: BranchDraftCard,
   compression: CompressionNode,
 };
+
+/** React Flow supports two-click connections; add a line that follows the pointer. */
+function DraftClickConnection({
+  draftId,
+  color,
+}: {
+  draftId: string;
+  color: string;
+}) {
+  const flow = useReactFlow();
+  const started = useStore(
+    (state) =>
+      state.connectionClickStartHandle?.nodeId === draftId &&
+      !state.connection.inProgress,
+  );
+  const [pointer, setPointer] = useState<{ x: number; y: number } | null>(null);
+  useEffect(() => {
+    setPointer(null);
+    if (!started) return;
+    const move = (event: PointerEvent) =>
+      setPointer(
+        flow.screenToFlowPosition({ x: event.clientX, y: event.clientY }),
+      );
+    window.addEventListener("pointermove", move);
+    return () => window.removeEventListener("pointermove", move);
+  }, [started, flow]);
+  const draft = flow.getNode(draftId);
+  if (!started || !pointer || !draft) return null;
+  const [path] = getBezierPath({
+    sourceX: draft.position.x,
+    sourceY:
+      draft.position.y + (draft.measured?.height ?? draft.height ?? 374) / 2,
+    sourcePosition: Position.Left,
+    targetX: pointer.x,
+    targetY: pointer.y,
+    targetPosition: Position.Right,
+  });
+  return (
+    <ViewportPortal>
+      <svg
+        className="draft-click-connection"
+        width="1"
+        height="1"
+        aria-hidden="true"
+      >
+        <path
+          d={path}
+          fill="none"
+          stroke={color}
+          strokeWidth={1.8}
+          strokeDasharray="5 5"
+        />
+      </svg>
+    </ViewportPortal>
+  );
+}
 
 interface Props {
   colorMode: "light" | "dark";
@@ -457,6 +574,8 @@ interface Props {
   branchDisabled: boolean;
   draft: CanvasBranchDraft | null;
   draftBusy: boolean;
+  draftCompacting: boolean;
+  draftCompactBlockedReason?: string;
   draftBlockedReason: string;
   onDraftTextChange: (text: string) => void;
   onDraftFilesChange: (files: File[]) => void;
@@ -464,6 +583,10 @@ interface Props {
   onDraftConfigChange: (config: RunConfig) => void;
   onDraftSubmit: () => void;
   onDraftCancel: () => void;
+  onDraftCompact: () => void;
+  onDraftCompactCancel: () => void;
+  onDraftConnect: (parent: ContextParent) => void;
+  onDraftDisconnect: (nodeId: string) => void;
   onEdit: (id: string) => void;
   onDelete: (id: string) => void;
   nodeActionsDisabled: boolean;
@@ -491,6 +614,8 @@ export function Graph({
   branchDisabled,
   draft,
   draftBusy,
+  draftCompacting,
+  draftCompactBlockedReason,
   draftBlockedReason,
   onDraftTextChange,
   onDraftFilesChange,
@@ -498,6 +623,10 @@ export function Graph({
   onDraftConfigChange,
   onDraftSubmit,
   onDraftCancel,
+  onDraftCompact,
+  onDraftCompactCancel,
+  onDraftConnect,
+  onDraftDisconnect,
   onEdit,
   onDelete,
   nodeActionsDisabled,
@@ -511,12 +640,61 @@ export function Graph({
   focusVersion,
 }: Props) {
   const flow = useReactFlow<GraphNode>();
+  const flowStore = useStoreApi();
+  const connecting = useStore((state) =>
+    Boolean(state.connectionClickStartHandle || state.connection.inProgress),
+  );
   const [zoom, setZoom] = useState(1);
   const [showMap, setShowMap] = useState(true);
+  const [showReferences, setShowReferences] = useState(
+    () => readPreference("show-reference-edges") === "true",
+  );
+  const [expandedDraftSummaryId, setExpandedDraftSummaryId] =
+    useState<string>();
+  const draftSummaryOpen = Boolean(
+    draft?.mergedCheckpoint &&
+      draft.mergedCheckpoint.id === expandedDraftSummaryId,
+  );
   const compressionNodes = useMemo(
     () => buildCompressionNodes(workspace.nodes),
     [workspace.nodes],
   );
+  const draftParents = useMemo(
+    () => (draft ? draftContextParents(draft) : []),
+    [draft],
+  );
+  const connectionParent = (sourceId: string) => {
+    if (!draft || draftBusy || sourceId === draft.id) return;
+    const parent = draftConnectionParent(
+      sourceId,
+      workspace.nodes,
+      compressionNodes,
+    );
+    return parent && canConnectDraftParent(draftParents, parent)
+      ? parent
+      : undefined;
+  };
+  const validConnection = (connection: Connection | Edge) =>
+    connection.target === draft?.id &&
+    Boolean(connectionParent(connection.source));
+  const cancelConnection = () => {
+    flowStore.setState({ connectionClickStartHandle: null });
+    flowStore.getState().cancelConnection();
+  };
+  useEffect(() => {
+    const cancel = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      flowStore.setState({ connectionClickStartHandle: null });
+      flowStore.getState().cancelConnection();
+    };
+    // Draft inputs stop bubbling keyboard events; cancellation still works
+    // while the text field keeps focus during a two-click connection.
+    window.addEventListener("keydown", cancel, true);
+    return () => window.removeEventListener("keydown", cancel, true);
+  }, [flowStore]);
+  useEffect(() => {
+    cancelConnection();
+  }, [draft?.id, draftBusy]);
   const draftCompression = draft?.contextCheckpointId
     ? compressionNodes.find(
         (node) =>
@@ -536,6 +714,8 @@ export function Graph({
             draftCompression?.position,
             draft.files.length,
             draft.referenceNodeIds.length,
+            draftParents.length,
+            draftSummaryOpen,
           )
         : null,
     [
@@ -544,6 +724,8 @@ export function Graph({
       draft?.contextCheckpointId,
       draft?.files.length,
       draft?.referenceNodeIds.length,
+      draftParents.length,
+      draftSummaryOpen,
       draftParent?.position,
       draftCompression?.position,
     ],
@@ -558,15 +740,11 @@ export function Graph({
     [workspace.nodes, selectedId],
   );
   const blockedNodeActions = useMemo(() => {
-    const byId = new Map(workspace.nodes.map((node) => [node.id, node]));
     const blocked = new Set<string>();
     for (const turn of workspace.nodes) {
       if (turn.status !== "running" && turn.status !== "queued") continue;
-      let node: TurnNode | undefined = turn;
-      while (node && !blocked.has(node.id)) {
+      for (const node of ancestorPath(workspace.nodes, turn.id))
         blocked.add(node.id);
-        node = node.parentId ? byId.get(node.parentId) : undefined;
-      }
     }
     return blocked;
   }, [workspace.nodes]);
@@ -587,6 +765,16 @@ export function Graph({
             showContext: onShowContext,
             branch: onBranch,
             branchDisabled,
+            connectable: Boolean(connectionParent(turn.id)),
+            compressedEntry: Boolean(
+              turn.requestedContextCheckpointId ||
+                turn.contextParents?.some(
+                  (parent) => parent.contextCheckpointId,
+                ) ||
+                compressionNodes.some(
+                  (entry) => entry.targetNodeId === turn.id,
+                ),
+            ),
             edit: onEdit,
             delete: onDelete,
             actionsDisabled:
@@ -642,10 +830,17 @@ export function Graph({
             inPath: workspace.nodes.some(
               (node) =>
                 path.has(node.id) &&
-                node.parentId === entry.parentId &&
-                node.requestedContextCheckpointId === entry.checkpoint.id,
+                (node.id === entry.targetNodeId ||
+                  node.contextParents?.some(
+                    (parent) =>
+                      parent.nodeId === entry.parentId &&
+                      parent.contextCheckpointId === entry.checkpoint.id,
+                  ) ||
+                  (node.parentId === entry.parentId &&
+                    node.requestedContextCheckpointId === entry.checkpoint.id)),
             ),
             branchDisabled,
+            connectable: Boolean(connectionParent(entry.id)),
             branch: onBranch,
             show: onShowCompression,
           },
@@ -661,6 +856,8 @@ export function Graph({
               initialHeight: branchDraftHeight(
                 draft.files.length,
                 draft.referenceNodeIds.length,
+                draftParents.length,
+                draftSummaryOpen,
               ),
               draggable: false,
               selectable: false,
@@ -677,8 +874,19 @@ export function Graph({
                 config: draft.config,
                 models,
                 parentTitle: `${draft?.contextCheckpointId ? "压缩摘要 · " : ""}${draftParent?.prompt ?? draft.parentTitle}`,
+                parents: draftParents.map((parent) => ({
+                  nodeId: parent.nodeId,
+                  title:
+                    workspace.nodes.find((node) => node.id === parent.nodeId)
+                      ?.prompt ?? "已移除的分支",
+                  compressed: Boolean(parent.contextCheckpointId),
+                })),
                 color: draft.color,
                 busy: draftBusy,
+                compacting: draftCompacting,
+                compactBlockedReason: draftCompactBlockedReason,
+                mergedCheckpoint: draft.mergedCheckpoint,
+                mergedSummaryOpen: draftSummaryOpen,
                 blockedReason: draftBlockedReason,
                 error: draft.error,
                 focusVersion: draft.focusVersion,
@@ -688,6 +896,14 @@ export function Graph({
                 onConfigChange: onDraftConfigChange,
                 onSubmit: onDraftSubmit,
                 onCancel: onDraftCancel,
+                onCompact: onDraftCompact,
+                onCompactCancel: onDraftCompactCancel,
+                onMergedSummaryToggle: (open: boolean) =>
+                  setExpandedDraftSummaryId(
+                    open ? draft.mergedCheckpoint?.id : undefined,
+                  ),
+                onDisconnect: onDraftDisconnect,
+                onShowParentContext: onShowContext,
               },
             },
           ]
@@ -718,9 +934,13 @@ export function Graph({
       onShowContext,
       onShowCompression,
       draft,
+      draftParents,
       draftPosition,
       draftParent?.prompt,
       draftBusy,
+      draftCompacting,
+      draftCompactBlockedReason,
+      draftSummaryOpen,
       draftBlockedReason,
       onDraftTextChange,
       onDraftFilesChange,
@@ -728,96 +948,120 @@ export function Graph({
       onDraftConfigChange,
       onDraftSubmit,
       onDraftCancel,
+      onDraftCompact,
+      onDraftCompactCancel,
+      onDraftDisconnect,
     ],
   );
   const [nodes, setNodes] = useState<GraphNode[]>(derivedNodes);
+  const referenceEdges = useMemo(
+    () => (showReferences ? buildReferenceEdges(workspace.nodes, draft) : []),
+    [showReferences, workspace.nodes, draft?.id, draft?.referenceNodeIds],
+  );
   useEffect(
     () =>
       setNodes((current) =>
-        derivedNodes.map((node) => {
-          const dragging = current.find(
-            (item) => item.id === node.id && item.dragging,
-          );
-          return dragging
-            ? { ...node, position: dragging.position, dragging: true }
-            : node;
-        }),
+        reconcileGraphNodes(current, derivedNodes),
       ),
     [derivedNodes],
   );
-  const edges = useMemo<Edge[]>(
-    () => [
-      ...workspace.nodes
-        .filter((node) => node.parentId)
-        .map((node) => ({
-          id: `${node.parentId}-${node.id}`,
-          source:
-            node.requestedContextCheckpointId &&
-            compressionNodes.some(
-              (entry) =>
-                entry.parentId === node.parentId &&
-                entry.checkpoint.id === node.requestedContextCheckpointId,
-            )
-              ? compressionNodeId(
-                  node.parentId!,
-                  node.requestedContextCheckpointId,
-                )
-              : node.parentId!,
+  const edges = useMemo<Edge[]>(() => {
+    const sourceId = (parent: ContextParent) => {
+      const entry = parent.contextCheckpointId
+        ? compressionNodes.find(
+            (item) =>
+              item.parentId === parent.nodeId &&
+              item.checkpoint.id === parent.contextCheckpointId &&
+              item.kind !== "merge",
+          )
+        : undefined;
+      return entry?.id ?? parent.nodeId;
+    };
+    return [
+      ...referenceEdges,
+      ...workspace.nodes.flatMap((node) => {
+        const merge = compressionNodes.find(
+          (entry) => entry.targetNodeId === node.id,
+        );
+        const sources = merge
+          ? [merge.id]
+          : (
+              node.contextParents ??
+              (node.parentId
+                ? [
+                    {
+                      nodeId: node.parentId,
+                      contextCheckpointId: node.requestedContextCheckpointId,
+                    },
+                  ]
+                : [])
+            ).map(sourceId);
+        return sources.map((source) => ({
+          id: `${source}-${node.id}`,
+          source,
           target: node.id,
           type: "default",
           animated: node.status === "running",
           style: {
-            stroke: path.has(node.id)
-              ? colors[node.color]
-              : "var(--graph-edge)",
+            stroke: merge
+              ? "var(--compression-accent)"
+              : path.has(node.id)
+                ? colors[node.color]
+                : "var(--graph-edge)",
             strokeWidth: path.has(node.id) ? 1.8 : 1.4,
           },
-        })),
-      ...compressionNodes.map((entry) => ({
-        id: `${entry.parentId}-${entry.id}`,
-        source: entry.parentId,
-        target: entry.id,
-        type: "default",
-        style: {
-          stroke: "var(--compression-accent)",
-          strokeWidth: entry.id === selectedCompressionId ? 2 : 1.5,
-          opacity: entry.usable ? 0.9 : 0.5,
-        },
-      })),
-      ...(draft && draftParent
-        ? [
-            {
-              id: `${draft.parentId}-${draft.id}`,
-              source: draftCompression?.id ?? draft.parentId,
-              target: draft.id,
-              type: "default",
-              style: {
-                stroke: colors[draft.color],
-                strokeWidth: 1.8,
-                strokeDasharray: "5 5",
-              },
+        }));
+      }),
+      ...compressionNodes.flatMap((entry) =>
+        (entry.contextParents ?? [{ nodeId: entry.parentId }]).map(
+          (parent) => ({
+            id: `${sourceId(parent)}-${entry.id}`,
+            source: sourceId(parent),
+            target: entry.id,
+            type: "default",
+            style: {
+              stroke: "var(--compression-accent)",
+              strokeWidth: entry.id === selectedCompressionId ? 2 : 1.5,
+              opacity: entry.usable || entry.kind === "merge" ? 0.9 : 0.5,
             },
-          ]
+          }),
+        ),
+      ),
+      ...(draft
+        ? draftParents.map((parent) => ({
+            id: `${sourceId(parent)}-${draft.id}`,
+            source: sourceId(parent),
+            target: draft.id,
+            type: "default",
+            style: {
+              stroke: colors[draft.color],
+              strokeWidth: 1.8,
+              strokeDasharray: "5 5",
+            },
+          }))
         : []),
-    ],
-    [
-      workspace.nodes,
-      compressionNodes,
-      selectedCompressionId,
-      path,
-      draft?.id,
-      draft?.parentId,
-      draft?.color,
-      draftParent?.id,
-      draftCompression?.id,
-    ],
-  );
+    ];
+  }, [
+    referenceEdges,
+    workspace.nodes,
+    compressionNodes,
+    selectedCompressionId,
+    path,
+    draft?.id,
+    draft?.color,
+    draftParents,
+  ]);
   useEffect(() => {
     if (!draft || !draftPosition) return;
     void flow.setCenter(
       draftPosition.x + 160,
       draftPosition.y +
-        branchDraftHeight(draft.files.length, draft.referenceNodeIds.length) /
+        branchDraftHeight(
+          draft.files.length,
+          draft.referenceNodeIds.length,
+          draftParents.length,
+          draftSummaryOpen,
+        ) /
           2,
       {
         zoom: Math.max(0.8, Math.min(1, flow.getZoom())),
@@ -831,6 +1075,8 @@ export function Graph({
     draft?.focusVersion,
     draft?.files.length,
     draft?.referenceNodeIds.length,
+    draftParents.length,
+    draftSummaryOpen,
     draftPosition?.x,
     draftPosition?.y,
   ]);
@@ -862,7 +1108,9 @@ export function Graph({
     );
   };
   return (
-    <div className={`graph-container${draft ? " has-branch-draft" : ""}`}>
+    <div
+      className={`graph-container${draft ? " has-branch-draft" : ""}${draft && connecting ? " connecting-draft" : ""}`}
+    >
       <ReactFlow<GraphNode>
         colorMode={colorMode}
         nodes={nodes}
@@ -904,7 +1152,20 @@ export function Graph({
         fitViewOptions={{ padding: 0.13, maxZoom: 0.9 }}
         minZoom={0.2}
         maxZoom={1.5}
-        nodesConnectable={false}
+        nodesConnectable={Boolean(draft && !draftBusy)}
+        connectOnClick
+        isValidConnection={validConnection}
+        onConnect={(connection) => {
+          if (!validConnection(connection)) return;
+          const parent = connectionParent(connection.source);
+          if (parent) onDraftConnect(parent);
+        }}
+        onPaneClick={cancelConnection}
+        connectionLineStyle={{
+          stroke: draft ? colors[draft.color] : "var(--graph-edge)",
+          strokeWidth: 1.8,
+          strokeDasharray: "5 5",
+        }}
         edgesReconnectable={false}
         deleteKeyCode={null}
         selectionKeyCode={null}
@@ -912,6 +1173,12 @@ export function Graph({
         zoomOnDoubleClick={false}
         proOptions={{ hideAttribution: true }}
       >
+        {draft && (
+          <DraftClickConnection
+            draftId={draft.id}
+            color={colors[draft.color]}
+          />
+        )}
         <Background
           variant={BackgroundVariant.Dots}
           gap={22}
@@ -997,9 +1264,34 @@ export function Graph({
           >
             <LayoutGrid size={15} />
           </button>
+          <i />
+          <button
+            type="button"
+            role="switch"
+            aria-label="引用连线"
+            aria-checked={showReferences}
+            title={
+              showReferences
+                ? "隐藏 @ 引用连线"
+                : "显示 @ 引用连线：被引用卡片 → 使用它的卡片"
+            }
+            className={`canvas-reference-toggle${showReferences ? " control-active" : ""}`}
+            onClick={() => {
+              const next = !showReferences;
+              setShowReferences(next);
+              savePreference("show-reference-edges", String(next));
+            }}
+          >
+            <AtSign size={14} />
+            引用连线
+          </button>
         </Panel>
         <Panel position="bottom-right" className="canvas-hint">
-          {running ? (
+          {draft && connecting ? (
+            <>
+              <GitBranch size={13} /> 接入其他卡片的出口 · Esc 取消
+            </>
+          ) : running ? (
             <>
               <LoaderCircle size={12} className="spin" /> {running}{" "}
               条探索正在推进

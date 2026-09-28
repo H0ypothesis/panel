@@ -1,4 +1,9 @@
-import type { ContextState, ModelOption, TurnNode } from "./types.ts";
+import {
+  ancestorPath,
+  type ContextState,
+  type ModelOption,
+  type TurnNode,
+} from "./types.ts";
 
 export interface ContextUsage {
   tokens: number;
@@ -104,41 +109,17 @@ export function buildContextUsageMap(
   models: ModelOption[],
   rootModelId: string,
 ): Map<string, ContextUsage> {
-  const byId = new Map(nodes.map((node) => [node.id, node]));
   const byModel = new Map(models.map((model) => [model.id, model]));
-  const totals = new Map<string, { characters: number; stale: boolean }>();
-  const visiting = new Set<string>();
-  const accumulate = (
-    node: TurnNode,
-  ): { characters: number; stale: boolean } => {
-    const cached = totals.get(node.id);
-    if (cached) return cached;
-    if (visiting.has(node.id)) throw new Error("对话图存在循环。");
-    visiting.add(node.id);
-    const parent = node.parentId ? byId.get(node.parentId) : undefined;
-    const previous = parent
-      ? accumulate(parent)
-      : { characters: 0, stale: false };
-    const total = {
-      characters: previous.characters + visibleCharacters(node),
-      stale: previous.stale || Boolean(node.contextStale),
-    };
-    visiting.delete(node.id);
-    totals.set(node.id, total);
-    return total;
-  };
   return new Map(
     nodes.map((node) => {
-      const total = accumulate(node);
-      const rawTokens = Math.ceil(total.characters * 1.2);
+      const path = ancestorPath(nodes, node.id);
+      const rawTokens = estimatePathContextTokens(path);
+      const stale = path.some((source) => source.contextStale);
       // The root has no model run; use the current composer's model as its basis.
       const capacity = byModel.get(
         node.status === "root" ? rootModelId : node.config.model,
       )?.contextWindow;
-      return [
-        node.id,
-        contextUsageForNode(node, rawTokens, capacity, total.stale),
-      ];
+      return [node.id, contextUsageForNode(node, rawTokens, capacity, stale)];
     }),
   );
 }

@@ -6,6 +6,7 @@ import type { Message } from "@earendil-works/pi-ai";
 import type {
   AppState,
   ContextCheckpoint,
+  ContextParent,
   GitHistoryEntry,
   TurnNode,
   Workspace,
@@ -33,6 +34,8 @@ export interface StoredNode extends TurnNode {
   messages?: Message[];
   previousRuns?: StoredRun[];
   requestKind?: "retry";
+  contextParentsRequest?: ContextParent[];
+  mergedContextCheckpointId?: string;
   contextSelectionRequest?: {
     contextCheckpointId?: string;
     contextMode?: "raw";
@@ -58,6 +61,8 @@ export interface StoredRun extends TurnNode {
   messages?: Message[];
   archivedAt: number;
   requestKind?: "retry";
+  contextParentsRequest?: ContextParent[];
+  mergedContextCheckpointId?: string;
   contextSelectionRequest?: {
     contextCheckpointId?: string;
     contextMode?: "raw";
@@ -76,7 +81,19 @@ export interface PendingNodeRetry {
   restoredAt?: number;
   error?: string;
 }
+export interface MergeContextPreparationRequest {
+  requestId: string;
+  parentId: string;
+  contextParentsRequest: ContextParent[];
+  contextParents: ContextParent[];
+  config: TurnNode["config"];
+  status: "compacting" | "completed" | "failed" | "cancelled";
+  checkpoint?: ContextCheckpoint;
+  error?: string;
+}
 export interface StoredWorkspace extends Omit<Workspace, "nodes"> {
+  mergePreparationRequests?: MergeContextPreparationRequest[];
+  cancelledMergePreparationIds?: string[];
   nodes: StoredNode[];
   pendingGitSnapshots?: { historyId: string; baseline: GitBaseline }[];
   pendingNodeRetry?: PendingNodeRetry;
@@ -112,6 +129,12 @@ export class Store extends EventEmitter {
         throw new Error("不支持的数据文件格式。");
       this.data = parsed;
       for (const workspace of this.data.workspaces) {
+        for (const request of workspace.mergePreparationRequests ?? []) {
+          if (request.status === "compacting") {
+            request.status = "failed";
+            request.error = "整体压缩被服务重启中断，请重新发起。";
+          }
+        }
         for (const node of workspace.nodes) {
           for (const request of node.preparationRequests ?? []) {
             if (request.status === "compacting") {
@@ -205,6 +228,8 @@ export class Store extends EventEmitter {
       workspaces: this.data.workspaces.map(
         ({
           pendingGitSnapshots: _pending,
+          mergePreparationRequests: _mergePreparationRequests,
+          cancelledMergePreparationIds: _cancelledMergePreparationIds,
           pendingNodeRetry,
           pendingWorkspaceDeletion: _deletion,
           ...workspace
@@ -219,6 +244,8 @@ export class Store extends EventEmitter {
               previousRuns: _previousRuns,
               requestKind: _requestKind,
               contextSelectionRequest: _contextSelectionRequest,
+              contextParentsRequest: _contextParentsRequest,
+              mergedContextCheckpointId: _mergedContextCheckpointId,
               preparationRequest: _preparationRequest,
               preparationRequests: _preparationRequests,
               ...node

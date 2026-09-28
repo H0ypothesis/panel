@@ -585,3 +585,301 @@ test("manual preparation summarizes a completed short path as a whole question-a
     assert.ok(run.checkpoints[0].tokensAfter < run.checkpoints[0].tokensBefore);
   }
 });
+
+function mergedHistory() {
+  const segments = [
+    [user("ROOT")],
+    [user("COMMON QUESTION"), assistant("COMMON ANSWER")],
+    [user("A ORIGINAL QUESTION"), assistant("A ORIGINAL ANSWER")],
+    [user("A RAW TAIL QUESTION"), assistant("A RAW TAIL ANSWER")],
+    [user("B ORIGINAL QUESTION"), assistant("B ORIGINAL ANSWER")],
+    [user("B RAW TAIL QUESTION"), assistant("B RAW TAIL ANSWER")],
+    [user("CURRENT EXACT MERGE REQUEST")],
+  ];
+  const names = ["root", "common", "a", "a-tail", "b", "b-tail", "current"];
+  const sources = segments.map((messages, index) => ({
+    nodeId: names[index],
+    revision: 0,
+    messageCount: messages.length,
+  }));
+  const messages = segments.flat();
+  const checkpoint = (branch: 2 | 4): ContextCheckpoint => {
+    const branchMessages = [
+      ...segments[0],
+      ...segments[1],
+      ...segments[branch],
+    ];
+    const branchSources = [sources[0], sources[1], sources[branch]];
+    return {
+      id: `checkpoint-${names[branch]}`,
+      version: 1,
+      sourceHash: contextSourceHash(
+        branchMessages,
+        branchSources,
+        branchMessages.length,
+      ),
+      sources: branchSources,
+      messageCount: branchMessages.length,
+      summary: `${names[branch].toUpperCase()} SELECTED SUMMARY`,
+      model: "faux/model",
+      thinking: "off",
+      createdAt: 1,
+      tokensBefore: 100,
+      tokensAfter: 10,
+    };
+  };
+  return { messages, sources, checkpoints: [checkpoint(2), checkpoint(4)] };
+}
+
+test("merged paths apply every selected branch summary and retain uncovered tails", async () => {
+  const fixture = mergedHistory();
+  const original = structuredClone(fixture);
+  const run = setup(fixture.messages, {
+    sources: fixture.sources,
+    autoCompact: false,
+    mergeContext: true,
+    branchCheckpoints: fixture.checkpoints,
+  });
+  const projection = await run.compactor.prepare(fixture.messages, signal());
+  const text = JSON.stringify(projection);
+  assert.match(text, /A SELECTED SUMMARY/);
+  assert.match(text, /B SELECTED SUMMARY/);
+  assert.match(text, /A RAW TAIL ANSWER/);
+  assert.match(text, /B RAW TAIL ANSWER/);
+  assert.match(text, /CURRENT EXACT MERGE REQUEST/);
+  assert.doesNotMatch(text, /ORIGINAL QUESTION|COMMON QUESTION|COMMON ANSWER/);
+  assert.deepEqual(projection[0], fixture.messages[0]);
+  assert.deepEqual(fixture, original);
+  assert.equal(run.summaries.length, 0);
+  assert.equal(
+    run.checkpoints.length,
+    0,
+    "individual source summaries are not aggregate checkpoints",
+  );
+  assert.equal(run.states.at(-1)?.status, "compacted");
+});
+
+test("merged source summaries verify each branch hash and revision, including non-prefix branches", async () => {
+  const fixture = mergedHistory();
+  for (const change of ["revision", "message"]) {
+    const next = structuredClone(fixture);
+    if (change === "revision") next.sources[4].revision++;
+    else next.messages[7] = user("changed B question");
+    const run = setup(next.messages, {
+      sources: next.sources,
+      mergeContext: true,
+      branchCheckpoints: next.checkpoints,
+    });
+    await assert.rejects(
+      run.compactor.prepare(next.messages, signal()),
+      /分支摘要已过期/,
+    );
+    assert.equal(run.summaries.length, 0);
+    assert.equal(run.checkpoints.length, 0);
+  }
+});
+
+test("an explicit raw source retains shared ancestors even when another input selects a summary", async () => {
+  const fixture = mergedHistory();
+  const run = setup(fixture.messages, {
+    sources: fixture.sources,
+    mergeContext: true,
+    branchCheckpoints: [fixture.checkpoints[1]],
+    rawSourceIds: ["root", "common", "a", "a-tail"],
+  });
+  const projection = await run.compactor.prepare(fixture.messages, signal());
+  const text = JSON.stringify(projection);
+  assert.match(text, /COMMON QUESTION/);
+  assert.equal(
+    projection.filter(
+      (message) =>
+        message.role === "user" && message.content === "COMMON QUESTION",
+    ).length,
+    1,
+  );
+  assert.match(text, /A ORIGINAL ANSWER/);
+  assert.match(text, /B SELECTED SUMMARY/);
+  assert.doesNotMatch(text, /B ORIGINAL ANSWER/);
+  assert.equal(run.checkpoints.length, 0);
+});
+
+test("merge compaction respects the actual output reserve and overrides disabled auto-compaction only on overflow", async () => {
+  const fitting = [user("ROOT"), user("a".repeat(12800)), user("CURRENT")];
+  const fit = setup(fitting, { mergeContext: true, autoCompact: false });
+  const budget = contextBudget(fit.options);
+  const estimate = estimateContextInputTokens(
+    fitting,
+    fit.options.systemPrompt,
+  );
+  assert.ok(
+    estimate > budget.thresholdTokens && estimate < budget.maxInputTokens,
+  );
+  assert.deepEqual(await fit.compactor.prepare(fitting, signal()), fitting);
+  assert.equal(fit.states.at(-1)?.reservedTokens, budget.outputTokens);
+  assert.notEqual(fit.states.at(-1)?.reservedTokens, budget.reservedTokens);
+  assert.equal(fit.checkpoints.length, 0);
+  assert.equal(fit.summaries.length, 0);
+  const oversized = [user("ROOT"), user("a".repeat(16000)), user("CURRENT")];
+  const overflow = setup(oversized, { mergeContext: true, autoCompact: false });
+  const original = structuredClone(oversized);
+  const projection = await overflow.compactor.prepare(oversized, signal());
+  assert.equal(overflow.checkpoints.length, 1);
+  assert.equal(overflow.checkpoints[0].purpose, "merge");
+  assert.deepEqual(oversized, original);
+  assert.deepEqual(projection[0], oversized[0]);
+  assert.deepEqual(projection.at(-1), oversized.at(-1));
+  assert.ok(
+    checkpointMatches(
+      overflow.checkpoints[0],
+      oversized,
+      overflow.options.sources,
+    ),
+  );
+});
+
+test("an overflowing merge marks reused summary adoption without changing its cached checkpoint", async () => {
+  const messages = history();
+  const first = setup(messages);
+  const expected = await first.compactor.prepare(messages, signal());
+  first.checkpoints[0].tokensBefore = 99999;
+  first.checkpoints[0].tokensAfter = 999;
+  const originalMessages = structuredClone(messages);
+  const originalCache = structuredClone(first.checkpoints);
+  const merged = setup(messages, {
+    mergeContext: true,
+    autoCompact: false,
+    checkpoints: first.checkpoints,
+  });
+  const projected = await merged.compactor.prepare(messages, signal());
+  assert.deepEqual(projected, expected);
+  assert.equal(merged.summaries.length, 0);
+  assert.equal(merged.checkpoints.length, 1);
+  const adopted = merged.checkpoints[0];
+  assert.equal(adopted.id, first.checkpoints[0].id);
+  assert.equal(adopted.purpose, "merge");
+  assert.equal(
+    adopted.tokensBefore,
+    estimateContextInputTokens(messages, merged.options.systemPrompt),
+  );
+  assert.equal(
+    adopted.tokensAfter,
+    estimateContextInputTokens(projected, merged.options.systemPrompt),
+  );
+  assert.ok(checkpointMatches(adopted, messages, merged.options.sources));
+  assert.deepEqual(messages, originalMessages);
+  assert.deepEqual(first.checkpoints, originalCache);
+
+  const fitting = setup(messages, {
+    mergeContext: true,
+    contextWindow: 65536,
+    checkpoints: first.checkpoints,
+    requestedCheckpointId: first.checkpoints[0].id,
+  });
+  await fitting.compactor.prepare(messages, signal());
+  assert.equal(fitting.checkpoints[0].purpose, undefined);
+  assert.equal(fitting.summaries.length, 0);
+});
+
+test("recompression combines selected summaries without reopening their raw covered histories", async () => {
+  const fixture = mergedHistory();
+  const run = setup(fixture.messages, {
+    sources: fixture.sources,
+    mergeContext: true,
+    branchCheckpoints: fixture.checkpoints,
+    currentPromptIndex: undefined,
+  });
+  const projection = await run.compactor.prepare(
+    fixture.messages,
+    signal(),
+    true,
+  );
+  assert.equal(run.summaries.length, 1);
+  const input = JSON.stringify(run.summaries[0].messages);
+  assert.match(input, /A SELECTED SUMMARY/);
+  assert.match(input, /B SELECTED SUMMARY/);
+  assert.doesNotMatch(input, /ORIGINAL QUESTION|COMMON ANSWER/);
+  assert.ok(
+    checkpointMatches(run.checkpoints[0], fixture.messages, fixture.sources),
+  );
+  assert.deepEqual(projection[0], fixture.messages[0]);
+});
+
+test("manual merge compression includes the last selected branch beyond the recent-history cut", async () => {
+  const messages = [
+    user("ROOT"),
+    user(`FIRST BRANCH QUESTION ${"a".repeat(6000)}`),
+    assistant(`FIRST BRANCH ANSWER ${"b".repeat(6000)}`),
+    user(`SECOND BRANCH QUESTION ${"c".repeat(6000)}`),
+    assistant(`SECOND BRANCH ANSWER ${"d".repeat(6000)}`),
+    user("LAST BRANCH QUESTION"),
+    assistant("LAST BRANCH CONCLUSION MUST JOIN THE SUMMARY"),
+  ];
+  const original = structuredClone(messages);
+  const sources = [
+    { nodeId: "root", revision: 0, messageCount: 1 },
+    { nodeId: "first", revision: 2, messageCount: 2 },
+    { nodeId: "second", revision: 4, messageCount: 2 },
+    { nodeId: "last", revision: 1, messageCount: 2 },
+  ];
+  const run = setup(messages, {
+    sources,
+    mergeContext: true,
+    currentPromptIndex: undefined,
+  });
+  const projection = await run.compactor.prepare(messages, signal(), true);
+  assert.equal(run.summaries.length, 1);
+  assert.deepEqual(run.summaries[0].messages, messages.slice(1));
+  assert.match(
+    JSON.stringify(run.summaries[0].messages),
+    /LAST BRANCH CONCLUSION MUST JOIN THE SUMMARY/,
+  );
+  assert.equal(run.checkpoints[0].messageCount, messages.length);
+  assert.deepEqual(run.checkpoints[0].sources, sources);
+  assert.deepEqual(messages, original);
+  assert.equal(projection.length, 2);
+  assert.deepEqual(projection[0], messages[0]);
+  assert.ok(checkpointMatches(run.checkpoints[0], messages, sources));
+});
+
+test("an explicitly prepared aggregate supersedes branch summaries and raw projections without recompression", async () => {
+  const fixture = mergedHistory();
+  const completed = fixture.messages.slice(0, -1);
+  const sources = fixture.sources.slice(0, -1);
+  const preparation = setup(completed, {
+    sources,
+    mergeContext: true,
+    currentPromptIndex: undefined,
+    branchCheckpoints: fixture.checkpoints,
+    rawSourceIds: ["root", "common", "a", "a-tail"],
+  });
+  await preparation.compactor.prepare(completed, signal(), true);
+  const checkpoint = {
+    ...preparation.checkpoints[0],
+    purpose: "merge" as const,
+  };
+  const request = setup(fixture.messages, {
+    sources: fixture.sources,
+    mergeContext: true,
+    branchCheckpoints: fixture.checkpoints,
+    rawSourceIds: ["root", "common", "a", "a-tail"],
+    checkpoints: [checkpoint],
+    requestedCheckpointId: checkpoint.id,
+  });
+  const projection = await request.compactor.prepare(
+    fixture.messages,
+    signal(),
+  );
+  assert.equal(request.summaries.length, 0);
+  assert.equal(request.checkpoints[0].id, checkpoint.id);
+  assert.equal(request.checkpoints[0].purpose, "merge");
+  assert.deepEqual(projection[0], fixture.messages[0]);
+  assert.deepEqual(projection.at(-1), fixture.messages.at(-1));
+  assert.match(
+    JSON.stringify(projection),
+    /Checkpoint 1: goal, decisions and remaining work/,
+  );
+  assert.doesNotMatch(
+    JSON.stringify(projection),
+    /A ORIGINAL ANSWER|B SELECTED SUMMARY/,
+  );
+});

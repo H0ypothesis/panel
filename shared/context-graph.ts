@@ -1,4 +1,9 @@
-import { ancestorPath, type ContextCheckpoint, type TurnNode } from "./types";
+import {
+  ancestorPath,
+  type ContextCheckpoint,
+  type ContextParent,
+  type TurnNode,
+} from "./types";
 
 export const COMPRESSION_NODE_SIZE = 56;
 const CARD_WIDTH = 282;
@@ -47,6 +52,10 @@ export interface CompressionGraphEntry {
   checkpoint: ContextCheckpoint;
   position: { x: number; y: number };
   usable: boolean;
+  /** Automatically compressed merged inputs, shown immediately before the answer. */
+  kind?: "merge";
+  contextParents?: ContextParent[];
+  targetNodeId?: string;
 }
 
 type Bounds = { x: number; y: number; width: number; height: number };
@@ -70,6 +79,38 @@ export function buildCompressionNodes(
     width: CARD_WIDTH,
     height: node.status === "root" ? 203 : 218,
   }));
+  for (const node of nodes) {
+    if ((node.contextParents?.length ?? 0) < 2) continue;
+    const checkpoint = node.compactions?.find(
+      (item) => item.purpose === "merge",
+    );
+    if (!checkpoint) continue;
+    const bounds: Bounds = {
+      x: node.position.x - 140,
+      y: node.position.y + (218 - COMPRESSION_NODE_SIZE) / 2,
+      width: CIRCLE_FOOTPRINT_WIDTH,
+      height: COMPRESSION_NODE_SIZE,
+    };
+    for (;;) {
+      const collisions = occupied.filter((other) => collides(bounds, other));
+      if (!collisions.length) break;
+      bounds.y = Math.max(
+        ...collisions.map((other) => other.y + other.height + GAP),
+      );
+    }
+    occupied.push(bounds);
+    entries.push({
+      id: compressionNodeId(node.id, checkpoint.id),
+      parentId: node.id,
+      checkpoint,
+      position: { x: bounds.x, y: bounds.y },
+      usable: false,
+      kind: "merge",
+      contextParents: node.contextParents,
+      targetNodeId: node.id,
+    });
+  }
+  const manualOffset = entries.length;
   const candidates = nodes
     .flatMap((parent) =>
       preparedCheckpoints(parent).map((checkpoint) => ({
@@ -77,8 +118,13 @@ export function buildCompressionNodes(
         checkpoint,
         child: nodes.find(
           (node) =>
-            node.parentId === parent.id &&
-            node.requestedContextCheckpointId === checkpoint.id,
+            (node.parentId === parent.id &&
+              node.requestedContextCheckpointId === checkpoint.id) ||
+            node.contextParents?.some(
+              (input) =>
+                input.nodeId === parent.id &&
+                input.contextCheckpointId === checkpoint.id,
+            ),
         ),
       })),
     )
@@ -106,7 +152,7 @@ export function buildCompressionNodes(
       );
     }
     occupied.push(bounds);
-    entries[index] = {
+    entries[manualOffset + index] = {
       id: compressionNodeId(parent.id, checkpoint.id),
       parentId: parent.id,
       checkpoint,

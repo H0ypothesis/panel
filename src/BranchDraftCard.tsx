@@ -1,8 +1,18 @@
 import { memo, useEffect, useId, useRef } from "react";
 import { Handle, Position, type Node, type NodeProps } from "@xyflow/react";
-import { ArrowUpRight, GitBranch, LoaderCircle, X } from "lucide-react";
+import {
+  ArrowUpRight,
+  Check,
+  ChevronDown,
+  GitBranch,
+  Layers,
+  LoaderCircle,
+  Square,
+  X,
+} from "lucide-react";
 import type {
   BranchColor,
+  ContextCheckpoint,
   ModelOption,
   RunConfig,
   TurnNode,
@@ -21,8 +31,13 @@ export type BranchDraftData = {
   config: RunConfig;
   models: ModelOption[];
   parentTitle: string;
+  parents: { nodeId: string; title: string; compressed: boolean }[];
   color: BranchColor;
   busy: boolean;
+  compacting: boolean;
+  compactBlockedReason?: string;
+  mergedCheckpoint?: ContextCheckpoint;
+  mergedSummaryOpen: boolean;
   blockedReason: string;
   error: string;
   focusVersion: number;
@@ -32,6 +47,11 @@ export type BranchDraftData = {
   onConfigChange: (config: RunConfig) => void;
   onSubmit: () => void;
   onCancel: () => void;
+  onCompact: () => void;
+  onCompactCancel: () => void;
+  onMergedSummaryToggle: (open: boolean) => void;
+  onDisconnect: (nodeId: string) => void;
+  onShowParentContext: (nodeId: string) => void;
 };
 
 export type BranchDraftNode = Node<BranchDraftData, "branchDraft">;
@@ -81,7 +101,24 @@ export const BranchDraftCard = memo(function BranchDraftCard({
         if (canSubmit) data.onSubmit();
       }}
     >
-      <Handle type="target" position={Position.Left} isConnectable={false} />
+      <Handle
+        type="target"
+        position={Position.Left}
+        className="branch-draft-input-handle"
+        isConnectable={!data.busy}
+        isConnectableStart={!data.busy}
+        isConnectableEnd={!data.busy}
+        aria-label="接入其他分支"
+        title="点击或拖动此接入口，再连接其他卡片右侧的出口"
+      />
+      <Handle
+        id="reference-target"
+        type="target"
+        position={Position.Top}
+        className="reference-handle"
+        isConnectable={false}
+        aria-hidden="true"
+      />
       <div className="branch-draft-topline">
         <strong>
           <GitBranch size={13} />
@@ -98,12 +135,116 @@ export const BranchDraftCard = memo(function BranchDraftCard({
           <X size={14} />
         </button>
       </div>
-      <p
-        className="branch-draft-parent"
-        title={`从「${data.parentTitle}」继续`}
-      >
-        从「{data.parentTitle}」继续
-      </p>
+      <div className="branch-draft-context">
+        <p
+          className="branch-draft-parent"
+          title={`从「${data.parentTitle}」继续`}
+        >
+          {data.parents.length > 1
+            ? `融合 ${data.parents.length} 条分支`
+            : `从「${data.parentTitle}」继续`}
+        </p>
+        <span className="branch-draft-connect-hint">
+          点击左侧接入口，连接其他分支的出口
+        </span>
+        {data.parents.length > 1 && (
+          <ul className="branch-draft-sources nowheel" aria-label="融合的分支">
+            {data.parents.map((parent, index) => (
+              <li key={parent.nodeId}>
+                <button
+                  type="button"
+                  className="branch-draft-source-title"
+                  title={`查看「${parent.title}」的上下文，可主动压缩该分支`}
+                  onClick={() => data.onShowParentContext(parent.nodeId)}
+                >
+                  {parent.compressed && <span>摘要 · </span>}
+                  {parent.title}
+                </button>
+                {index > 0 && (
+                  <button
+                    type="button"
+                    className="branch-draft-source-remove"
+                    disabled={data.busy}
+                    title={`断开「${parent.title}」`}
+                    aria-label={`断开「${parent.title}」`}
+                    onClick={() => data.onDisconnect(parent.nodeId)}
+                  >
+                    <X size={12} />
+                  </button>
+                )}
+              </li>
+            ))}
+          </ul>
+        )}
+        {data.parents.length >= 2 && (
+          <div className="branch-draft-compression">
+            {data.compacting ? (
+              <>
+                <span
+                  className="branch-draft-compression-status"
+                  role="status"
+                  aria-live="polite"
+                >
+                  <LoaderCircle size={13} className="spin" aria-hidden="true" />
+                  正在整体压缩…
+                </span>
+                <button
+                  type="button"
+                  className="branch-draft-compress-stop"
+                  onClick={data.onCompactCancel}
+                  title="停止整体压缩，保留原始分支"
+                >
+                  <Square size={11} aria-hidden="true" />
+                  停止
+                </button>
+              </>
+            ) : data.mergedCheckpoint ? (
+              <details
+                className="branch-draft-compression-complete"
+                open={data.mergedSummaryOpen}
+                onToggle={(event) =>
+                  data.onMergedSummaryToggle(event.currentTarget.open)
+                }
+              >
+                <summary
+                  title={`查看整体摘要；生成回答时将使用这份摘要。约 ${data.mergedCheckpoint.tokensBefore.toLocaleString("zh-CN")} → ${data.mergedCheckpoint.tokensAfter.toLocaleString("zh-CN")} tokens。`}
+                >
+                  <span role="status" aria-live="polite">
+                    <Check size={13} aria-hidden="true" />
+                    已整体压缩
+                  </span>
+                  <small>
+                    {data.mergedCheckpoint.tokensBefore.toLocaleString("zh-CN")}
+                    {" → "}
+                    {data.mergedCheckpoint.tokensAfter.toLocaleString("zh-CN")}
+                  </small>
+                  <ChevronDown size={12} aria-hidden="true" />
+                </summary>
+                <div className="branch-draft-compression-summary nowheel">
+                  {data.mergedCheckpoint.summary}
+                </div>
+              </details>
+            ) : (
+              <button
+                type="button"
+                className="branch-draft-compress"
+                disabled={
+                  data.busy || Boolean(data.compactBlockedReason || modelIssue)
+                }
+                title={
+                  data.compactBlockedReason ||
+                  modelIssue ||
+                  "使用当前模型压缩全部接入分支，再使用整体摘要生成回答；压缩会产生 token 用量。"
+                }
+                onClick={data.onCompact}
+              >
+                <Layers size={13} aria-hidden="true" />
+                整体主动压缩
+              </button>
+            )}
+          </div>
+        )}
+      </div>
       <CardReferenceInput
         inputRef={inputRef}
         aria-label="卡片中的新问题"
@@ -171,7 +312,13 @@ export const BranchDraftCard = memo(function BranchDraftCard({
           ) : (
             <ArrowUpRight size={13} />
           )}
-          {data.busy ? "正在创建…" : "生成分支"}
+          {data.compacting
+            ? "等待压缩完成"
+            : data.busy
+              ? "正在创建…"
+              : data.parents.length > 1
+                ? "融合并回答"
+                : "生成分支"}
         </button>
       </div>
     </form>

@@ -6,8 +6,7 @@ import {
   Scan,
   Square,
 } from "lucide-react";
-import ReactMarkdown from "react-markdown";
-import remarkGfm from "remark-gfm";
+import { Markdown } from "./Markdown";
 import type { ContextUsage } from "../shared/context-usage";
 import {
   contextCompressionLabel,
@@ -202,11 +201,7 @@ function CheckpointDetails({
             );
           })}
         </div>
-        <div className="markdown">
-          <ReactMarkdown remarkPlugins={[remarkGfm]}>
-            {checkpoint.summary}
-          </ReactMarkdown>
-        </div>
+        <Markdown text={checkpoint.summary} />
         {checkpoint.usage && (
           <p className="compression-meta">
             摘要额外用量：{checkpoint.usage.total.toLocaleString("zh-CN")}{" "}
@@ -291,7 +286,7 @@ export function ContextCompression({
         </label>
       </div>
       <p className="compression-hint">
-        普通路径按预算自动压缩；从压缩节点继续会沿用摘要，从它前面的卡片继续会保留原文。原始记录完整保留。
+        普通路径按预算自动压缩；从压缩节点接入会沿用摘要，从原卡片接入保留原文。多分支融合在容量足够时直接回答，超限时自动压缩。原始记录完整保留。
       </p>
       <div className="compression-run">
         <b>当前上下文</b>
@@ -309,7 +304,12 @@ export function ContextCompression({
           <CheckpointDetails
             key={checkpoint.id}
             checkpoint={checkpoint}
-            label={`本轮摘要 ${index + 1}`}
+            label={
+              checkpoint.purpose === "merge"
+                ? "融合分支摘要"
+                : `本轮摘要 ${index + 1}`
+            }
+            selected={selectedCheckpointId === checkpoint.id}
             nodes={workspace.nodes}
             onLocate={onLocate}
           />

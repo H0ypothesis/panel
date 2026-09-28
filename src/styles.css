@@ -1022,6 +1022,8 @@ button {
 }
 .canvas-controls {
   display: flex;
+  flex-wrap: wrap;
+  max-width: calc(100% - 42px);
   align-items: center;
   gap: 2px;
   padding: 3px 4px;
@@ -1042,6 +1044,18 @@ button {
 .canvas-controls .control-active {
   background: var(--surface-hover);
   color: var(--text-accent-strong);
+}
+.canvas-controls .canvas-reference-toggle {
+  display: flex;
+  gap: 5px;
+  width: auto;
+  padding: 0 8px;
+  font-size: 10px;
+  white-space: nowrap;
+}
+.graph-container .react-flow__handle.reference-handle {
+  opacity: 0;
+  pointer-events: none;
 }
 .canvas-controls > span {
   width: 38px;

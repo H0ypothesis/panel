@@ -1,3 +1,5 @@
+import { contextParentInput } from "./context-parents.ts";
+import { StateEvents } from "./state-events.ts";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import {
   ancestorPath,
@@ -86,6 +88,10 @@ function runInput(body: Record<string, unknown>, allowAttachments = false) {
   if (body.attachments !== undefined && !Array.isArray(body.attachments))
     throw new Error("附件列表格式错误。");
   const attachments = body.attachments as AttachmentUpload[] | undefined;
+  if (!allowAttachments && body.mergedContextCheckpointId !== undefined)
+    throw new Error("重新生成会保留原整体摘要；如需更改，请创建新卡片。");
+  if (!allowAttachments && body.contextParents !== undefined)
+    throw new Error("重新生成会保留原分支接入；如需更改，请创建新卡片。");
   if (body.contextMode !== undefined && body.contextMode !== "raw")
     throw new Error("上下文选择无效。");
   if (body.contextMode === "raw" && body.contextCheckpointId !== undefined)
@@ -101,7 +107,16 @@ function runInput(body: Record<string, unknown>, allowAttachments = false) {
     prompt:
       field(body.prompt ?? "", "问题", 20000, Boolean(attachments?.length)) ||
       "请分析上传的附件。",
-    ...(allowAttachments ? { attachments } : {}),
+    ...(allowAttachments
+      ? {
+          attachments,
+          contextParents: contextParentInput(body.contextParents),
+          mergedContextCheckpointId:
+            body.mergedContextCheckpointId === undefined
+              ? undefined
+              : field(body.mergedContextCheckpointId, "整体摘要 ID", 100),
+        }
+      : {}),
     referenceNodeIds: referenceNodeIds(body.referenceNodeIds),
     config: config as RunConfig,
     requestId: requestId(body.requestId),
@@ -118,21 +133,7 @@ export function createApi(
   runtime: Runtime,
   scheduler: Scheduler,
 ) {
-  const clients = new Set<ServerResponse>();
-  let broadcast: ReturnType<typeof setTimeout> | undefined;
-  store.on("change", () => {
-    if (broadcast) return;
-    broadcast = setTimeout(() => {
-      broadcast = undefined;
-      const payload = `data: ${JSON.stringify(store.snapshot())}\n\n`;
-      for (const client of clients) {
-        if (client.writableLength > 2_000_000) {
-          client.destroy();
-          clients.delete(client);
-        } else client.write(payload);
-      }
-    }, 60);
-  });
+  const stateEvents = new StateEvents(store);
 
   return async (
     request: IncomingMessage,
@@ -196,6 +197,8 @@ export function createApi(
         json(response, 200, {
           ...webCapabilities(),
           cardReferences: true,
+          branchMerging: true,
+          mergeContextPreparation: true,
           toolBatchApproval: true,
         });
       else if (request.method === "GET" && url.pathname === "/api/directories")
@@ -211,16 +214,11 @@ export function createApi(
           Connection: "keep-alive",
           "X-Accel-Buffering": "no",
         });
-        response.write(`data: ${JSON.stringify(store.snapshot())}\n\n`);
-        clients.add(response);
-        const heartbeat = setInterval(
-          () => response.write(": keepalive\n\n"),
-          15000,
+        stateEvents.subscribe(
+          request,
+          response,
+          url.searchParams.get("patches") === "1",
         );
-        request.on("close", () => {
-          clients.delete(response);
-          clearInterval(heartbeat);
-        });
       } else if (
         request.method === "POST" &&
         url.pathname === "/api/workspaces/import"
@@ -369,6 +367,41 @@ export function createApi(
                   ? null
                   : field(body.safetyModel, "安全模型", 300),
           });
+          json(response, 200, store.snapshot());
+          return true;
+        }
+        const mergeCompaction = url.pathname.match(
+          /^\/api\/workspaces\/([^/]+)\/merge-context\/compact$/,
+        );
+        if (request.method === "POST" && mergeCompaction) {
+          const body = await readJson(request);
+          const config = body.config as Partial<RunConfig> | undefined;
+          if (
+            !config ||
+            typeof config.model !== "string" ||
+            typeof config.thinking !== "string"
+          )
+            throw new Error("请选择摘要使用的模型与思考强度。");
+          const checkpoint = await scheduler.compactMergeContext(
+            decodeURIComponent(mergeCompaction[1]),
+            {
+              parentId: field(body.parentId, "主分支", 80),
+              contextParents: contextParentInput(body.contextParents) ?? [],
+              config: config as RunConfig,
+              requestId: requestId(body.requestId),
+            },
+          );
+          json(response, 200, { checkpoint, state: store.snapshot() });
+          return true;
+        }
+        const cancelMergeCompaction = url.pathname.match(
+          /^\/api\/workspaces\/([^/]+)\/merge-context\/compact\/([^/]+)\/cancel$/,
+        );
+        if (request.method === "POST" && cancelMergeCompaction) {
+          await scheduler.cancelMergeContext(
+            decodeURIComponent(cancelMergeCompaction[1]),
+            requestId(decodeURIComponent(cancelMergeCompaction[2])),
+          );
           json(response, 200, store.snapshot());
           return true;
         }

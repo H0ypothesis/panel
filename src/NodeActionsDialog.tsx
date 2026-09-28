@@ -2,6 +2,7 @@ import { useEffect, useRef, useState, type FormEvent } from "react";
 import { LoaderCircle, Pencil, RefreshCw, Trash2, X } from "lucide-react";
 import {
   ancestorPath,
+  directParentIds,
   type ModelOption,
   type RunConfig,
   type TurnNode,
@@ -18,7 +19,7 @@ export function subtreeIds(nodes: TurnNode[], nodeId: string): string[] {
   while (size !== ids.size) {
     size = ids.size;
     for (const node of nodes)
-      if (node.parentId && ids.has(node.parentId)) ids.add(node.id);
+      if (directParentIds(node).some((id) => ids.has(id))) ids.add(node.id);
   }
   return [...ids];
 }
@@ -105,15 +106,15 @@ export function NodeActionsDialog({
         currentIds.some((id) => !target.subtreeIds.includes(id))));
   const staleParent =
     editing && live?.parentId
-      ? ancestorPath(workspace.nodes, live.parentId).some(
-          (node) => node.contextStale,
-        )
+      ? ancestorPath(workspace.nodes, live.id)
+          .slice(0, -1)
+          .some((node) => node.contextStale)
       : false;
   const incompleteParent =
     editing && live?.parentId
-      ? ancestorPath(workspace.nodes, live.parentId).some(
-          (node) => !canBranchFrom(node),
-        )
+      ? ancestorPath(workspace.nodes, live.id)
+          .slice(0, -1)
+          .some((node) => !canBranchFrom(node))
       : false;
   const blocked = changed
     ? "节点已发生变化，请关闭后重新打开。"

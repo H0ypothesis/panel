@@ -172,3 +172,54 @@ test("summary drafts follow the circle origin and avoid existing cards and circl
 test("virtual ids cannot collide when persisted identifiers contain separators", () => {
   assert.notEqual(compressionNodeId("a:b", "c"), compressionNodeId("a", "b:c"));
 });
+
+test("overflow merges show an automatic summary between all inputs and their answer", () => {
+  const root = node("root", null);
+  const a = node("a", root.id, 360, 0);
+  const b = node("b", root.id, 360, 300);
+  const merged = node("merged", a.id, 860, 0);
+  merged.contextParents = [{ nodeId: a.id }, { nodeId: b.id }];
+  assert.equal(buildCompressionNodes([root, a, b, merged]).length, 0);
+  const cp = {
+    ...checkpoint("merged-summary", [root, a, b]),
+    purpose: "merge" as const,
+  };
+  merged.compactions = [
+    cp,
+    checkpoint("later-tool-loop", [root, a, b, merged]),
+  ];
+  const entries = buildCompressionNodes([root, a, b, merged]);
+  assert.equal(entries.length, 1);
+  assert.equal(entries[0].kind, "merge");
+  assert.equal(entries[0].targetNodeId, merged.id);
+  assert.deepEqual(entries[0].contextParents, merged.contextParents);
+  assert.equal(
+    entries[0].usable,
+    false,
+    "pre-answer summary must not falsely branch from the answer",
+  );
+  assert.ok(entries[0].position.x + 56 < merged.position.x);
+  assert.equal(entries[0].position.y + 28, merged.position.y + 109);
+  assert.deepEqual(
+    preparedCheckpoints(merged),
+    [],
+    "automatic checkpoint is not a manual continuation point",
+  );
+});
+
+test("manual summary used as a secondary merge source stays linked to its input", () => {
+  const root = node("root", null);
+  const a = node("a", root.id, 360, 0);
+  const b = node("b", root.id, 360, 300);
+  const cp = checkpoint("manual-b", [root, b]);
+  b.preparedCompaction = cp;
+  const merged = node("merged", a.id, 860, 100);
+  merged.contextParents = [
+    { nodeId: a.id },
+    { nodeId: b.id, contextCheckpointId: cp.id },
+  ];
+  const entry = buildCompressionNodes([root, a, b, merged])[0];
+  assert.equal(entry.parentId, b.id);
+  assert.equal(entry.usable, true);
+  assert.equal(entry.position.y + 28, merged.position.y + 109);
+});

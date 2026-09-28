@@ -1,10 +1,13 @@
+import { memo } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 
-export function Markdown({ text }: { text: string }) {
+const remarkPlugins = [remarkGfm];
+
+export const Markdown = memo(function Markdown({ text }: { text: string }) {
   return (
     <div className="markdown">
-      <ReactMarkdown remarkPlugins={[remarkGfm]}>{text}</ReactMarkdown>
+      <ReactMarkdown remarkPlugins={remarkPlugins}>{text}</ReactMarkdown>
     </div>
   );
-}
+});

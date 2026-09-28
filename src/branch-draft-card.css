@@ -9,10 +9,10 @@
   box-sizing: border-box;
   position: relative;
   display: grid;
-  grid-template-rows: 22px 16px minmax(80px, 1fr) auto 30px auto 30px;
+  grid-template-rows: 22px auto minmax(80px, 1fr) auto 30px auto 30px;
   gap: 8px;
   width: 320px;
-  min-height: 350px;
+  min-height: 374px;
   padding: 14px;
   border: 1px dashed var(--draft-accent);
   border-radius: 10px;
@@ -75,6 +75,157 @@
   font-size: 10px;
   line-height: 16px;
   color: var(--text-muted);
+}
+.branch-draft-context {
+  min-width: 0;
+}
+.branch-draft-connect-hint {
+  display: block;
+  margin-top: 4px;
+  color: var(--text-muted);
+  font-size: 10px;
+  line-height: 16px;
+}
+.branch-draft-sources {
+  max-height: 112px;
+  padding: 0;
+  margin: 8px 0 0;
+  overflow-y: auto;
+  list-style: none;
+  overscroll-behavior: contain;
+}
+.branch-draft-sources > li {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  height: 28px;
+  border-top: 1px solid var(--line);
+}
+.branch-draft-source-title {
+  flex: 1;
+  min-width: 0;
+  padding: 4px 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  text-align: left;
+  font-size: 10px;
+  color: var(--text-secondary);
+}
+.branch-draft-source-title:hover {
+  color: var(--text-accent-strong);
+}
+.branch-draft-source-title > span {
+  color: var(--compression-accent);
+}
+.branch-draft-source-remove {
+  display: grid;
+  place-items: center;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border-radius: 4px;
+  color: var(--text-muted);
+}
+.branch-draft-source-remove:hover:not(:disabled) {
+  background: var(--surface-hover);
+  color: var(--error);
+}
+.branch-draft-compression {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 32px;
+  margin-top: 10px;
+}
+.branch-draft-compress,
+.branch-draft-compress-stop,
+.branch-draft-compression-status,
+.branch-draft-compression-complete > summary > span {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  font-size: 11px;
+}
+.branch-draft-compress,
+.branch-draft-compress-stop {
+  min-height: 32px;
+  padding: 0 10px;
+  border: 1px solid var(--compression-accent);
+  border-radius: 6px;
+  background: color-mix(
+    in srgb,
+    var(--compression-accent) 9%,
+    var(--card-background)
+  );
+  color: var(--compression-accent);
+}
+.branch-draft-compress {
+  width: 100%;
+}
+.branch-draft-compress:hover:not(:disabled),
+.branch-draft-compress-stop:hover:not(:disabled) {
+  background: color-mix(
+    in srgb,
+    var(--compression-accent) 17%,
+    var(--card-background)
+  );
+}
+.branch-draft-compress:disabled {
+  color: var(--text-disabled);
+  border-color: var(--line-strong);
+  background: var(--surface-disabled);
+}
+.branch-draft-compression-status {
+  flex: 1;
+  justify-content: flex-start;
+  color: var(--compression-accent);
+}
+.branch-draft-compression-complete {
+  flex: 1;
+  min-width: 0;
+  color: var(--compression-accent);
+}
+.branch-draft-compression-complete > summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  min-height: 32px;
+  cursor: pointer;
+  list-style: none;
+}
+.branch-draft-compression-complete > summary::-webkit-details-marker {
+  display: none;
+}
+.branch-draft-compression-complete > summary > small {
+  margin-left: auto;
+  font-size: 9px;
+  color: var(--text-muted);
+  text-align: right;
+}
+.branch-draft-compression-complete > summary > svg {
+  flex-shrink: 0;
+}
+.branch-draft-compression-complete[open] > summary > svg {
+  transform: rotate(180deg);
+}
+.branch-draft-compression-summary {
+  box-sizing: border-box;
+  height: 152px;
+  margin-top: 8px;
+  padding: 8px;
+  overflow-y: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  overscroll-behavior: contain;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  color: var(--text-secondary);
+  background: var(--composer-background);
+  font-size: 10px;
+  line-height: 1.65;
 }
 .branch-draft-input {
   display: block;
@@ -162,4 +313,45 @@
   min-height: 7px;
   background: var(--surface);
   border: 1.5px solid var(--draft-accent);
+}
+.branch-draft-card .branch-draft-input-handle {
+  width: 18px;
+  height: 18px;
+  background: var(--card-background);
+  border-width: 2px;
+  box-shadow: 0 0 0 4px color-mix(in srgb, var(--draft-accent) 12%, transparent);
+  cursor: crosshair;
+}
+.branch-draft-input-handle::after {
+  content: "+";
+  display: grid;
+  place-items: center;
+  height: 100%;
+  color: var(--draft-accent);
+  font-size: 13px;
+  line-height: 1;
+}
+.graph-container.connecting-draft .card-branch-button {
+  visibility: hidden;
+  pointer-events: none;
+}
+.graph-container.connecting-draft .react-flow__handle-right.connectableend {
+  width: 18px;
+  height: 18px;
+  border-width: 2px;
+  border-color: var(--branch, var(--draft-accent));
+  background: var(--card-background);
+  box-shadow: 0 0 0 5px
+    color-mix(in srgb, var(--branch, var(--draft-accent)) 15%, transparent);
+  cursor: crosshair;
+}
+.graph-container.connecting-draft
+  .react-flow__handle-right:not(.connectableend) {
+  opacity: 0.25;
+}
+.draft-click-connection {
+  position: absolute;
+  overflow: visible;
+  pointer-events: none;
+  z-index: 100;
 }
