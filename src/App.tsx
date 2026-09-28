@@ -89,7 +89,12 @@ import {
   RootDirectoryCard,
   WorkbenchControls,
 } from "./WorkspaceControls";
-import { useTheme, type ThemePreference } from "./useTheme";
+import {
+  THEME_PALETTES,
+  useTheme,
+  type ThemePalette,
+  type ThemePreference,
+} from "./useTheme";
 import { useCollapsibleComposer } from "./useCollapsibleComposer";
 import "./composer-collapse.css";
 import {
@@ -142,7 +147,13 @@ function Logo({ small = false }: { small?: boolean }) {
 }
 
 export function App() {
-  const { preference: theme, colorMode, changeTheme } = useTheme();
+  const {
+    preference: theme,
+    palette,
+    colorMode,
+    changeTheme,
+    changePalette,
+  } = useTheme();
   const [state, setState] = useState<AppState | null>(null);
   const streamInstanceId = useRef<string | undefined>(undefined);
   const [models, setModels] = useState<ModelOption[]>([]);
@@ -1887,29 +1898,54 @@ export function App() {
               {workspace.example && <span className="example-badge">示例</span>}
             </div>
             <div className="topbar-actions">
-              <label
-                className="theme-control"
-                title="界面主题：跟随系统会随系统外观自动切换"
+              <div
+                className="appearance-controls"
+                role="group"
+                aria-label="界面外观"
               >
-                {theme === "system" ? (
-                  <Monitor size={14} aria-hidden="true" />
-                ) : theme === "dark" ? (
-                  <Moon size={14} aria-hidden="true" />
-                ) : (
-                  <Sun size={14} aria-hidden="true" />
-                )}
-                <select
-                  aria-label="界面主题"
-                  value={theme}
-                  onChange={(event) =>
-                    changeTheme(event.target.value as ThemePreference)
-                  }
+                <label
+                  className="theme-control"
+                  title="界面配色：每种配色均支持浅色和深色模式"
                 >
-                  <option value="system">跟随系统</option>
-                  <option value="light">浅色</option>
-                  <option value="dark">深色</option>
-                </select>
-              </label>
+                  <span className="palette-swatch" aria-hidden="true" />
+                  <select
+                    aria-label="界面配色"
+                    value={palette}
+                    onChange={(event) =>
+                      changePalette(event.target.value as ThemePalette)
+                    }
+                  >
+                    {THEME_PALETTES.map((item) => (
+                      <option key={item.id} value={item.id}>
+                        {item.label}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <label
+                  className="theme-control"
+                  title="明暗模式：跟随系统会随系统外观自动切换"
+                >
+                  {theme === "system" ? (
+                    <Monitor size={14} aria-hidden="true" />
+                  ) : theme === "dark" ? (
+                    <Moon size={14} aria-hidden="true" />
+                  ) : (
+                    <Sun size={14} aria-hidden="true" />
+                  )}
+                  <select
+                    aria-label="明暗模式"
+                    value={theme}
+                    onChange={(event) =>
+                      changeTheme(event.target.value as ThemePreference)
+                    }
+                  >
+                    <option value="system">跟随系统</option>
+                    <option value="light">浅色</option>
+                    <option value="dark">深色</option>
+                  </select>
+                </label>
+              </div>
               <button
                 className="heading-toggle"
                 aria-expanded={!headingCollapsed}

@@ -5,11 +5,13 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta name="theme-color" content="#f5f6f3" />
     <script>
-      // Apply the saved theme before the app and its styles load.
+      // Apply both preferences before the app and its styles load.
       (() => {
         let preference;
+        let palette;
         try {
           preference = localStorage.getItem("panel:theme");
+          palette = localStorage.getItem("panel:palette");
         } catch {
           // System preference still works when browser storage is unavailable.
         }
@@ -18,14 +20,26 @@
           (preference !== "light" &&
             window.matchMedia("(prefers-color-scheme: dark)").matches);
         const theme = dark ? "dark" : "light";
+        const savedPalette = ["mono", "blue", "violet", "sand"].includes(
+          palette,
+        )
+          ? palette
+          : "green";
+        const background =
+          savedPalette === "green"
+            ? dark
+              ? "#151b18"
+              : "#f5f6f3"
+            : dark
+              ? "#171717"
+              : "#f5f5f5";
         document.documentElement.dataset.theme = theme;
+        document.documentElement.dataset.palette = savedPalette;
         document.documentElement.style.colorScheme = theme;
-        document.documentElement.style.backgroundColor = dark
-          ? "#151b18"
-          : "#f5f6f3";
+        document.documentElement.style.backgroundColor = background;
         document
           .querySelector('meta[name="theme-color"]')
-          .setAttribute("content", dark ? "#151b18" : "#f5f6f3");
+          .setAttribute("content", background);
       })();
     </script>
     <title>Panel · 让思考自由生长</title>

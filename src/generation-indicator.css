@@ -19,8 +19,8 @@
 }
 
 .generation-phrase {
-  --wave-dark: #3d5638;
-  --wave-light: #a6b69a;
+  --wave-dark: var(--text-accent-strong);
+  --wave-light: var(--text-faint);
   font-size: 11px;
   line-height: 1.7;
   overflow-wrap: anywhere;
@@ -29,8 +29,8 @@
 }
 
 [data-theme="dark"] .generation-phrase {
-  --wave-dark: #63765f;
-  --wave-light: #e3efdb;
+  --wave-dark: var(--text-secondary);
+  --wave-light: var(--text-heading);
 }
 
 .generation-character {

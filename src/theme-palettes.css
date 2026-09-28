@@ -1,0 +1,162 @@
+/* Green keeps the original tokens in styles.css. The other palettes share
+   luminance levels so every surface has a matching light and dark treatment.
+   Status and branch colors retain their meaning independently of the palette. */
+:root[data-palette="mono"] {
+  --palette-hue: 0;
+  --palette-chroma: 0%;
+  --palette-tint: 0%;
+}
+:root[data-palette="blue"] {
+  --palette-hue: 212;
+  --palette-chroma: 52%;
+  --palette-tint: 22%;
+}
+:root[data-palette="violet"] {
+  --palette-hue: 265;
+  --palette-chroma: 38%;
+  --palette-tint: 18%;
+}
+:root[data-palette="sand"] {
+  --palette-hue: 32;
+  --palette-chroma: 44%;
+  --palette-tint: 24%;
+}
+
+:root:is(
+  [data-palette="mono"],
+  [data-palette="blue"],
+  [data-palette="violet"],
+  [data-palette="sand"]
+) {
+  --logo-background: var(--primary-background);
+  --logo-foreground: var(--primary-foreground);
+  --green: var(--text-accent-strong);
+  --ink: hsl(var(--palette-hue) var(--palette-tint) 18%);
+  --muted: hsl(var(--palette-hue) var(--palette-tint) 44%);
+  --line: hsl(var(--palette-hue) var(--palette-tint) 88%);
+  --line-strong: hsl(var(--palette-hue) var(--palette-tint) 79%);
+  --line-subtle: hsl(var(--palette-hue) var(--palette-tint) 92%);
+  --text-heading: hsl(var(--palette-hue) var(--palette-tint) 23%);
+  --text-body: hsl(var(--palette-hue) var(--palette-tint) 34%);
+  --text-secondary: hsl(var(--palette-hue) var(--palette-tint) 40%);
+  --text-muted: hsl(var(--palette-hue) var(--palette-tint) 44%);
+  --text-faint: hsl(var(--palette-hue) var(--palette-tint) 48%);
+  --text-control: hsl(var(--palette-hue) var(--palette-chroma) 34%);
+  --text-accent: hsl(var(--palette-hue) var(--palette-chroma) 38%);
+  --text-accent-strong: hsl(var(--palette-hue) var(--palette-chroma) 30%);
+  --text-placeholder: hsl(var(--palette-hue) var(--palette-tint) 46%);
+  --text-disabled: hsl(var(--palette-hue) var(--palette-tint) 52%);
+  /* Keep these two values in sync with the pre-paint fallback in index.html. */
+  --page-background: #f5f5f5;
+  --workspace-background: hsl(var(--palette-hue) var(--palette-tint) 99%);
+  --sidebar-background: hsl(var(--palette-hue) var(--palette-tint) 96%);
+  --topbar-background: hsl(var(--palette-hue) var(--palette-tint) 98%);
+  --heading-background: hsl(var(--palette-hue) var(--palette-tint) 99%);
+  --canvas-background: hsl(var(--palette-hue) var(--palette-tint) 96%);
+  --canvas-overlay: hsl(var(--palette-hue) var(--palette-tint) 96% / 92%);
+  --canvas-control-background: var(--surface);
+  --canvas-footer-background: var(--sidebar-background);
+  --minimap-background: var(--workspace-background);
+  --minimap-mask: hsl(var(--palette-hue) var(--palette-tint) 94% / 70%);
+  --surface: #fff;
+  --surface-raised: hsl(var(--palette-hue) var(--palette-tint) 99%);
+  --surface-subtle: hsl(var(--palette-hue) var(--palette-tint) 97%);
+  --surface-muted: hsl(var(--palette-hue) var(--palette-tint) 93%);
+  --surface-control: hsl(var(--palette-hue) var(--palette-tint) 98%);
+  --surface-hover: hsl(var(--palette-hue) var(--palette-tint) 92%);
+  --surface-selected: hsl(var(--palette-hue) var(--palette-tint) 89%);
+  --surface-disabled: hsl(var(--palette-hue) var(--palette-tint) 94%);
+  --composer-background: var(--workspace-background);
+  --card-background: var(--surface);
+  --root-card-background: var(--surface-subtle);
+  --code-background: var(--surface-muted);
+  --inline-code-background: var(--surface-muted);
+  --avatar-background: var(--surface-muted);
+  --avatar-border: var(--line-strong);
+  --avatar-text: var(--text-body);
+  --primary-background: hsl(var(--palette-hue) var(--palette-chroma) 36%);
+  --primary-hover: hsl(var(--palette-hue) var(--palette-chroma) 28%);
+  --primary-foreground: #fff;
+  --focus-ring: hsl(var(--palette-hue) var(--palette-chroma) 45%);
+  --focus-halo: hsl(var(--palette-hue) var(--palette-chroma) 45% / 18%);
+  --selection-background: hsl(var(--palette-hue) var(--palette-tint) 84%);
+  --selection-foreground: var(--ink);
+  --graph-edge: hsl(var(--palette-hue) var(--palette-tint) 76%);
+  --graph-dot: hsl(var(--palette-hue) var(--palette-tint) 84%);
+  --scrollbar-thumb: hsl(var(--palette-hue) var(--palette-tint) 80%);
+  --shadow-soft: #00000005;
+  --shadow-card: #0000000b;
+  --shadow-raised: #00000010;
+  --shadow-modal: #00000025;
+  --backdrop: #00000038;
+  --sidebar-backdrop: #00000025;
+}
+
+:root[data-theme="dark"]:is(
+    [data-palette="mono"],
+    [data-palette="blue"],
+    [data-palette="violet"],
+    [data-palette="sand"]
+  ) {
+  --ink: hsl(var(--palette-hue) var(--palette-tint) 92%);
+  --muted: hsl(var(--palette-hue) var(--palette-tint) 66%);
+  --line: hsl(var(--palette-hue) var(--palette-tint) 25%);
+  --line-strong: hsl(var(--palette-hue) var(--palette-tint) 34%);
+  --line-subtle: hsl(var(--palette-hue) var(--palette-tint) 21%);
+  --text-heading: hsl(var(--palette-hue) var(--palette-tint) 91%);
+  --text-body: hsl(var(--palette-hue) var(--palette-tint) 80%);
+  --text-secondary: hsl(var(--palette-hue) var(--palette-tint) 71%);
+  --text-muted: hsl(var(--palette-hue) var(--palette-tint) 66%);
+  --text-faint: hsl(var(--palette-hue) var(--palette-tint) 62%);
+  --text-control: hsl(var(--palette-hue) var(--palette-chroma) 80%);
+  --text-accent: hsl(var(--palette-hue) var(--palette-chroma) 74%);
+  --text-accent-strong: hsl(var(--palette-hue) var(--palette-chroma) 83%);
+  --text-placeholder: hsl(var(--palette-hue) var(--palette-tint) 60%);
+  --text-disabled: hsl(var(--palette-hue) var(--palette-tint) 50%);
+  --page-background: #171717;
+  --workspace-background: hsl(var(--palette-hue) var(--palette-tint) 11%);
+  --sidebar-background: hsl(var(--palette-hue) var(--palette-tint) 10%);
+  --topbar-background: hsl(var(--palette-hue) var(--palette-tint) 12%);
+  --heading-background: hsl(var(--palette-hue) var(--palette-tint) 13%);
+  --canvas-background: hsl(var(--palette-hue) var(--palette-tint) 9%);
+  --canvas-overlay: hsl(var(--palette-hue) var(--palette-tint) 9% / 92%);
+  --canvas-control-background: var(--surface-raised);
+  --minimap-mask: hsl(var(--palette-hue) var(--palette-tint) 6% / 70%);
+  --surface: hsl(var(--palette-hue) var(--palette-tint) 15%);
+  --surface-raised: hsl(var(--palette-hue) var(--palette-tint) 18%);
+  --surface-subtle: hsl(var(--palette-hue) var(--palette-tint) 14%);
+  --surface-muted: hsl(var(--palette-hue) var(--palette-tint) 20%);
+  --surface-control: hsl(var(--palette-hue) var(--palette-tint) 17%);
+  --surface-hover: hsl(var(--palette-hue) var(--palette-tint) 24%);
+  --surface-selected: hsl(var(--palette-hue) var(--palette-tint) 28%);
+  --surface-disabled: hsl(var(--palette-hue) var(--palette-tint) 18%);
+  --composer-background: var(--surface-subtle);
+  --card-background: var(--surface-raised);
+  --root-card-background: var(--surface-muted);
+  --code-background: var(--workspace-background);
+  --primary-background: hsl(var(--palette-hue) var(--palette-chroma) 74%);
+  --primary-hover: hsl(var(--palette-hue) var(--palette-chroma) 83%);
+  --primary-foreground: hsl(var(--palette-hue) var(--palette-tint) 10%);
+  --focus-ring: hsl(var(--palette-hue) var(--palette-chroma) 72%);
+  --focus-halo: hsl(var(--palette-hue) var(--palette-chroma) 72% / 22%);
+  --selection-background: hsl(var(--palette-hue) var(--palette-tint) 36%);
+  --graph-edge: hsl(var(--palette-hue) var(--palette-tint) 36%);
+  --graph-dot: hsl(var(--palette-hue) var(--palette-tint) 22%);
+  --scrollbar-thumb: hsl(var(--palette-hue) var(--palette-tint) 32%);
+  --shadow-soft: #00000024;
+  --shadow-card: #00000038;
+  --shadow-raised: #00000045;
+  --shadow-modal: #00000073;
+  --backdrop: #000000a8;
+  --sidebar-backdrop: #0000008c;
+}
+
+/* A true neutral accent, including the primary action and logo. */
+:root[data-palette="mono"] {
+  --primary-background: #262626;
+  --primary-hover: #0a0a0a;
+}
+:root[data-palette="mono"][data-theme="dark"] {
+  --primary-background: #e5e5e5;
+  --primary-hover: #fff;
+}

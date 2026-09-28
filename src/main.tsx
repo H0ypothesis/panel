@@ -3,6 +3,7 @@ import ReactDOM from "react-dom/client";
 import { ReactFlowProvider } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
 import "./styles.css";
+import "./theme-palettes.css";
 import "./desktop.css";
 import { App } from "./App";
 
