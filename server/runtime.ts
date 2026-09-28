@@ -14,9 +14,6 @@ import {
   type Model,
   type Usage,
 } from "@earendil-works/pi-ai";
-import { anthropicProvider } from "@earendil-works/pi-ai/providers/anthropic";
-import { openaiProvider } from "@earendil-works/pi-ai/providers/openai";
-import { googleProvider } from "@earendil-works/pi-ai/providers/google";
 import type {
   ContextCheckpoint,
   ContextRequestUsage,
@@ -32,9 +29,15 @@ import type {
 } from "../shared/types.ts";
 import { ContextCompactor, estimateContextInputTokens } from "./compaction.ts";
 import { SYSTEM_PROMPT } from "./context.ts";
-import { paperbypassProvider } from "./paperbypass.ts";
-import { atriaProvider } from "./atria.ts";
-import { xiaomiTokenPlanProvider } from "./xiaomi.ts";
+import {
+  ModelProviderSettings,
+  modelProviders as providers,
+  redactProviderSecrets,
+} from "./provider-settings.ts";
+import type {
+  ProviderSettings,
+  SaveProviderSettings,
+} from "../shared/provider-settings.ts";
 import { createPanelTools } from "./coding-tools.ts";
 import { reviewSafetyTool } from "./safety-review.ts";
 import { requestUsage } from "./request-context-usage.ts";
@@ -133,6 +136,11 @@ export interface RunContextOptions {
 
 export interface Runtime {
   models(): ModelOption[];
+  providerSettings?(): ProviderSettings[];
+  saveProviderSettings?(
+    id: string,
+    settings: SaveProviderSettings,
+  ): Promise<ProviderSettings>;
   reviewTool?(
     request: SafetyReviewRequest,
     signal: AbortSignal,
@@ -282,49 +290,6 @@ async function summarizeContext(
   }
 }
 
-const providers = [
-  {
-    id: "xiaomi-token-plan-cn",
-    name: "小米 MiMo Token Plan",
-    env: "XIAOMI_TOKEN_PLAN_CN_API_KEY",
-    keys: ["XIAOMI_TOKEN_PLAN_CN_API_KEY"],
-  },
-  {
-    id: "atria",
-    name: "Atria",
-    env: "ATRIA_API_KEY",
-    keys: ["ATRIA_API_KEY"],
-  },
-  {
-    id: "paperbypass",
-    name: "Paperbypass",
-    env: "PAPERBYPASS_API_KEY",
-    keys: ["PAPERBYPASS_API_KEY"],
-  },
-  {
-    id: "anthropic",
-    name: "Anthropic",
-    env: "ANTHROPIC_API_KEY",
-    keys: [
-      "ANTHROPIC_API_KEY",
-      "ANTHROPIC_AUTH_TOKEN",
-      "ANTHROPIC_OAUTH_TOKEN",
-    ],
-  },
-  {
-    id: "openai",
-    name: "OpenAI",
-    env: "OPENAI_API_KEY",
-    keys: ["OPENAI_API_KEY"],
-  },
-  {
-    id: "google",
-    name: "Google",
-    env: "GEMINI_API_KEY",
-    keys: ["GEMINI_API_KEY"],
-  },
-];
-
 export function safeError(error: unknown, maxLength = 1500) {
   let message = error instanceof Error ? error.message : String(error);
   for (const name of ["BRAVE_API_KEY", "EXA_API_KEY"]) {
@@ -337,11 +302,12 @@ export function safeError(error: unknown, maxLength = 1500) {
       if (secret) message = message.replaceAll(secret, "[redacted]");
     }
   }
-  return message.slice(0, maxLength);
+  return redactProviderSecrets(message).slice(0, maxLength);
 }
 
 export class PiRuntime implements Runtime {
   private registry = createModels();
+  private settings?: ModelProviderSettings;
 
   constructor(
     registry?: ReturnType<typeof createModels>,
@@ -351,12 +317,31 @@ export class PiRuntime implements Runtime {
       this.registry = registry;
       return;
     }
-    this.registry.setProvider(paperbypassProvider());
-    this.registry.setProvider(atriaProvider());
-    this.registry.setProvider(xiaomiTokenPlanProvider());
-    this.registry.setProvider(anthropicProvider());
-    this.registry.setProvider(openaiProvider());
-    this.registry.setProvider(googleProvider());
+    for (const provider of providers)
+      this.registry.setProvider(provider.create());
+  }
+
+  async initProviderSettings(directory: string): Promise<void> {
+    const settings = new ModelProviderSettings(directory);
+    await settings.init();
+    this.settings = settings;
+    this.registry = settings.currentRegistry();
+  }
+
+  providerSettings(): ProviderSettings[] {
+    if (!this.settings) throw new Error("模型连接设置尚未初始化。");
+    return this.settings.list();
+  }
+
+  async saveProviderSettings(
+    id: string,
+    input: SaveProviderSettings,
+  ): Promise<ProviderSettings> {
+    if (!this.settings) throw new Error("模型连接设置尚未初始化。");
+    await this.settings.save(id, input);
+    // Replace the registry as a whole: running agents retain their own snapshot.
+    this.registry = this.settings.currentRegistry();
+    return this.settings.list().find((provider) => provider.id === id)!;
   }
 
   models(): ModelOption[] {
@@ -378,9 +363,9 @@ export class PiRuntime implements Runtime {
           name: model.name,
           provider: model.provider,
           providerName: provider.name,
-          available: provider.keys.some((key) =>
-            Boolean(process.env[key]?.trim()),
-          ),
+          available: this.settings
+            ? this.settings.configured(model.provider)
+            : provider.keys.some((key) => Boolean(process.env[key]?.trim())),
           demo: false,
           default:
             `${model.provider}/${model.id}` ===
@@ -782,16 +767,14 @@ export class PiRuntime implements Runtime {
     options: RunContextOptions,
   ): Promise<ContextCheckpoint | undefined> {
     signal.throwIfAborted();
+    const registry = this.registry;
     const slash = config.model.indexOf("/");
     const provider = config.model.slice(0, slash);
     if (provider === "demo")
       throw new Error(
         "演示模型只能展示固定回复，不能生成真实的分支摘要。请先选择已连接的真实模型。",
       );
-    const model = this.registry.getModel(
-      provider,
-      config.model.slice(slash + 1),
-    );
+    const model = registry.getModel(provider, config.model.slice(slash + 1));
     if (!model) throw new Error("模型不存在。");
     let checkpoint: ContextCheckpoint | undefined;
     const compactor = new ContextCompactor({
@@ -807,7 +790,7 @@ export class PiRuntime implements Runtime {
       requestedCheckpointId: options.requestedCheckpointId,
       summarize: (messages, previousSummary, summarySignal) =>
         summarizeContext(
-          this.registry,
+          registry,
           model,
           config.thinking,
           messages,

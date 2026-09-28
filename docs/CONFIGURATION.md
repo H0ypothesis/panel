@@ -2,11 +2,21 @@
 
 [返回项目首页](../README.md)
 
-以下配置适用于从源码启动的服务。macOS 应用的配置入口与文件位置见 [macOS 客户端说明](MACOS.md#模型配置与数据位置)。
+Web 版和 macOS 应用均可直接在界面中配置模型。macOS 应用的文件位置见 [macOS 客户端说明](MACOS.md#模型配置与数据位置)。
 
-## 真实模型
+## 在界面中配置
 
-复制 [.env.example](../.env.example) 为 `.env`，填写所需供应商，再重启服务：
+1. 打开左下角「模型连接」，点击供应商右侧的「未配置」；已有配置时点击「已配置」可继续编辑。
+2. 在配置子页填写 API URL、API Key 和 Model。URL 为服务商提供的 API 基础地址，不包含 `/chat/completions` 等具体请求路径。Model 可从已有目录选择，也可填写完整模型 ID；地址需要支持所选供应商的接口协议。
+3. 点击「保存配置」，模型列表立即更新，无需重启。保存表示配置已写入本机，不代表已向供应商验证连接。
+
+OpenAI 可选择接口协议：自动模式下，内置模型使用 Responses，自定义模型使用 Chat Completions；使用仅支持 Chat Completions 的兼容网关时，选择「Chat Completions（兼容接口）」。自定义模型采用文本输入、关闭思考及 128,000 tokens 的本地上下文预算，实际能力与限制以服务商为准。
+
+再次编辑时不会显示原密钥，API Key 留空会保留原有密钥。配置保存到 `<PANEL_DATA_DIR>/model-providers.json`（源码启动默认 `.panel/model-providers.json`），文件仅允许当前用户读写。界面保存的供应商配置优先于环境变量；未设置的供应商继续使用原有环境配置。密钥不写入浏览器存储，也不包含在探索导出中。
+
+## 使用环境变量配置
+
+也可复制 [.env.example](../.env.example) 为 `.env`，填写所需供应商，再重启服务：
 
 ```dotenv
 ANTHROPIC_API_KEY=...
@@ -14,7 +24,7 @@ OPENAI_API_KEY=...
 GEMINI_API_KEY=...
 ```
 
-无需填写全部供应商。模型目录与支持的思考等级取自 Pi。界面左下角「模型连接」显示配置状态，对话输入框下方可以单独选择执行模型与思考强度。环境变量已存在时优先使用环境变量。
+无需填写全部供应商。内置模型目录与支持的思考等级取自 Pi。界面左下角「模型连接」显示配置状态，对话输入框下方可以单独选择执行模型与思考强度。加载 `.env` 时，已有的进程环境变量优先。
 
 也支持 Paperbypass 网关。在 `.env` 中配置后重启，Luna Pro 和 `Atria-Dawn-Preview` 会出现在模型列表的 Paperbypass 分组中，共用同一个网关密钥：
 
@@ -29,7 +39,7 @@ PANEL_DEFAULT_MODEL=paperbypass/openai/gpt-5.6-luna-pro
 
 `PANEL_DEFAULT_MODEL` 决定从探索起点发起对话时的默认模型；历史对话仍继承各自的模型设置。`PAPERBYPASS_MODEL` 可替换默认的 Luna Pro 模型 ID，Atria 选项始终保留。当前网关配置不发送额外思考参数，Atria 采用其[官方文档](https://api.atria-asi.ai/docs)中的 256,000 上下文窗口，其余模型采用 128,000 的本地上下文预算，输出上限均为 8,192，不提供网关费用估算。
 
-首版支持 API Key/Anthropic token 环境变量；不会读取 Pi CLI 的 OAuth 登录状态。模型密钥只在服务端使用，不保存在浏览器或导出文件中。
+支持 API Key 配置及 Anthropic token 环境变量；不会读取 Pi CLI 的 OAuth 登录状态。模型密钥只在服务端使用，不保存在浏览器或导出文件中。
 
 Atria 使用 [官方文档](https://api.atria-asi.ai/docs) 的 Messages 接口，在 `.env` 中添加：
 

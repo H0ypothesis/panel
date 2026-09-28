@@ -1,0 +1,157 @@
+.provider-configure {
+  flex-shrink: 0;
+  padding: 7px 9px;
+  border: 1px solid var(--line-strong);
+  border-radius: 6px;
+  color: var(--text-secondary);
+  background: var(--surface);
+}
+.provider-configure:hover {
+  background: var(--surface-hover);
+  border-color: var(--focus-ring);
+}
+.provider-configure:focus-visible,
+.provider-settings-dialog button:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 3px;
+}
+.provider-settings-dialog {
+  position: fixed;
+  inset: 0;
+  margin: auto;
+  height: fit-content;
+  width: 480px;
+  max-width: calc(100vw - 32px);
+  max-height: calc(100dvh - 32px);
+  color: var(--text-body);
+}
+.provider-settings-dialog::backdrop {
+  background: var(--backdrop);
+  backdrop-filter: blur(5px);
+}
+.provider-settings-back {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0;
+  margin-bottom: 23px;
+  color: var(--text-muted);
+  font-size: 11px;
+}
+.provider-settings-dialog .modal-illustration {
+  margin-bottom: 16px;
+}
+.provider-settings-dialog h2 {
+  font-size: 21px;
+  overflow-wrap: anywhere;
+}
+.provider-settings-dialog fieldset {
+  padding: 0;
+  margin: 0;
+  border: 0;
+  min-width: 0;
+}
+.provider-settings-dialog .form-label {
+  font-size: 12px;
+  margin-bottom: 18px;
+}
+.provider-settings-dialog .form-label input {
+  font-size: 12px;
+}
+.provider-settings-dialog .form-label select {
+  display: block;
+  width: 100%;
+  margin-top: 9px;
+  padding: 12px 8px;
+  border: 1px solid var(--line-strong);
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--text-control);
+  font-size: 11px;
+}
+.provider-settings-dialog .form-label select:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 2px;
+}
+.provider-field-hint {
+  font-size: 10px;
+  line-height: 1.7;
+  color: var(--text-muted);
+  margin: -11px 0 19px;
+}
+.provider-key-label > .provider-key-input {
+  display: block;
+  position: relative;
+  margin: 0;
+}
+.provider-key-input input {
+  padding-right: 43px;
+}
+.provider-key-input button {
+  display: grid;
+  place-items: center;
+  position: absolute;
+  right: 5px;
+  top: 5px;
+  bottom: 5px;
+  width: 32px;
+  color: var(--text-muted);
+  border-radius: 4px;
+}
+.provider-key-input button:hover {
+  background: var(--surface-hover);
+}
+.provider-settings-privacy {
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--surface-subtle);
+  color: var(--text-muted);
+  font-size: 10px;
+  line-height: 1.8;
+}
+.provider-settings-actions {
+  display: flex;
+  gap: 10px;
+  margin-top: 22px;
+}
+.provider-settings-actions .primary-button {
+  flex: 1;
+  width: auto;
+  margin: 0;
+}
+.provider-settings-actions .primary-button > svg {
+  margin: 0;
+}
+.provider-settings-cancel {
+  padding: 0 24px;
+  border: 1px solid var(--line-strong);
+  border-radius: 6px;
+  font-size: 11px;
+  color: var(--text-secondary);
+}
+.provider-settings-cancel:hover {
+  background: var(--surface-hover);
+}
+.provider-settings-loading,
+.provider-settings-success {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 11px;
+  line-height: 1.8;
+  color: var(--text-secondary);
+}
+.provider-settings-loading {
+  padding: 24px 0;
+}
+.provider-settings-success {
+  padding: 11px 13px;
+  margin-bottom: 12px;
+  background: var(--success-background);
+  border: 1px solid var(--success-border);
+  border-radius: 6px;
+}
+.provider-settings-success svg {
+  flex-shrink: 0;
+}

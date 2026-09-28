@@ -71,9 +71,9 @@ async function stop() {
   child = undefined;
   await assert.rejects(readFile(readyFile), { code: "ENOENT" });
 }
-async function api(path, body) {
+async function api(path, body, method = body ? "POST" : "GET") {
   const response = await fetch(url + path, {
-    method: body ? "POST" : "GET",
+    method,
     headers: { Origin: url, "Content-Type": "application/json" },
     body: body ? JSON.stringify(body) : undefined,
   });
@@ -93,6 +93,27 @@ try {
     models.filter((model) => !model.demo).every((model) => !model.available),
     "Smoke test must not inherit model credentials",
   );
+  const providerSettings = await api("/api/model-providers");
+  assert.ok(providerSettings.every((provider) => !provider.apiKeyConfigured));
+  const testKey = "panel-desktop-test-key-not-a-real-credential";
+  const configured = await api(
+    "/api/model-providers/openai",
+    {
+      baseUrl: "http://127.0.0.1:9/v1",
+      model: "desktop-test-model",
+      apiKey: testKey,
+      protocol: "openai-completions",
+    },
+    "PUT",
+  );
+  assert.equal(configured.provider.apiKeyConfigured, true);
+  assert.equal(configured.provider.protocol, "openai-completions");
+  assert.ok(
+    configured.models.some(
+      (model) => model.id === "openai/desktop-test-model" && model.available,
+    ),
+  );
+  assert.ok(!JSON.stringify(configured).includes(testKey));
   const created = await api("/api/workspaces", {
     title: "Mac 客户端验收",
     description: "独立运行时测试",
@@ -136,7 +157,12 @@ try {
   );
   assert.ok(exported.ok);
   assert.match(exported.headers.get("content-disposition"), /attachment/);
-  assert.match(await exported.text(), /Mac 客户端验收/);
+  const exportText = await exported.text();
+  assert.match(exportText, /Mac 客户端验收/);
+  assert.ok(
+    !exportText.includes(testKey),
+    "Provider credentials must not be exported",
+  );
   assert.equal(
     (
       await fetch(url + "/api/state", {
@@ -164,6 +190,13 @@ try {
       .find((item) => item.id === workspace.id)
       ?.nodes.some((item) => item.id === completed.id),
   );
+  const restoredProvider = (await api("/api/model-providers")).find(
+    (provider) => provider.id === "openai",
+  );
+  assert.equal(restoredProvider.model, "desktop-test-model");
+  assert.equal(restoredProvider.protocol, "openai-completions");
+  assert.equal(restoredProvider.apiKeyConfigured, true);
+  assert.ok(!JSON.stringify(restoredProvider).includes(testKey));
   await stop();
   blocker = createServer();
   blocker.listen(Number(new URL(initialUrl).port), "127.0.0.1");
@@ -178,7 +211,7 @@ try {
   blocker.close();
   blocker = undefined;
   console.log(
-    "PASS: standalone runtime, assets, model catalog, Pi demo, idempotency, SSE, export, origin checks, persistence, port reuse/fallback, graceful shutdown",
+    "PASS: standalone runtime, assets, model catalog, provider settings persistence/redaction, Pi demo, idempotency, SSE, export, origin checks, persistence, port reuse/fallback, graceful shutdown",
   );
 
   const require = createRequire(join(app, "package.json"));

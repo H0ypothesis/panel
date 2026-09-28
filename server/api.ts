@@ -17,6 +17,7 @@ import {
   MAX_ATTACHMENT_REQUEST_BYTES,
   type AttachmentUpload,
 } from "../shared/attachments.ts";
+import type { SaveProviderSettings } from "../shared/provider-settings.ts";
 import { referenceNodeIds } from "./context-references.ts";
 
 function approvalMode(value: unknown): ApprovalMode {
@@ -159,7 +160,39 @@ export function createApi(
         json(response, 200, store.snapshot());
       else if (request.method === "GET" && url.pathname === "/api/models")
         json(response, 200, runtime.models());
-      else if (request.method === "GET" && url.pathname === "/api/capabilities")
+      else if (
+        request.method === "GET" &&
+        url.pathname === "/api/model-providers"
+      ) {
+        if (!runtime.providerSettings)
+          throw new Error("当前运行时不支持模型连接设置。");
+        json(response, 200, runtime.providerSettings());
+      } else if (
+        request.method === "PUT" &&
+        /^\/api\/model-providers\/[^/]+$/.test(url.pathname)
+      ) {
+        if (!runtime.saveProviderSettings)
+          throw new Error("当前运行时不支持模型连接设置。");
+        let body: Record<string, unknown>;
+        try {
+          body = await readJson(request, 16_384);
+        } catch {
+          // JSON parser diagnostics can contain a submitted, not-yet-stored key.
+          throw new Error(
+            "模型连接请求格式无效，请提交不超过 16 KB 的 JSON 配置。",
+          );
+        }
+        const provider = await runtime.saveProviderSettings(
+          decodeURIComponent(
+            url.pathname.slice("/api/model-providers/".length),
+          ),
+          body as unknown as SaveProviderSettings,
+        );
+        json(response, 200, { provider, models: runtime.models() });
+      } else if (
+        request.method === "GET" &&
+        url.pathname === "/api/capabilities"
+      )
         json(response, 200, {
           ...webCapabilities(),
           cardReferences: true,

@@ -28,7 +28,11 @@ Panel 现在提供可本地运行的 macOS 应用。原生外壳使用 Swift、A
 
 ## 模型配置与数据位置
 
-选择菜单「Panel → 模型配置…」，或在工作台的「模型连接」中点击「打开模型配置」，会用文本编辑打开：
+在工作台打开「模型连接」，点击供应商右侧「未配置」或「已配置」，即可在子页填写 API URL、Key 和 Model。保存后立即生效，无需重启；再次编辑时密钥留空会保留原值。
+
+界面配置保存在 `~/Library/Application Support/Panel/data/model-providers.json`，优先于该供应商的环境配置，密钥不会返回给页面或随探索导出。
+
+选择菜单「Panel → 模型配置…」，或在工作台的「模型连接」中点击「打开高级配置文件」，仍可用文本编辑打开：
 
 ```text
 ~/Library/Application Support/Panel/.env

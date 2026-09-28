@@ -23,7 +23,7 @@ npm run dev
 
 打开 <http://127.0.0.1:4317>。没有 API Key 也可使用 Pi Demo 体验分支流程，演示模型返回预设内容。
 
-使用真实模型时，复制 [.env.example](.env.example) 为 `.env`，填写所需密钥并重启服务，详见[模型配置](docs/CONFIGURATION.md)。
+使用真实模型时，打开左下角「模型连接」，点击供应商右侧「未配置」，填写 API URL、Key 和 Model，保存后即可选择使用。也支持 `.env` 配置，详见[模型配置](docs/CONFIGURATION.md)。
 
 ## 文档
 

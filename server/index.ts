@@ -29,6 +29,9 @@ if (readyFile && port === 0) {
 const store = new Store(resolve(process.env.PANEL_DATA_DIR ?? ".panel"));
 await store.init();
 const runtime = new PiRuntime();
+await runtime.initProviderSettings(
+  resolve(process.env.PANEL_DATA_DIR ?? ".panel"),
+);
 const scheduler = new Scheduler(store, runtime);
 const api = createApi(store, runtime, scheduler);
 const vite =

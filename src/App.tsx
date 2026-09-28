@@ -99,6 +99,7 @@ import { CardReferenceList } from "./CardReferenceList";
 import { BrandHint } from "./BrandHint";
 import { DeleteWorkspaceDialog } from "./DeleteWorkspaceDialog";
 import { NewWorkspace } from "./NewWorkspace";
+import { ProviderSettingsDialog } from "./ProviderSettingsDialog";
 import { getDesktopBridge, onDesktopAction } from "./desktop";
 import {
   NodeActionsDialog,
@@ -1308,7 +1309,11 @@ export function App() {
             }}
           />
         ) : modal === "settings" ? (
-          <Settings models={models} webCapabilities={webCapabilities} />
+          <Settings
+            models={models}
+            webCapabilities={webCapabilities}
+            onModelsChange={setModels}
+          />
         ) : (
           <Help />
         )}
@@ -2583,11 +2588,18 @@ export function App() {
 function Settings({
   models,
   webCapabilities,
+  onModelsChange,
 }: {
   models: ModelOption[];
   webCapabilities: WebCapabilities | null;
+  onModelsChange: (models: ModelOption[]) => void;
 }) {
   const desktop = getDesktopBridge();
+  const [editingProvider, setEditingProvider] = useState<{
+    id: string;
+    name: string;
+  } | null>(null);
+  const [saved, setSaved] = useState("");
   const providers = [
     ...new Set(
       models.filter((model) => !model.demo).map((model) => model.provider),
@@ -2602,6 +2614,12 @@ function Settings({
       <p className="modal-intro">
         由 Pi 统一驱动。每一轮对话，都可以有自己的模型。
       </p>
+      {saved && (
+        <p className="provider-settings-success" role="status">
+          <Check size={15} />
+          {saved}
+        </p>
+      )}
       <div className="provider-row">
         <span className="provider-logo">π</span>
         <div>
@@ -2633,33 +2651,36 @@ function Settings({
               <b>{first?.providerName ?? provider}</b>
               <small>{first?.envVar}</small>
             </div>
-            <span
+            <button
+              type="button"
+              aria-label={`配置 ${first?.providerName ?? provider}`}
+              aria-haspopup="dialog"
+              onClick={() => {
+                setSaved("");
+                setEditingProvider({
+                  id: provider,
+                  name: first?.providerName ?? provider,
+                });
+              }}
               className={
                 first?.available
-                  ? "provider-connected"
-                  : "provider-disconnected"
+                  ? "provider-connected provider-configure"
+                  : "provider-disconnected provider-configure"
               }
             >
               {first?.available ? <Check size={12} /> : <Unplug size={12} />}
-              {first?.available ? "已连接" : "未配置"}
-            </span>
+              {first?.available ? "已配置" : "未配置"}
+              <ChevronRight size={12} />
+            </button>
           </div>
         );
       })}
       <div className="setup-guide">
         <b>在本机配置</b>
-        {desktop ? (
-          <p>
-            打开模型配置，在 <code>.env</code> 中填入供应商 API Key。 保存后，从
-            macOS 的 Panel 菜单重启本地服务。 已配置的模型可在输入框下方选择。
-          </p>
-        ) : (
-          <p>
-            将项目中的 <code>.env.example</code> 复制为 <code>.env</code>
-            ，填入供应商 API Key，然后重启 <code>npm run dev</code>
-            。已配置的模型可在输入框下方选择。
-          </p>
-        )}
+        <p>
+          点击供应商右侧的「未配置」或「已配置」，填写 API URL、Key 和
+          Model。保存后立即生效，可在输入框下方选择模型。
+        </p>
         <p>密钥只由本地服务读取，不会保存到浏览器或随探索导出。</p>
         {desktop && <DesktopSettingsActions />}
       </div>
@@ -2750,6 +2771,21 @@ function Settings({
         <span className="tiny-green-dot" /> 当前工作台运行在本机 · 同时支持 3
         个运行任务
       </div>
+      {editingProvider && (
+        <ProviderSettingsDialog
+          key={editingProvider.id}
+          providerId={editingProvider.id}
+          providerName={editingProvider.name}
+          onClose={() => setEditingProvider(null)}
+          onSaved={(options) => {
+            onModelsChange(options);
+            setSaved(
+              `${editingProvider.name} 配置已保存，可在对话中选择模型。`,
+            );
+            setEditingProvider(null);
+          }}
+        />
+      )}
     </>
   );
 }
@@ -2795,7 +2831,7 @@ function DesktopSettingsActions() {
           ) : (
             <Settings2 size={13} />
           )}
-          打开模型配置
+          打开高级配置文件
         </button>
         <button
           type="button"
