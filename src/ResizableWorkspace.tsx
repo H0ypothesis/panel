@@ -11,7 +11,6 @@ import { readPreference, savePreference } from "./api";
 
 const DEFAULT_WIDTH = 440;
 const MIN_WIDTH = 320;
-const MAX_WIDTH = 960;
 const MIN_CANVAS_WIDTH = 300;
 
 export function ResizableWorkspace({ children }: { children: ReactNode }) {
@@ -26,14 +25,14 @@ export function ResizableWorkspace({ children }: { children: ReactNode }) {
   const [preferredWidth, setPreferredWidth] = useState(() => {
     const saved = Number(readPreference("inspector-width"));
     return Number.isFinite(saved) && saved >= MIN_WIDTH
-      ? Math.min(saved, MAX_WIDTH)
+      ? saved
       : DEFAULT_WIDTH;
   });
   const [containerWidth, setContainerWidth] = useState(window.innerWidth);
   const [resizing, setResizing] = useState(false);
   const maxWidth = Math.max(
     MIN_WIDTH,
-    Math.min(MAX_WIDTH, Math.floor(containerWidth - MIN_CANVAS_WIDTH)),
+    Math.floor(containerWidth - MIN_CANVAS_WIDTH),
   );
   const width = Math.min(preferredWidth, maxWidth);
   const clamp = (next: number) =>
