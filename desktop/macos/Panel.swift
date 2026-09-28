@@ -2,12 +2,76 @@ import AppKit
 import WebKit
 import Darwin
 
+final class PanelWindow: NSWindow {
+    // This is the same native-point strip reserved by desktop-titlebar-inset.
+    var titlebarInset: CGFloat {
+        max(28, (contentView?.bounds.height ?? frame.height) - contentLayoutRect.height)
+    }
+
+    fileprivate func isTitlebarBackground(_ point: NSPoint) -> Bool {
+        guard isMovable, !styleMask.contains(.fullScreen), attachedSheet == nil,
+              let content = contentView else { return false }
+        let bounds = content.convert(content.bounds, to: nil)
+        // Leave the outer resize border and the native traffic lights to AppKit.
+        guard point.x >= bounds.minX + 4, point.x < bounds.maxX - 4,
+              point.y >= bounds.maxY - titlebarInset, point.y < bounds.maxY - 4 else { return false }
+        for kind: NSWindow.ButtonType in [.closeButton, .miniaturizeButton, .zoomButton] {
+            if let button = standardWindowButton(kind), !button.isHidden,
+               button.convert(button.bounds, to: nil).insetBy(dx: -5, dy: -5).contains(point) {
+                return false
+            }
+        }
+        return true
+    }
+}
+
+// A transparent native view handles only the reserved titlebar strip. All other
+// hit tests reach the web view so selection and canvas gestures remain intact.
+final class PanelTitlebarView: NSView {
+    private var dragStart: (mouse: NSPoint, origin: NSPoint)?
+
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        guard let window = window as? PanelWindow, let parent = superview,
+              window.isTitlebarBackground(parent.convert(point, to: nil)) else { return nil }
+        return self
+    }
+
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+    override var mouseDownCanMoveWindow: Bool { false }
+
+    override func mouseDown(with event: NSEvent) {
+        dragStart = nil
+        guard let window = window else { return }
+        if event.clickCount == 2 {
+            window.performZoom(nil)
+        } else if event.clickCount <= 1 {
+            dragStart = (window.convertPoint(toScreen: event.locationInWindow), window.frame.origin)
+            window.performDrag(with: event)
+        }
+    }
+
+    override func mouseDragged(with event: NSEvent) {
+        // Window Server normally owns the drag after performDrag. If it leaves
+        // events with us (for example with assistive input), move the window here.
+        guard let start = dragStart, let window = window,
+              window.isMovable, !window.styleMask.contains(.fullScreen), window.attachedSheet == nil else { return }
+        let mouse = window.convertPoint(toScreen: event.locationInWindow)
+        var frame = window.frame
+        frame.origin = NSPoint(x: start.origin.x + mouse.x - start.mouse.x,
+                               y: start.origin.y + mouse.y - start.mouse.y)
+        window.setFrame(window.constrainFrameRect(frame, to: window.screen), display: true)
+    }
+
+    override func mouseUp(with event: NSEvent) { dragStart = nil }
+}
+
 // The renderer has only explicit native conveniences. No filesystem or shell API is
 // exposed to JavaScript; the local server remains responsible for tool approval.
 final class PanelApp: NSObject, NSApplicationDelegate, NSWindowDelegate,
     WKNavigationDelegate, WKUIDelegate, WKScriptMessageHandlerWithReply, WKDownloadDelegate {
-    private var window: NSWindow!
+    private var window: PanelWindow!
     private var container: NSView!
+    private var titlebarView: PanelTitlebarView!
     private var webView: WKWebView?
     private var statusView: NSView?
     private var service: Process?
@@ -82,7 +146,7 @@ final class PanelApp: NSObject, NSApplicationDelegate, NSWindowDelegate,
     }
 
     private func makeWindow() {
-        window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1440, height: 920),
+        window = PanelWindow(contentRect: NSRect(x: 0, y: 0, width: 1440, height: 920),
                           styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
                           backing: .buffered, defer: false)
         window.title = "Panel"
@@ -98,6 +162,9 @@ final class PanelApp: NSObject, NSApplicationDelegate, NSWindowDelegate,
         container = NSView(frame: window.contentView?.bounds ?? NSRect(origin: .zero, size: window.frame.size))
         container.autoresizingMask = [.width, .height]
         window.contentView = container
+        titlebarView = PanelTitlebarView(frame: container.bounds)
+        titlebarView.autoresizingMask = [.width, .height]
+        container.addSubview(titlebarView)
         window.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
     }
@@ -399,7 +466,7 @@ final class PanelApp: NSObject, NSApplicationDelegate, NSWindowDelegate,
         view.navigationDelegate = self
         view.uiDelegate = self
         view.allowsBackForwardNavigationGestures = false
-        container.addSubview(view, positioned: .below, relativeTo: statusView)
+        container.addSubview(view, positioned: .below, relativeTo: statusView ?? titlebarView)
         NSLayoutConstraint.activate([
             view.leadingAnchor.constraint(equalTo: container.leadingAnchor),
             view.trailingAnchor.constraint(equalTo: container.trailingAnchor),
@@ -435,10 +502,8 @@ final class PanelApp: NSObject, NSApplicationDelegate, NSWindowDelegate,
 
     private func desktopStateAssignments() -> String {
         let fullscreen = window.styleMask.contains(.fullScreen)
-        let contentHeight = window.contentView?.bounds.height ?? window.frame.height
-        let titlebarHeight = max(28, contentHeight - window.contentLayoutRect.height)
         // Fullscreen can still show native titlebar or sharing controls.
-        let inset = titlebarHeight / (webView?.pageZoom ?? 1)
+        let inset = window.titlebarInset / (webView?.pageZoom ?? 1)
         return """
         root.dataset.desktop = 'macos';
         root.dataset.fullscreen = '\(fullscreen)';
@@ -731,7 +796,7 @@ final class PanelApp: NSObject, NSApplicationDelegate, NSWindowDelegate,
             stack.widthAnchor.constraint(equalToConstant: 480),
             description.widthAnchor.constraint(lessThanOrEqualToConstant: 480)
         ])
-        container.addSubview(background)
+        container.addSubview(background, positioned: .below, relativeTo: titlebarView)
         statusView = background
     }
 
@@ -825,6 +890,12 @@ final class PanelApp: NSObject, NSApplicationDelegate, NSWindowDelegate,
 
     func windowWillClose(_ notification: Notification) {
         if notification.object as? NSWindow === window { cancelFilePicker() }
+    }
+
+    func windowWillUseStandardFrame(_ sender: NSWindow, defaultFrame newFrame: NSRect) -> NSRect {
+        // Native zoom fills the current display's usable desktop, without
+        // entering a fullscreen Space or covering the menu bar and Dock.
+        sender.screen?.visibleFrame ?? newFrame
     }
 
     func windowDidResize(_ notification: Notification) {
