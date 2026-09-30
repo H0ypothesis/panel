@@ -23,6 +23,7 @@ import yauzl from "yauzl";
 const run = promisify(execFile);
 const repository = "H0ypothesis/panel";
 const api = `https://api.github.com/repos/${repository}/releases`;
+const releaseFeed = `https://raw.githubusercontent.com/${repository}/main/updates/macos.json`;
 const maxArchive = 512 * 1024 * 1024;
 const maxExpanded = 2 * 1024 * 1024 * 1024;
 
@@ -82,28 +83,98 @@ export function releaseCandidate(
   };
 }
 
-async function githubJSON(url) {
-  const response = await fetch(url, {
+async function githubJSON(url, fetchMetadata = fetch) {
+  const response = await fetchMetadata(url, {
     headers: {
       Accept: "application/vnd.github+json",
       "User-Agent": "Panel-Updater",
       "X-GitHub-Api-Version": "2022-11-28",
     },
-    signal: AbortSignal.timeout(30_000),
+    signal: AbortSignal.timeout(15_000),
     redirect: "error",
   });
-  if (!response.ok)
-    throw new Error(
-      `无法检查 GitHub 更新（HTTP ${response.status}）。请稍后重试。`,
+  if (!response.ok) {
+    await response.body?.cancel();
+    const limited =
+      response.status === 429 ||
+      (response.status === 403 &&
+        response.headers.get("x-ratelimit-remaining") === "0");
+    const error = new Error(
+      limited
+        ? "GitHub 更新检查暂时限流，将稍后自动重试。"
+        : `暂时无法连接 GitHub 更新源（HTTP ${response.status}），将稍后自动重试。`,
     );
+    const retry = response.headers.get("retry-after");
+    const retrySeconds =
+      retry && /^\d+$/.test(retry)
+        ? Number(retry)
+        : retry
+          ? (Date.parse(retry) - Date.now()) / 1000
+          : 0;
+    const resetSeconds = limited
+      ? Number(response.headers.get("x-ratelimit-reset") ?? 0) -
+        Date.now() / 1000
+      : 0;
+    error.retryAfter = Math.max(
+      0,
+      Number.isFinite(retrySeconds) ? retrySeconds : 0,
+      Number.isFinite(resetSeconds) ? resetSeconds : 0,
+    );
+    throw error;
+  }
   const length = Number(response.headers.get("content-length") ?? 0);
-  if (length > 8 * 1024 * 1024) throw new Error("更新信息过大。");
-  return response.json();
+  if (length > 8 * 1024 * 1024) {
+    await response.body?.cancel();
+    throw new Error("更新信息过大。");
+  }
+  const chunks = [];
+  let size = 0;
+  for await (const chunk of response.body ?? []) {
+    size += chunk.length;
+    if (size > 8 * 1024 * 1024) throw new Error("更新信息过大。");
+    chunks.push(chunk);
+  }
+  return JSON.parse(Buffer.concat(chunks).toString("utf8"));
 }
 
-export async function checkForUpdate(current, releases) {
+async function publishedReleases(target, fetchMetadata) {
+  try {
+    const data = await githubJSON(
+      target
+        ? `${api}/tags/${encodeURIComponent(target)}`
+        : `${api}?per_page=100`,
+      fetchMetadata,
+    );
+    if (target && data?.tag_name === target) return [data];
+    if (!target && Array.isArray(data)) return data;
+    throw new Error("GitHub 返回了无效的版本信息。");
+  } catch (primaryError) {
+    // This public file is copied from published GitHub Release metadata. It
+    // needs no credentials and does not consume the shared REST API quota.
+    try {
+      const feed = await githubJSON(releaseFeed, fetchMetadata);
+      if (
+        feed?.schemaVersion !== 1 ||
+        feed.repository !== repository ||
+        !Array.isArray(feed.releases)
+      )
+        throw new Error("备用更新信息无效。");
+      return feed.releases;
+    } catch {
+      const error = new Error(
+        primaryError.message?.includes("GitHub")
+          ? primaryError.message
+          : "暂时无法连接 GitHub，请检查网络；App 将稍后自动重试。",
+      );
+      error.retryAfter = primaryError.retryAfter;
+      throw error;
+    }
+  }
+}
+
+export async function checkForUpdate(current, releases, fetchMetadata = fetch) {
   if (!versionParts(current)) throw new Error("当前 App 版本号无效。");
-  const available = releases ?? (await githubJSON(`${api}?per_page=100`));
+  const available = releases ?? (await publishedReleases(null, fetchMetadata));
   if (!Array.isArray(available))
     throw new Error("GitHub 返回了无效的版本列表。");
   return (
@@ -112,6 +183,25 @@ export async function checkForUpdate(current, releases) {
       .filter(Boolean)
       .sort((a, b) => compareVersions(b.version, a.version))[0] ?? null
   );
+}
+
+export async function resolveTargetUpdate(
+  current,
+  target,
+  fetchMetadata = fetch,
+) {
+  if (
+    !versionParts(target) ||
+    !versionParts(current) ||
+    compareVersions(target, current) <= 0
+  )
+    throw new Error("更新请求无效。");
+  const releases = await publishedReleases(target, fetchMetadata);
+  const candidate = releases
+    .map((item) => releaseCandidate(item, current))
+    .find((item) => item && item.version === target);
+  if (!candidate) throw new Error("此版本没有可校验的兼容安装包。");
+  return candidate;
 }
 
 function within(root, path) {
@@ -442,12 +532,7 @@ async function main() {
     const app = await realpath(appPath);
     await access(dirname(app), constants.W_OK);
     await validateApp(app, current);
-    const release = await githubJSON(
-      `${api}/tags/${encodeURIComponent(target)}`,
-    );
-    const candidate = releaseCandidate(release, current);
-    if (!candidate || compareVersions(candidate.version, target) !== 0)
-      throw new Error("此版本没有可校验的兼容安装包。");
+    const candidate = await resolveTargetUpdate(current, target);
     stage = join(dirname(app), `.panel-update-${randomUUID()}`);
     await mkdir(stage, { mode: 0o700 });
     const archive = join(stage, "Panel.zip");
@@ -494,7 +579,12 @@ async function main() {
       error.code === "EACCES" || error.code === "EROFS"
         ? "安装位置不可写。请将 Panel 移到你的「应用程序」目录后重试。"
         : error.message || "更新失败，请稍后重试。";
-    emit({ phase: "error", version: target, message });
+    emit({
+      phase: "error",
+      version: target,
+      message,
+      retryAfter: error.retryAfter,
+    });
     if (committed && report) {
       await writeFile(report, JSON.stringify({ message, backup: stage }), {
         mode: 0o600,

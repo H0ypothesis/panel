@@ -35,10 +35,15 @@
   outline-offset: 2px;
 }
 .desktop-update-error {
+  display: flex;
+  align-items: flex-start;
+  gap: 4px;
   position: absolute;
   bottom: calc(100% + 8px);
   right: 0;
-  width: 200px;
+  width: 220px;
+  max-width: calc(100vw - 32px);
+  box-sizing: border-box;
   padding: 10px;
   border-radius: 8px;
   background: var(--surface);
@@ -48,6 +53,25 @@
   font-size: 11px;
   line-height: 1.5;
   z-index: 90;
+}
+.desktop-update-dismiss {
+  display: inline-flex;
+  flex: 0 0 24px;
+  align-items: center;
+  justify-content: center;
+  height: 24px;
+  margin: -4px -4px 0 0;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+}
+.desktop-update-dismiss:hover {
+  background: var(--surface-hover);
+}
+.desktop-update-dismiss:focus-visible {
+  outline: 2px solid var(--text-muted);
 }
 
 :root[data-desktop="macos"] .sidebar {

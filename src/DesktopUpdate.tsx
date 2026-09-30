@@ -1,10 +1,11 @@
 import { useEffect, useState } from "react";
-import { ArrowDownToLine, RefreshCw } from "lucide-react";
+import { ArrowDownToLine, RefreshCw, X } from "lucide-react";
 import { getDesktopBridge, type DesktopUpdateState } from "./desktop";
 
 export function DesktopUpdate() {
   const [state, setState] = useState<DesktopUpdateState>({ phase: "idle" });
   const [pending, setPending] = useState(false);
+  const [errorVisible, setErrorVisible] = useState(false);
   const desktop = getDesktopBridge();
   useEffect(() => {
     if (!desktop?.getUpdateState) return;
@@ -28,7 +29,21 @@ export function DesktopUpdate() {
       window.removeEventListener("panel:update-state", receive);
     };
   }, [desktop]);
+  useEffect(() => {
+    setErrorVisible(state.phase === "error" && Boolean(state.message));
+    if (state.phase !== "error" || !state.message) return;
+    const timer = window.setTimeout(() => setErrorVisible(false), 8_000);
+    const dismiss = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setErrorVisible(false);
+    };
+    window.addEventListener("keydown", dismiss);
+    return () => {
+      window.clearTimeout(timer);
+      window.removeEventListener("keydown", dismiss);
+    };
+  }, [state]);
   if (!desktop?.installUpdate || state.phase === "idle") return null;
+  const canInstall = Boolean(state.version) && state.operation !== "check";
   const busy =
     pending ||
     ["checking", "downloading", "verifying", "ready", "installing"].includes(
@@ -44,14 +59,17 @@ export function DesktopUpdate() {
           : state.phase === "ready" || state.phase === "installing"
             ? "安装中"
             : state.phase === "error"
-              ? "重试更新"
+              ? canInstall
+                ? "重试更新"
+                : "重试检查"
               : "有更新";
   async function update() {
     if (busy) return;
+    setErrorVisible(false);
     setPending(true);
     try {
       // Native events own progress; a command reply can predate a newer event.
-      if (state.version) await desktop?.installUpdate?.();
+      if (canInstall) await desktop?.installUpdate?.();
       else await desktop?.checkForUpdates?.();
     } catch (error) {
       setState((previous) => ({
@@ -70,7 +88,7 @@ export function DesktopUpdate() {
         className="desktop-update-button"
         disabled={busy}
         onClick={() => void update()}
-        aria-label={state.version ? `更新到 ${state.version}` : "检查 App 更新"}
+        aria-label={canInstall ? `更新到 ${state.version}` : "检查 App 更新"}
         title={
           state.message ??
           (state.version
@@ -86,9 +104,17 @@ export function DesktopUpdate() {
         )}
         <span aria-live="polite">{label}</span>
       </button>
-      {state.phase === "error" && state.message && (
+      {state.phase === "error" && state.message && errorVisible && (
         <span className="desktop-update-error" role="alert">
-          {state.message}
+          <span>{state.message}</span>
+          <button
+            type="button"
+            className="desktop-update-dismiss"
+            aria-label="关闭更新提示"
+            onClick={() => setErrorVisible(false)}
+          >
+            <X size={12} aria-hidden="true" />
+          </button>
         </span>
       )}
     </span>

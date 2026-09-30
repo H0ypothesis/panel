@@ -554,7 +554,7 @@ final class PanelApp: NSObject, NSApplicationDelegate, NSWindowDelegate,
         case "update-state":
             replyHandler(updater.state, nil)
         case "check-updates":
-            updater.check(manual: false)
+            updater.check(manual: true, showResult: false)
             replyHandler(updater.state, nil)
         case "install-update":
             beginUpdate()

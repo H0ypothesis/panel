@@ -13,6 +13,7 @@ export interface DesktopUpdateState {
   version?: string;
   progress?: number;
   message?: string;
+  operation?: "check" | "install";
 }
 
 export interface PanelDesktop {

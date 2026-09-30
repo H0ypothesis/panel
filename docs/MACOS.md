@@ -32,6 +32,8 @@ Panel 现在提供可本地运行的 macOS 应用。原生外壳使用 Swift、A
 
 App 启动后检查 `H0ypothesis/panel` 的 GitHub Release，之后每 24 小时检查一次；关闭期间不运行后台检查，下次打开时补查。检查时间和已发现的更新会保留，升级到新版本后会重新检查。也可随时选择「Panel → 检查更新…」。
 
+v0.5.1 起，GitHub API 限流或连接失败时，会读取同一仓库的公开备用版本信息 `updates/macos.json`。两个来源都不可用时，后台检查保持安静，30 分钟后重试，连续失败逐步延长至 6 小时；如 GitHub 要求更长等待则遵守该时间，成功后恢复每日检查。手动检查或安装失败的气泡可点击关闭、按 Esc 收起，也会在 8 秒后自动收起；按钮保留重试入口。
+
 发现高于当前版本且匹配 CPU 架构的安装包后，左下角版本号旁显示「有更新」。点击后自动下载并显示进度，核对 GitHub 资产的大小和 SHA-256，再检查应用标识、版本、最低 macOS 要求、CPU 架构和代码签名。校验通过后停止本地服务、替换当前 App 并重新打开；数据目录和模型配置保留。
 
 有运行或排队任务时暂不开始更新，下载结束后还会复查。请等待任务完成或手动停止后再点击。下载或校验失败可点击「重试更新」；替换或启动命令失败时尝试恢复旧 App。安装位置必须可写，磁盘映像或只读目录中的 App 需先移到「应用程序」。
@@ -117,6 +119,18 @@ release/build-info.json
 ```
 
 当前为单架构构建，不生成 Universal 应用。`build-info.json` 记录应用版本、架构、Node 版本、签名方式与构建时间。构建会替换同目录下的已有应用和对应架构 ZIP。
+
+发布新版本并确认安装包已公开、可下载后，同步备用更新信息（标签替换为本次版本）：
+
+```bash
+gh api repos/H0ypothesis/panel/releases/tags/v0.5.1 > build/published-release.json
+node scripts/update-release-feed.mjs build/published-release.json
+git add updates/macos.json
+git commit -m "chore: refresh public macOS update feed"
+git push origin main
+```
+
+脚本只接受已发布的数字版本和带 GitHub SHA-256 摘要的本仓库安装包，保留最近 20 个版本；备用源的架构、版本、大小、下载地址与摘要验证和 API 来源相同。不要在安装包公开前更新此文件。v0.5 若因 API 限流无法自动升级，需要从 Release 手动下载一次 v0.5.1。
 
 ## 验证记录与发布状态
 

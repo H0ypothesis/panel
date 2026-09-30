@@ -97,6 +97,85 @@ test("native update badge handles availability, progress, failure, retry and com
   assert.equal(button(), null);
 });
 
+test("check errors dismiss by close, Escape or timeout and retry checks even with a cached update", async (t) => {
+  const dom = new JSDOM('<div id="root"></div>', {
+    url: "http://localhost",
+    runScripts: "outside-only",
+  });
+  const { window } = dom;
+  window.IS_REACT_ACT_ENVIRONMENT = true;
+  const closeChannels = channelsFor(window);
+  let checks = 0,
+    installs = 0,
+    dismissAfterTimeout;
+  const realTimeout = window.setTimeout.bind(window);
+  window.setTimeout = (callback, delay, ...args) => {
+    if (delay === 8_000) {
+      dismissAfterTimeout = callback;
+      return 100_000;
+    }
+    return realTimeout(callback, delay, ...args);
+  };
+  window.panelDesktop = {
+    platform: "macos",
+    getUpdateState: async () => ({ phase: "idle" }),
+    installUpdate: async () => {
+      installs++;
+    },
+    checkForUpdates: async () => {
+      checks++;
+    },
+  };
+  window.eval(bundle.outputFiles[0].text);
+  const { act, mount } = window.UpdateTest;
+  let root;
+  t.after(async () => {
+    await act(() => root.unmount());
+    window.close();
+    closeChannels();
+  });
+  await act(async () => {
+    root = mount();
+  });
+  const error = () =>
+    act(() =>
+      window.dispatchEvent(
+        new window.CustomEvent("panel:update-state", {
+          detail: {
+            phase: "error",
+            operation: "check",
+            version: "v0.6",
+            message: "GitHub 限流，将自动重试。",
+          },
+        }),
+      ),
+    );
+  const alert = () => window.document.querySelector('[role="alert"]');
+  await error();
+  assert.ok(alert());
+  await act(() =>
+    window.document.querySelector('[aria-label="关闭更新提示"]').click(),
+  );
+  assert.equal(alert(), null);
+  await error();
+  await act(() =>
+    window.dispatchEvent(
+      new window.KeyboardEvent("keydown", { key: "Escape" }),
+    ),
+  );
+  assert.equal(alert(), null);
+  await error();
+  await act(() => dismissAfterTimeout());
+  assert.equal(alert(), null);
+  await error();
+  await act(() =>
+    window.document.querySelector('[aria-label="检查 App 更新"]').click(),
+  );
+  assert.equal(checks, 1);
+  assert.equal(installs, 0);
+  assert.equal(alert(), null);
+});
+
 test("browser-only workbench does not advertise a native installer", async (t) => {
   const dom = new JSDOM('<div id="root"></div>', {
     runScripts: "outside-only",

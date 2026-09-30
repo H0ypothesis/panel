@@ -24,7 +24,9 @@ import {
   extractArchive,
   replaceApp,
   supportsArchitecture,
+  resolveTargetUpdate,
 } from "../desktop/macos/updater.mjs";
+import { publishedReleaseMetadata } from "./update-release-feed.mjs";
 
 test("Mach-O validation supports Apple Silicon, Intel and Universal without Xcode", () => {
   const thin = Buffer.alloc(32);
@@ -48,7 +50,7 @@ test("Mach-O validation supports Apple Silicon, Intel and Universal without Xcod
 
 const sha = (data) => createHash("sha256").update(data).digest("hex");
 test(
-  "native progress pipe delivers ready before the installer exits",
+  "native updater streams progress and retries background failures without UI errors",
   { skip: process.platform !== "darwin" },
   async (t) => {
     const directory = await temp(t),
@@ -151,6 +153,109 @@ test("only matching, uploaded, digest-bearing assets from this repository are el
     ),
     null,
   );
+});
+
+const feed = (releases) => ({
+  schemaVersion: 1,
+  repository: "H0ypothesis/panel",
+  releases,
+});
+
+test("403 and offline API fall back to public release metadata for both check and install", async () => {
+  for (const failure of [403, 429, "offline"]) {
+    const calls = [];
+    const fetchMetadata = async (url, options) => {
+      calls.push(url);
+      assert.equal(options.redirect, "error");
+      assert.equal(options.headers.Authorization, undefined);
+      if (url.startsWith("https://api.github.com/")) {
+        if (failure === "offline") throw new TypeError("fetch failed");
+        return new Response("denied", { status: failure });
+      }
+      assert.equal(
+        url,
+        "https://raw.githubusercontent.com/H0ypothesis/panel/main/updates/macos.json",
+      );
+      return Response.json(feed([release("v0.6"), release("v0.5.1")]));
+    };
+    assert.equal(
+      (await checkForUpdate("0.5", undefined, fetchMetadata)).version,
+      "v0.6",
+    );
+    // Preparing a previously chosen version must not silently install a newer release.
+    assert.equal(
+      (await resolveTargetUpdate("0.5", "v0.5.1", fetchMetadata)).version,
+      "v0.5.1",
+    );
+    assert.equal(await checkForUpdate("0.6", undefined, fetchMetadata), null);
+    assert.equal(calls.length, 6);
+  }
+});
+
+test("healthy API needs no fallback; fallback cannot weaken archive trust or target selection", async () => {
+  let calls = 0;
+  assert.equal(
+    (
+      await checkForUpdate("0.5", undefined, async () => {
+        calls++;
+        return Response.json([release()]);
+      })
+    ).version,
+    "v0.6",
+  );
+  assert.equal(calls, 1);
+  for (const patch of [
+    { digest: null },
+    { browser_download_url: "https://evil.example/app.zip" },
+    { size: -1 },
+  ]) {
+    const untrusted = release();
+    Object.assign(untrusted.assets[0], patch);
+    const fetchMetadata = async (url) =>
+      url.includes("api.github.com")
+        ? new Response(null, { status: 403 })
+        : Response.json(feed([untrusted]));
+    assert.equal(await checkForUpdate("0.5", undefined, fetchMetadata), null);
+    await assert.rejects(
+      resolveTargetUpdate("0.5", "v0.6", fetchMetadata),
+      /可校验/,
+    );
+    assert.throws(() => publishedReleaseMetadata(untrusted), /verified/);
+  }
+  assert.throws(
+    () => publishedReleaseMetadata(release("v0.6", { draft: true })),
+    /published/,
+  );
+  assert.equal(
+    publishedReleaseMetadata(release()).assets[0].digest,
+    release().assets[0].digest,
+  );
+});
+
+test("unreachable or malformed fallback remains an error and preserves rate-limit retry timing", async () => {
+  for (const fallback of [
+    null,
+    {},
+    { ...feed([]), repository: "someone/else" },
+  ]) {
+    const fetchMetadata = async (url) => {
+      if (url.includes("api.github.com"))
+        return new Response(null, {
+          status: 403,
+          headers: { "x-ratelimit-remaining": "0", "retry-after": "3600" },
+        });
+      if (!fallback) throw new TypeError("offline");
+      return Response.json(fallback);
+    };
+    await assert.rejects(
+      checkForUpdate("0.5", undefined, fetchMetadata),
+      (error) => {
+        assert.match(error.message, /限流/);
+        assert.equal(error.retryAfter, 3600);
+        return true;
+      },
+    );
+  }
 });
 
 test("download verifies content hash and rejects foreign or insecure redirects", async (t) => {
