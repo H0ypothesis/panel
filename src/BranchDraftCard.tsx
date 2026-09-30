@@ -15,6 +15,7 @@ import type {
   ContextCheckpoint,
   ModelOption,
   RunConfig,
+  ToolRequest,
   TurnNode,
 } from "../shared/types";
 import { ComposerModelControls } from "./WorkspaceControls";
@@ -26,6 +27,7 @@ export type BranchDraftData = {
   text: string;
   files: File[];
   referenceNodeIds: string[];
+  toolRequests?: ToolRequest[];
   referenceCandidates: TurnNode[];
   workspaceNodes: TurnNode[];
   config: RunConfig;
@@ -44,6 +46,7 @@ export type BranchDraftData = {
   onTextChange: (text: string) => void;
   onFilesChange: (files: File[]) => void;
   onReferencesChange: (nodeIds: string[]) => void;
+  onToolRequestsChange: (requests: ToolRequest[]) => void;
   onConfigChange: (config: RunConfig) => void;
   onSubmit: () => void;
   onCancel: () => void;
@@ -253,10 +256,12 @@ export const BranchDraftCard = memo(function BranchDraftCard({
         value={data.text}
         maxLength={20_000}
         disabled={data.busy}
-        placeholder="提出一个新问题，输入 @ 引用其他卡片…"
+        placeholder="提出一个新问题，输入 @ 选择工具或卡片…"
         onChange={data.onTextChange}
         referenceNodeIds={data.referenceNodeIds}
         onReferencesChange={data.onReferencesChange}
+        toolRequests={data.toolRequests}
+        onToolRequestsChange={data.onToolRequestsChange}
         candidates={data.referenceCandidates}
         workspaceNodes={data.workspaceNodes}
         onCompositionStart={() => {
@@ -289,6 +294,7 @@ export const BranchDraftCard = memo(function BranchDraftCard({
       <ComposerModelControls
         models={data.models}
         config={data.config}
+        toolRequests={data.toolRequests}
         disabled={data.busy}
         onConfigChange={data.onConfigChange}
       />

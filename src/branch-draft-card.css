@@ -9,10 +9,10 @@
   box-sizing: border-box;
   position: relative;
   display: grid;
-  grid-template-rows: 22px auto minmax(80px, 1fr) auto 30px auto 30px;
+  grid-template-rows: 22px auto minmax(80px, 1fr) auto auto auto 30px;
   gap: 8px;
   width: 320px;
-  min-height: 374px;
+  min-height: 408px;
   padding: 14px;
   border: 1px dashed var(--draft-accent);
   border-radius: 10px;

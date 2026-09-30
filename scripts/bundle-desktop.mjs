@@ -1,8 +1,10 @@
 import { build } from "esbuild";
+import { existsSync } from "node:fs";
 import { cp, mkdir, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { dirname, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
+import { release as cuaRelease, runtimeTarget } from "./setup-cua.mjs";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const output = join(root, "build/desktop/app");
@@ -18,6 +20,48 @@ await build({
   format: "esm",
   target: "node22",
   tsconfig: "tsconfig.json",
+  // Apply source mappings inside the upstream subagent dependency, too.
+  plugins: [
+    {
+      name: "panel-pi-source",
+      setup(builder) {
+        // Pi declares side effects for published .js paths; the desktop build
+        // resolves the equivalent source .ts file and must retain registration.
+        builder.onResolve(
+          { filter: /^\.\/providers\/images\/register-builtins\.ts$/ },
+          ({ path, resolveDir }) => ({
+            path: resolve(resolveDir, path),
+            sideEffects: true,
+          }),
+        );
+        const packages = {
+          "pi-agent-core": "agent",
+          "pi-ai": "ai",
+          "pi-telemetry": "telemetry",
+          chord: "chord",
+        };
+        builder.onResolve(
+          {
+            filter:
+              /^@earendil-works\/(pi-agent-core|pi-ai|pi-telemetry|chord)(\/.*)?$/,
+          },
+          ({ path }) => {
+            const [, name, ...parts] = path.split("/");
+            const entry = join(
+              root,
+              "pi/packages",
+              packages[name],
+              "src",
+              parts.join("/") || "index",
+            );
+            for (const suffix of [".ts", "/index.ts"]) {
+              if (existsSync(entry + suffix)) return { path: entry + suffix };
+            }
+          },
+        );
+      },
+    },
+  ],
   define: { "process.env.NODE_ENV": '"production"' },
   banner: {
     js: 'import { createRequire as __panelCreateRequire } from "node:module"; const require = __panelCreateRequire(import.meta.url);',
@@ -75,8 +119,51 @@ async function copyPackage(name, from, optional = false) {
 }
 await copyPackage("pi-web-access", root);
 await copyPackage("tsx", root);
+await build({
+  absWorkingDir: root,
+  entryPoints: ["desktop/macos/updater.mjs"],
+  outfile: join(output, "updater.mjs"),
+  bundle: true,
+  platform: "node",
+  format: "esm",
+  target: "node22",
+  banner: {
+    js: 'import { createRequire as __panelCreateRequire } from "node:module"; const require = __panelCreateRequire(import.meta.url);',
+  },
+});
 await cp(join(root, "dist"), join(output, "dist"), { recursive: true });
 await cp(join(root, ".env.example"), join(output, ".env.example"));
+// Ship the verified, unmodified official runtime when setup:cua has staged it.
+// Preserve app-bundle symlinks verbatim so its Developer ID signature survives.
+const cuaTarget = runtimeTarget();
+const cuaSource = join(
+  root,
+  ".panel/cua-driver",
+  cuaRelease.version,
+  cuaTarget,
+);
+try {
+  const manifest = JSON.parse(
+    await readFile(join(cuaSource, "release.json"), "utf8"),
+  );
+  if (manifest.sha256 !== cuaRelease.assets[cuaTarget].sha256)
+    throw new Error(
+      "Staged Cua Driver does not match scripts/cua-release.json; run npm run setup:cua.",
+    );
+  await cp(
+    cuaSource,
+    join(output, "cua-driver", cuaRelease.version, cuaTarget),
+    {
+      recursive: true,
+      verbatimSymlinks: true,
+    },
+  );
+} catch (error) {
+  if (error.code !== "ENOENT") throw error;
+  console.warn(
+    "Cua Driver not bundled: run npm run setup:cua before packaging to include computer use.",
+  );
+}
 await writeFile(
   join(output, "package.json"),
   JSON.stringify({ private: true, type: "module" }) + "\n",

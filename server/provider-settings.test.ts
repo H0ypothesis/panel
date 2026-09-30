@@ -100,6 +100,170 @@ test("provider settings preserve catalogs and capabilities, retain custom IDs, a
   }
 });
 
+test("context budgets persist per model, preserve running registries, reset explicitly and never transfer between URLs", async (t) => {
+  const { directory, settings } = await setup(t);
+  const baseUrl = "https://gateway.invalid/api";
+  await settings.save("paperbypass", {
+    baseUrl,
+    apiKey: "key",
+    model: "first",
+  });
+  const old = settings.currentRegistry();
+  assert.equal(
+    settings.contextWindowSource("paperbypass", "first"),
+    "fallback",
+  );
+  assert.equal(old.getModel("paperbypass", "first")?.contextWindow, 128000);
+  await settings.save("paperbypass", {
+    baseUrl,
+    model: "first",
+    contextWindow: 1_000_000,
+  });
+  assert.equal(
+    settings.currentRegistry().getModel("paperbypass", "first")?.contextWindow,
+    1_000_000,
+  );
+  assert.equal(old.getModel("paperbypass", "first")?.contextWindow, 128000);
+  assert.equal(
+    settings.contextWindowSource("paperbypass", "first"),
+    "configured",
+  );
+  await settings.save("paperbypass", {
+    baseUrl,
+    model: "second",
+    contextWindow: 256000,
+  });
+  await settings.save("paperbypass", { baseUrl, model: "first" });
+  const reloaded = new ModelProviderSettings(directory);
+  await reloaded.init();
+  assert.equal(
+    reloaded.currentRegistry().getModel("paperbypass", "first")?.contextWindow,
+    1_000_000,
+  );
+  assert.equal(
+    reloaded.currentRegistry().getModel("paperbypass", "second")?.contextWindow,
+    256000,
+  );
+  await reloaded.save("paperbypass", {
+    baseUrl,
+    model: "first",
+    contextWindow: null,
+  });
+  assert.equal(
+    reloaded.currentRegistry().getModel("paperbypass", "first")?.contextWindow,
+    128000,
+  );
+  assert.equal(
+    reloaded.contextWindowSource("paperbypass", "first"),
+    "fallback",
+  );
+  await reloaded.save("paperbypass", {
+    baseUrl: "https://another.invalid/api",
+    model: "second",
+  });
+  assert.equal(
+    reloaded.currentRegistry().getModel("paperbypass", "second")?.contextWindow,
+    128000,
+  );
+  assert.equal(
+    reloaded.contextWindowSource("paperbypass", "second"),
+    "fallback",
+  );
+});
+
+test("previously saved custom GLM Flash gains verified image support without losing its budget or granting it to other models", async (t) => {
+  const { directory } = await setup(t);
+  await writeFile(
+    join(directory, "model-providers.json"),
+    JSON.stringify({
+      version: 1,
+      providers: [
+        {
+          id: "paperbypass",
+          baseUrl: "https://gateway.invalid/api",
+          apiKey: "local-mock-glm-key",
+          model: "z-ai/glm-5.3-flash",
+          customModels: [
+            "z-ai/glm-5.3-flash",
+            "z-ai/glm-5.3",
+            "custom-vision-model",
+          ],
+          modelContexts: [{ id: "z-ai/glm-5.3-flash", contextWindow: 1000000 }],
+        },
+      ],
+    }),
+  );
+  const runtime = new PiRuntime();
+  await runtime.initProviderSettings(directory);
+  const models = runtime
+    .models()
+    .filter((model) => model.provider === "paperbypass");
+  const glm = models.filter(
+    (model) => model.id === "paperbypass/z-ai/glm-5.3-flash",
+  );
+  assert.equal(glm.length, 1);
+  assert.equal(glm[0].supportsImages, true);
+  assert.equal(glm[0].contextWindow, 1000000);
+  assert.equal(glm[0].contextWindowSource, "configured");
+  assert.ok(
+    models
+      .filter((model) => model !== glm[0])
+      .every((model) => !model.supportsImages),
+  );
+  await runtime.saveProviderSettings("paperbypass", {
+    baseUrl: "https://gateway.invalid/api",
+    model: "z-ai/glm-5.3",
+  });
+  const restarted = new PiRuntime();
+  await restarted.initProviderSettings(directory);
+  assert.deepEqual(
+    restarted.models().find((model) => model.id === glm[0].id),
+    glm[0],
+  );
+});
+
+test("invalid context overrides fail before persistence and builtin overrides can be cleared", async (t) => {
+  const { settings } = await setup(t);
+  const base = {
+    baseUrl: "https://gateway.invalid/api",
+    model: "Atria-Dawn-Preview",
+    apiKey: "key",
+  };
+  for (const contextWindow of [
+    0,
+    -1,
+    1023,
+    1024.5,
+    "1000000",
+    NaN,
+    Infinity,
+    100_000_001,
+    {},
+    [],
+  ])
+    await assert.rejects(
+      settings.save("paperbypass", { ...base, contextWindow }),
+      /上下文长度/,
+    );
+  assert.equal(settings.configured("paperbypass"), false);
+  await settings.save("paperbypass", { ...base, contextWindow: 512000 });
+  assert.equal(
+    settings.currentRegistry().getModel("paperbypass", base.model)
+      ?.contextWindow,
+    512000,
+  );
+  await settings.save("paperbypass", { ...base, contextWindow: null });
+  assert.equal(
+    settings.currentRegistry().getModel("paperbypass", base.model)
+      ?.contextWindow,
+    256000,
+  );
+  assert.equal(
+    settings.contextWindowSource("paperbypass", base.model),
+    "builtin",
+  );
+});
+
 test("environment keys remain fallback without copying them into settings and local keys take precedence", async (t) => {
   const { directory, settings } = await setup(t);
   process.env.ANTHROPIC_AUTH_TOKEN = "environment-auth-token";
@@ -263,31 +427,52 @@ test("custom OpenAI model actually streams through the saved URL and key immedia
     baseUrl: "https://local-mock.invalid/v1/",
     model: "my-custom-model",
     apiKey: "local-test-api-key",
+    contextWindow: 262144,
   });
   const option = runtime
     .models()
     .find((model) => model.id === "openai/my-custom-model");
   assert.ok(option?.available);
+  assert.equal(option.contextWindow, 262144);
+  assert.equal(option.contextWindowSource, "configured");
   assert.equal(option.supportsImages, false);
   assert.deepEqual(option.thinkingLevels, ["off"]);
   assert.equal(runtime.models().length, initialModels.length + 1);
+  const budgets: number[] = [];
+  const contextOptions = {
+    autoCompact: true,
+    sources: [{ nodeId: "current", revision: 0, messageCount: 0 }],
+    onState: async (state: { contextWindow?: number }) => {
+      if (state.contextWindow !== undefined) budgets.push(state.contextWindow);
+    },
+  };
   const result = await runtime.run(
     { model: option.id, thinking: "off" },
     [],
     "hello",
     AbortSignal.timeout(10000),
     () => {},
+    undefined,
+    contextOptions,
   );
   assert.equal(result.response, "Saved connection works");
   const reloaded = new PiRuntime();
   await reloaded.initProviderSettings(directory);
+  assert.equal(
+    reloaded.models().find((model) => model.id === option.id)?.contextWindow,
+    262144,
+  );
   await reloaded.run(
     { model: option.id, thinking: "off" },
     [],
     "hello again",
     AbortSignal.timeout(10000),
     () => {},
+    undefined,
+    contextOptions,
   );
+  assert.ok(budgets.length >= 2);
+  assert.ok(budgets.every((budget) => budget === 262144));
   assert.deepEqual(
     calls,
     Array.from({ length: 2 }, () => ({

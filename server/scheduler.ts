@@ -16,6 +16,8 @@ import {
 import { realpath } from "node:fs/promises";
 import type {
   ApprovalMode,
+  ComputerUseScope,
+  ComputerUseTakeoverOptions,
   ContextCheckpoint,
   ContextParent,
   ContextState,
@@ -23,6 +25,8 @@ import type {
   RunConfig,
   ToolApprovalDecision,
   ToolCall,
+  ToolRequest,
+  ModelOption,
 } from "../shared/types.ts";
 import type { GitBaseline } from "./git-snapshots.ts";
 import {
@@ -42,6 +46,11 @@ import { Store } from "./store.ts";
 import { directoriesOverlap, workingDirectory } from "./directories.ts";
 import { validateApprovalSettings } from "./approval-settings.ts";
 import { isWebTool } from "./web-tools.ts";
+import { computerUseMetadata } from "./computer-use.ts";
+import { isCuaTakeoverOperation } from "./cua-takeover.ts";
+import { sameTarget, type CuaPreparedApproval } from "./cua-task-control.ts";
+import { toolRequestPrompt, validateToolRequests } from "./tool-requests.ts";
+import { runConfigsMatch, validateLongTask } from "./run-config.ts";
 import {
   FileOperationLocks,
   fileOperationsConflict,
@@ -62,6 +71,12 @@ interface Job {
 interface ContextSelectionInput {
   contextCheckpointId?: string;
   contextMode?: "raw";
+}
+interface ComputerUseTakeoverGrant {
+  workspace: StoredWorkspace;
+  node: StoredNode;
+  revision: number;
+  scope?: ComputerUseScope;
 }
 export class NodeMutationConflict extends Error {}
 
@@ -95,6 +110,17 @@ export class Scheduler {
   private mutations = new Map<string, Promise<unknown>>();
   private approvalVersions = new Map<string, number>();
   private authorizations = new ToolAuthorizationRegistry();
+  private computerUseTakeovers = new Map<string, ComputerUseTakeoverGrant>();
+  private computerUseScopes = new Map<
+    string,
+    { node: StoredNode; revision: number; scope: ComputerUseScope }
+  >();
+  private computerUseContexts = new WeakMap<ToolCall, CuaPreparedApproval>();
+  private computerUseTakeoverChanges = new Map<string, number>();
+  private computerUseTakeoverTokens = new WeakMap<
+    ToolCall,
+    ComputerUseTakeoverGrant
+  >();
   private fileOperations = new FileOperationLocks();
   private dispatchingTools = new Set<string>();
   private maintenanceController = new AbortController();
@@ -109,6 +135,21 @@ export class Scheduler {
     this.concurrency = concurrency;
   }
 
+  private validateRequestedTools(
+    requests: ToolRequest[] | undefined,
+    model: ModelOption,
+  ) {
+    if (!requests?.length) return;
+    if (model.demo)
+      throw new Error("演示模型不能主动调用工具，请先选择已连接的真实模型。");
+    if (requests.includes("computer_use")) {
+      if (!this.runtime.computerUseStatus?.().available)
+        throw new Error("电脑控制尚未安装，请先在「电脑控制」中完成驱动设置。");
+      if (model.supportsImages === false)
+        throw new Error("电脑控制需要支持图片的模型。");
+    }
+  }
+
   submit(
     workspaceId: string,
     input: {
@@ -118,6 +159,7 @@ export class Scheduler {
       prompt: string;
       attachments?: AttachmentUpload[];
       referenceNodeIds?: string[];
+      toolRequests?: ToolRequest[];
       config: RunConfig;
       requestId: string;
       contextCheckpointId?: string;
@@ -138,12 +180,16 @@ export class Scheduler {
       prompt: string;
       attachments?: AttachmentUpload[];
       referenceNodeIds?: string[];
+      toolRequests?: ToolRequest[];
       config: RunConfig;
       requestId: string;
       contextCheckpointId?: string;
       contextMode?: "raw";
     },
   ) {
+    if (input.toolRequests?.length && !input.prompt.trim())
+      throw new Error("请选择工具后输入具体任务。");
+    validateLongTask(input.config.longTask);
     if (!input.prompt.trim() && input.attachments?.length)
       input = { ...input, prompt: "请分析上传的附件。" };
     const workspace = this.store.workspace(workspaceId);
@@ -158,6 +204,7 @@ export class Scheduler {
     const duplicate = this.findRequest(workspace, input.requestId);
     const attachmentHash = attachmentInputHash(input.attachments);
     const references = referenceNodeIds(input.referenceNodeIds);
+    const toolRequests = validateToolRequests(input.toolRequests);
     const requestedParents = contextParentInput(input.contextParents);
     if (requestedParents && requestedParents[0].nodeId !== input.parentId)
       throw new NodeMutationConflict("主分支必须是第一个接入节点。");
@@ -173,13 +220,14 @@ export class Scheduler {
           requestedParents,
         ) ||
         duplicate.run.prompt !== input.prompt ||
+        JSON.stringify(duplicate.run.toolRequests ?? []) !==
+          JSON.stringify(toolRequests ?? []) ||
         duplicate.run.attachmentInputHash !== attachmentHash ||
         !referenceSelectionMatches(
           duplicate.run.contextReferences,
           references,
         ) ||
-        duplicate.run.config.model !== input.config.model ||
-        duplicate.run.config.thinking !== input.config.thinking ||
+        !runConfigsMatch(duplicate.run.config, input.config) ||
         (duplicate.run.contextParentsRequest
           ? duplicate.run.contextParentsRequest[0].contextCheckpointId
           : duplicate.run.requestedContextCheckpointId) !==
@@ -209,6 +257,7 @@ export class Scheduler {
       );
     if (!model.thinkingLevels.includes(input.config.thinking))
       throw new Error("该模型不支持所选思考强度。");
+    this.validateRequestedTools(toolRequests, model);
     if (!model.demo)
       this.assertDirectoryAvailable(
         this.store.effectiveWorkingDirectory(workspace),
@@ -304,6 +353,7 @@ export class Scheduler {
       })),
       prompt: input.prompt,
       contextReferences,
+      toolRequests,
       attachments: attachments.length
         ? attachments.map((file) => file.metadata)
         : undefined,
@@ -698,6 +748,7 @@ export class Scheduler {
       requestId: string;
     },
   ): Promise<ContextCheckpoint> {
+    validateLongTask(input.config.longTask);
     const task = await this.serializeMutation(workspaceId, async () => {
       const workspace = this.store.workspace(workspaceId);
       this.assertWorkspaceNotDeleting(workspace);
@@ -729,8 +780,7 @@ export class Scheduler {
             requestedParents,
           ) ||
           !contextParentsMatch(previous.contextParents, contextParents) ||
-          previous.config.model !== input.config.model ||
-          previous.config.thinking !== input.config.thinking
+          !runConfigsMatch(previous.config, input.config)
         )
           throw new NodeMutationConflict("请求 ID 已用于其他整体压缩内容。");
         const job = this.mergeContextJobs.get(key);
@@ -927,6 +977,7 @@ export class Scheduler {
     nodeId: string,
     input: { config: RunConfig; expectedRevision: number; requestId: string },
   ): Promise<ContextCheckpoint | undefined> {
+    validateLongTask(input.config.longTask);
     const task = await this.serializeMutation(workspaceId, async () => {
       const workspace = this.store.workspace(workspaceId);
       this.assertWorkspaceNotDeleting(workspace);
@@ -947,8 +998,7 @@ export class Scheduler {
       if (previousRequest?.requestId === input.requestId) {
         if (
           previousRequest.revision !== input.expectedRevision ||
-          previousRequest.config.model !== input.config.model ||
-          previousRequest.config.thinking !== input.config.thinking
+          !runConfigsMatch(previousRequest.config, input.config)
         )
           throw new NodeMutationConflict("请求 ID 已用于其他摘要内容。");
         const active = this.contextJobs.get(node.id);
@@ -1211,6 +1261,7 @@ export class Scheduler {
     input: {
       prompt: string;
       referenceNodeIds?: string[];
+      toolRequests?: ToolRequest[];
       config: RunConfig;
       requestId: string;
       expectedRevision: number;
@@ -1221,7 +1272,9 @@ export class Scheduler {
     return this.serializeMutation(workspaceId, async () => {
       const workspace = this.store.workspace(workspaceId);
       this.validateContextSelection(input);
+      validateLongTask(input.config.longTask);
       const references = referenceNodeIds(input.referenceNodeIds);
+      const requestedTools = validateToolRequests(input.toolRequests);
       if (this.preparationRequestExists(workspace, input.requestId))
         throw new NodeMutationConflict(
           "请求 ID 已用于摘要任务，请使用新的请求 ID。",
@@ -1262,13 +1315,14 @@ export class Scheduler {
           duplicate.node.id !== nodeId ||
           (duplicate.run.revision ?? 0) !== input.expectedRevision + 1 ||
           duplicate.run.prompt !== input.prompt ||
+          JSON.stringify(duplicate.run.toolRequests ?? []) !==
+            JSON.stringify(requestedTools ?? previous?.toolRequests ?? []) ||
           !referenceSelectionMatches(
             duplicate.run.contextReferences,
             references,
             previous?.contextReferences,
           ) ||
-          duplicate.run.config.model !== input.config.model ||
-          duplicate.run.config.thinking !== input.config.thinking ||
+          !runConfigsMatch(duplicate.run.config, input.config) ||
           !selectionMatches
         )
           throw new NodeMutationConflict(
@@ -1292,6 +1346,8 @@ export class Scheduler {
         );
       if (!model.thinkingLevels.includes(input.config.thinking))
         throw new Error("该模型不支持所选思考强度。");
+      const toolRequests = requestedTools ?? node.toolRequests;
+      this.validateRequestedTools(toolRequests, model);
       if (
         !model.demo &&
         model.supportsImages === false &&
@@ -1352,6 +1408,7 @@ export class Scheduler {
         revision: input.expectedRevision + 1,
         prompt: input.prompt,
         contextReferences,
+        toolRequests: structuredClone(toolRequests),
         attachments: structuredClone(node.attachments),
         attachmentData: structuredClone(node.attachmentData),
         attachmentInputHash: node.attachmentInputHash,
@@ -1453,6 +1510,7 @@ export class Scheduler {
       );
       if (node.status !== "failed" && node.status !== "cancelled")
         throw new NodeMutationConflict("只有失败或已停止的卡片可以原地重试。");
+      validateLongTask(node.config.longTask);
       if (input.expectedRevision === Number.MAX_SAFE_INTEGER)
         throw new Error("节点版本已超过可支持范围。");
       const model = this.runtime
@@ -1464,6 +1522,7 @@ export class Scheduler {
         );
       if (!model.thinkingLevels.includes(node.config.thinking))
         throw new Error("该模型不支持所选思考强度。");
+      this.validateRequestedTools(node.toolRequests, model);
       const contextParents = this.resolveContextParents(
         workspace,
         node.parentId!,
@@ -1655,6 +1714,7 @@ export class Scheduler {
           revision: input.expectedRevision + 1,
           prompt: node.prompt,
           contextReferences: structuredClone(node.contextReferences),
+          toolRequests: structuredClone(node.toolRequests),
           attachments: structuredClone(node.attachments),
           attachmentData: structuredClone(node.attachmentData),
           attachmentInputHash: node.attachmentInputHash,
@@ -2062,6 +2122,165 @@ export class Scheduler {
     return change;
   }
 
+  private isLiveNode(workspace: StoredWorkspace, node: StoredNode) {
+    if (this.closed || !workspace.nodes.includes(node)) return false;
+    if (node.status === "queued")
+      return this.queue.some(
+        (job) => job.workspace === workspace && job.node === node,
+      );
+    const controller = this.active.get(node.id);
+    return (
+      node.status === "running" &&
+      Boolean(controller && !controller.signal.aborted)
+    );
+  }
+
+  private currentComputerUseTakeover(
+    workspace: StoredWorkspace,
+    node: StoredNode,
+  ) {
+    const grant = this.computerUseTakeovers.get(node.id);
+    return grant &&
+      grant.workspace === workspace &&
+      grant.node === node &&
+      grant.revision === (node.revision ?? 0) &&
+      node.computerUseTakeover === true &&
+      this.isLiveNode(workspace, node)
+      ? grant
+      : undefined;
+  }
+
+  private revokeComputerUseTakeover(node: StoredNode) {
+    this.computerUseTakeovers.delete(node.id);
+    delete node.computerUseTakeover;
+    delete node.computerUseTaskScope;
+    this.computerUseTakeoverChanges.set(
+      node.id,
+      (this.computerUseTakeoverChanges.get(node.id) ?? 0) + 1,
+    );
+    for (const call of node.toolCalls ?? []) {
+      if (
+        call.approval === "cua_takeover" &&
+        call.authorization &&
+        call.authorization.consumedAt === undefined
+      )
+        this.invalidateAuthorization(
+          call,
+          "CUA 接管已关闭，未执行的接管授权已失效。",
+        );
+    }
+  }
+
+  async setComputerUseTakeover(
+    workspaceId: string,
+    nodeId: string,
+    enabled: boolean,
+    expectedRevision: number,
+    options: ComputerUseTakeoverOptions = {},
+  ) {
+    if (typeof enabled !== "boolean")
+      throw new Error("CUA 接管开关必须是布尔值。");
+    if (!Number.isSafeInteger(expectedRevision) || expectedRevision < 0)
+      throw new Error("请提供有效的节点版本。");
+    if (
+      !options ||
+      typeof options !== "object" ||
+      Array.isArray(options) ||
+      Object.keys(options).some((key) => !["mode", "scopeId"].includes(key)) ||
+      (options.mode !== undefined &&
+        options.mode !== "observe" &&
+        options.mode !== "task") ||
+      (options.scopeId !== undefined && typeof options.scopeId !== "string")
+    )
+      throw new Error("CUA 接管模式或范围无效。");
+    if (enabled && options.mode === "task" && !options.scopeId)
+      throw new Error("请先观察并选择本任务允许操作的窗口或页面。");
+    const workspace = this.store.workspace(workspaceId);
+    const node = workspace.nodes.find((item) => item.id === nodeId);
+    if (!node) throw new Error("节点不存在。");
+    const assertCurrent = () => {
+      if (
+        (node.revision ?? 0) !== expectedRevision ||
+        !workspace.nodes.includes(node)
+      )
+        throw new NodeMutationConflict(
+          "节点已重新生成，CUA 接管设置已失效，请刷新后重试。",
+        );
+      if (!this.isLiveNode(workspace, node))
+        throw new NodeMutationConflict(
+          "只有正在运行或排队中的电脑控制卡片可以设置 CUA 接管。",
+        );
+      if (
+        enabled &&
+        !node.toolRequests?.includes("computer_use") &&
+        !node.toolCalls?.some((call) =>
+          [
+            "computer_use_tools",
+            "computer_use_call",
+            "computer_use_release",
+          ].includes(call.name),
+        )
+      )
+        throw new Error("当前卡片尚未使用电脑控制，不能开启 CUA 接管。");
+    };
+    assertCurrent();
+    const observed = this.computerUseScopes.get(node.id);
+    const scope =
+      enabled && options.mode === "task" ? observed?.scope : undefined;
+    const assertScope = () => {
+      if (
+        enabled &&
+        options.mode === "task" &&
+        (!scope ||
+          this.computerUseScopes.get(node.id)?.scope.id !== scope.id ||
+          observed?.node !== node ||
+          observed.revision !== expectedRevision ||
+          scope.id !== options.scopeId)
+      )
+        throw new NodeMutationConflict(
+          "观察目标已变化，请重新选择当前窗口或页面。",
+        );
+    };
+    assertScope();
+    const current = this.currentComputerUseTakeover(workspace, node);
+    if (enabled && current && current.scope?.id === scope?.id) return;
+    // Revocation is synchronous, including while an earlier enable/save is pending.
+    this.revokeComputerUseTakeover(node);
+    const change = this.computerUseTakeoverChanges.get(node.id)!;
+    return this.serializeMutation(workspace.id, async () => {
+      const assertUnchanged = () => {
+        assertCurrent();
+        assertScope();
+        if (this.computerUseTakeoverChanges.get(node.id) !== change)
+          throw new NodeMutationConflict(
+            "CUA 接管设置已被更新，请以最新开关状态为准。",
+          );
+      };
+      assertUnchanged();
+      if (enabled) node.computerUseTakeover = true;
+      else delete node.computerUseTakeover;
+      if (scope) node.computerUseTaskScope = structuredClone(scope);
+      this.store.touch(workspace);
+      try {
+        await this.store.save();
+        assertUnchanged();
+        if (this.store.storageError) throw new Error(this.store.storageError);
+        if (enabled)
+          this.computerUseTakeovers.set(node.id, {
+            workspace,
+            node,
+            revision: expectedRevision,
+            scope,
+          });
+      } catch (error) {
+        if (this.computerUseTakeoverChanges.get(node.id) === change)
+          this.revokeComputerUseTakeover(node);
+        this.store.touch(workspace);
+        throw error;
+      }
+    });
+  }
+
   async cancel(workspaceId: string, nodeId: string) {
     const workspace = this.store.workspace(workspaceId);
     const node = workspace.nodes.find((item) => item.id === nodeId);
@@ -2165,6 +2384,9 @@ export class Scheduler {
   }
 
   private interruptTools(node: StoredNode) {
+    this.revokeComputerUseTakeover(node);
+    this.computerUseScopes.delete(node.id);
+    delete node.computerUseScope;
     this.approvedTools.delete(node.id);
     this.authorizations.revokeNode(node.id);
     for (const call of node.toolCalls ?? []) {
@@ -2235,6 +2457,7 @@ export class Scheduler {
     node: StoredNode,
     name: string,
   ) {
+    if (name === "computer_use_call") return false;
     const grants = this.approvedTools.get(node.id);
     const scope = grants?.get(name);
     if (!scope) return false;
@@ -2277,9 +2500,13 @@ export class Scheduler {
         !call.authorization ||
         call.authorization.invalidatedAt ||
         call.authorization.consumedAt !== undefined ||
-        !["policy", "safety_model", "approved", "approved_tool"].includes(
-          call.approval ?? "",
-        )
+        ![
+          "policy",
+          "safety_model",
+          "approved",
+          "approved_tool",
+          "cua_takeover",
+        ].includes(call.approval ?? "")
       )
         throw new Error("工具缺少有效的单次执行授权，未执行。");
       const directory = node.execution?.workingDirectory;
@@ -2321,6 +2548,7 @@ export class Scheduler {
       if (node.status !== "running" || call.status !== "running")
         throw new Error("任务已停止，未执行等待中的工具。");
       if (this.store.storageError) throw new Error(this.store.storageError);
+      this.assertComputerUseTakeoverAuthorization(workspace, node, call);
       const scope = this.authorizationScope(workspace, node);
       const authorization = this.authorizations.consume(
         call.authorization.id,
@@ -2379,6 +2607,7 @@ export class Scheduler {
           input.arguments,
         );
       signal.throwIfAborted();
+      this.assertComputerUseTakeoverAuthorization(workspace, node, call);
       if (
         node.status !== "running" ||
         call.status !== "running" ||
@@ -2450,6 +2679,38 @@ export class Scheduler {
     }
   }
 
+  private assertComputerUseTakeoverAuthorization(
+    workspace: StoredWorkspace,
+    node: StoredNode,
+    call: ToolCall,
+  ) {
+    if (call.approval !== "cua_takeover") return;
+    const grant = this.computerUseTakeoverTokens.get(call);
+    if (
+      !grant ||
+      this.currentComputerUseTakeover(workspace, node) !== grant ||
+      !this.isComputerUseGranted(call, grant)
+    )
+      throw new Error("CUA 接管已关闭或本轮授权已改变，未执行工具。");
+  }
+
+  private isComputerUseGranted(
+    call: ToolCall,
+    grant: ComputerUseTakeoverGrant,
+  ): boolean {
+    const basic = isCuaTakeoverOperation(call);
+    if (!grant.scope) return basic;
+    // Discovery and release carry no target; their existing narrow policy applies.
+    if (!call.arguments.target) return basic;
+    const context = this.computerUseContexts.get(call);
+    return (
+      !!context?.authorizeTask &&
+      context.scope?.id === grant.scope.id &&
+      sameTarget(call.arguments.target, grant.scope.target) &&
+      (basic || context.routine)
+    );
+  }
+
   async approve(
     workspaceId: string,
     nodeId: string,
@@ -2475,6 +2736,8 @@ export class Scheduler {
       throw new Error("这次审批已失效，请刷新查看最新状态。");
     const allowed = decision !== "deny";
     const batch = decision === "approve_tool";
+    if (batch && call.name === "computer_use_call")
+      throw new Error("电脑操作需要逐次审核具体目标和参数，不能批量批准。");
     const controller = this.active.get(nodeId);
     const batchScope = batch
       ? this.toolApprovalScope(workspace, node)
@@ -2537,32 +2800,121 @@ export class Scheduler {
   private async beforeToolCall(
     workspace: StoredWorkspace,
     node: StoredNode,
-    input: Pick<ToolCall, "id" | "name" | "arguments">,
+    input: Pick<ToolCall, "id" | "name" | "arguments" | "subagentId">,
     signal: AbortSignal,
+    prepare?: (
+      onWait: (reason?: string) => void,
+    ) => Promise<CuaPreparedApproval | void>,
   ) {
+    // A switch enabled during preparation/review must not approve that old call.
+    const takeoverAtStart = this.currentComputerUseTakeover(workspace, node);
     while (this.settingsChanges.has(workspace.id))
       await this.settingsChanges.get(workspace.id);
     signal.throwIfAborted();
-    const batchApproved = this.hasToolApproval(workspace, node, input.name);
-    const automatic = !batchApproved && workspace.approvalMode === "auto";
-    const safetyModel = workspace.safetyModel;
-    const approvalVersion = this.approvalVersions.get(workspace.id) ?? 0;
     const call: ToolCall = {
       ...structuredClone(input),
+      status: "running",
+      startedAt: Date.now(),
+      computerUse: computerUseMetadata(input),
+    };
+    if (node.toolCalls?.some((item) => item.id === call.id))
+      throw new Error("模型返回了重复的工具调用 ID。");
+    (node.toolCalls ??= []).push(call);
+    if (prepare) {
+      this.store.touch(workspace);
+      try {
+        const context = await prepare((reason) => {
+          if (signal.aborted || node.status !== "running") return;
+          call.waitingFor = reason;
+          this.store.touch(workspace);
+        });
+        if (context) {
+          this.computerUseContexts.set(call, context);
+          call.computerUse = {
+            ...call.computerUse,
+            authorizationReason: context.reason,
+          };
+        }
+        signal.throwIfAborted();
+      } catch (error) {
+        call.status = signal.aborted ? "cancelled" : "failed";
+        call.error = safeError(error);
+        call.finishedAt = Date.now();
+        throw error;
+      } finally {
+        call.waitingFor = undefined;
+        this.store.touch(workspace);
+      }
+    }
+    // Target waiting happens before approval. Never let a queued action consume
+    // an expiring grant, and re-read settings after another run releases a target.
+    while (this.settingsChanges.has(workspace.id))
+      await this.settingsChanges.get(workspace.id);
+    signal.throwIfAborted();
+    if (
+      takeoverAtStart &&
+      this.currentComputerUseTakeover(workspace, node) === takeoverAtStart &&
+      this.isComputerUseGranted(call, takeoverAtStart)
+    ) {
+      call.approval = "cua_takeover";
+      call.computerUse = {
+        ...call.computerUse,
+        authorizationReason: takeoverAtStart.scope
+          ? `本任务控制（${takeoverAtStart.scope.label}）：${this.computerUseContexts.get(call)?.routine ? this.computerUseContexts.get(call)!.reason : "所选范围内的基础查看、截图或滚动。"}`
+          : "基础查看授权：查看、截图、后台滚动或移动指针。",
+      };
+      this.computerUseTakeoverTokens.set(call, takeoverAtStart);
+      try {
+        if (takeoverAtStart.scope && call.arguments.target)
+          this.computerUseContexts.get(call)!.authorizeTask!(() =>
+            this.assertComputerUseTakeoverAuthorization(workspace, node, call),
+          );
+        this.issueAuthorization(workspace, node, call);
+        this.store.touch(workspace);
+        await this.store.save();
+        signal.throwIfAborted();
+        if (this.store.storageError) throw new Error(this.store.storageError);
+        this.assertComputerUseTakeoverAuthorization(workspace, node, call);
+        return true;
+      } catch (error) {
+        this.invalidateAuthorization(call, safeError(error));
+        call.status = signal.aborted ? "cancelled" : "failed";
+        call.error = safeError(error);
+        call.finishedAt = Date.now();
+        this.store.touch(workspace);
+        throw error;
+      }
+    }
+    const batchApproved = this.hasToolApproval(workspace, node, input.name);
+    // Delegation itself has no file/network side effects. Child operations
+    // still enter this same authorization path individually.
+    const orchestration =
+      input.name === "subagent" || input.name === "subagents_enable";
+    const cuaContext = this.computerUseContexts.get(call);
+    const sensitiveTaskAction =
+      !!this.currentComputerUseTakeover(workspace, node)?.scope &&
+      cuaContext?.sensitive;
+    const automatic =
+      !batchApproved &&
+      !orchestration &&
+      !sensitiveTaskAction &&
+      workspace.approvalMode === "auto";
+    const safetyModel = workspace.safetyModel;
+    const approvalVersion = this.approvalVersions.get(workspace.id) ?? 0;
+    Object.assign(call, {
       status: automatic
         ? "reviewing"
-        : batchApproved || input.name === "read"
+        : batchApproved || input.name === "read" || orchestration
           ? "running"
           : "awaiting_approval",
       approval: batchApproved
         ? "approved_tool"
-        : !automatic && input.name === "read"
+        : !automatic && (input.name === "read" || orchestration)
           ? "policy"
           : undefined,
       fileSnapshot: ["write", "edit", "bash"].includes(input.name)
         ? "unchanged"
         : undefined,
-      startedAt: Date.now(),
       safetyReview: automatic
         ? {
             model: safetyModel ?? "",
@@ -2571,10 +2923,7 @@ export class Scheduler {
             startedAt: Date.now(),
           }
         : undefined,
-    };
-    if (node.toolCalls?.some((item) => item.id === call.id))
-      throw new Error("模型返回了重复的工具调用 ID。");
-    (node.toolCalls ??= []).push(call);
+    });
     if (automatic) {
       this.store.touch(workspace);
       await this.store.save();
@@ -2590,7 +2939,10 @@ export class Scheduler {
             workspaceTitle: workspace.title,
             workspaceDescription: workspace.description,
             userRequest: attachmentPrompt(
-              contextReferencePrompt(node.prompt, node.contextReferences),
+              toolRequestPrompt(
+                contextReferencePrompt(node.prompt, node.contextReferences),
+                node.toolRequests,
+              ),
               node.attachmentData ?? [],
             ),
             ancestry: node.contextIds
@@ -2600,9 +2952,12 @@ export class Scheduler {
               .filter(Boolean)
               .map((ancestor) => ({
                 prompt: attachmentPrompt(
-                  contextReferencePrompt(
-                    ancestor.prompt,
-                    ancestor.contextReferences,
+                  toolRequestPrompt(
+                    contextReferencePrompt(
+                      ancestor.prompt,
+                      ancestor.contextReferences,
+                    ),
+                    ancestor.toolRequests,
                   ),
                   ancestor.attachmentData ?? [],
                 ),
@@ -2621,6 +2976,9 @@ export class Scheduler {
               name: call.name,
               arguments: structuredClone(call.arguments),
             },
+            computerUseContext: cuaContext
+              ? { scope: cuaContext.scope, reason: cuaContext.reason }
+              : undefined,
           },
           signal,
         );
@@ -2682,7 +3040,7 @@ export class Scheduler {
       // never grants execution. Keep the exact call pending for a human decision.
       return this.waitForApproval(workspace, node, call, signal);
     }
-    if (batchApproved || input.name === "read") {
+    if (batchApproved || input.name === "read" || orchestration) {
       this.issueAuthorization(workspace, node, call);
       this.store.touch(workspace);
       await this.store.save();
@@ -2709,7 +3067,13 @@ export class Scheduler {
         signal.removeEventListener("abort", abort);
         resolve(allow);
       };
-      const abort = () => finish(false);
+      const abort = () => {
+        call.status = "cancelled";
+        call.finishedAt = Date.now();
+        this.invalidateAuthorization(call, "运行已取消。");
+        this.store.touch(workspace);
+        finish(false);
+      };
       dispose = abort;
       this.approvals.set(key, finish);
       signal.addEventListener("abort", abort, { once: true });
@@ -2787,7 +3151,10 @@ export class Scheduler {
         node.config,
         context.messages,
         attachmentPrompt(
-          contextReferencePrompt(node.prompt, node.contextReferences),
+          toolRequestPrompt(
+            contextReferencePrompt(node.prompt, node.contextReferences),
+            node.toolRequests,
+          ),
           node.attachmentData ?? [],
         ),
         controller.signal,
@@ -2799,14 +3166,55 @@ export class Scheduler {
         node.execution
           ? {
               workingDirectory: node.execution.workingDirectory,
-              beforeToolCall: (call) =>
-                this.beforeToolCall(workspace, node, call, controller.signal),
-              executeTool: (call, execute) =>
+              onSubagentsEnabled: () => {
+                node.subagentsEnabled = true;
+                this.store.touch(workspace);
+              },
+              onSubagentUpdate: (run) => {
+                const runs = (node.subagents ??= []);
+                const index = runs.findIndex((item) => item.id === run.id);
+                const record = {
+                  ...run,
+                  error: run.error ? safeError(run.error) : undefined,
+                };
+                if (index < 0) runs.push(record);
+                else runs[index] = record;
+                this.store.touch(workspace);
+              },
+              onComputerUseScope: (scope) => {
+                if (controller.signal.aborted || node.status !== "running")
+                  return;
+                if (scope) {
+                  this.computerUseScopes.set(node.id, {
+                    node,
+                    revision: node.revision ?? 0,
+                    scope: structuredClone(scope),
+                  });
+                  node.computerUseScope = structuredClone(scope);
+                } else {
+                  this.computerUseScopes.delete(node.id);
+                  delete node.computerUseScope;
+                }
+                this.store.touch(workspace);
+              },
+              beforeToolCall: (call, prepare, toolSignal) =>
+                this.beforeToolCall(
+                  workspace,
+                  node,
+                  call,
+                  toolSignal
+                    ? AbortSignal.any([controller.signal, toolSignal])
+                    : controller.signal,
+                  prepare,
+                ),
+              executeTool: (call, execute, toolSignal) =>
                 this.executeAuthorizedTool(
                   workspace,
                   node,
                   call,
-                  controller.signal,
+                  toolSignal
+                    ? AbortSignal.any([controller.signal, toolSignal])
+                    : controller.signal,
                   execute,
                 ),
               onToolUpdate: (id, update) => {
@@ -2852,6 +3260,7 @@ export class Scheduler {
           contextBranches: this.contextBranches(workspace, node),
           attachments: node.attachmentData,
           contextReferenceCount: node.contextReferences?.length,
+          toolRequests: node.toolRequests,
           displayPrompt: node.prompt,
           autoCompact:
             node.contextAutoCompact ?? workspace.autoCompact !== false,

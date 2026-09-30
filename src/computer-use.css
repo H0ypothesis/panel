@@ -1,0 +1,260 @@
+.computer-use-controls {
+  position: relative;
+  display: inline-flex;
+  max-width: 100%;
+}
+.computer-use-toggle {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 34px;
+  padding: 6px 9px;
+  border: 1px solid var(--line-strong);
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--text-control);
+  font-size: 10px;
+}
+.computer-use-toggle:hover,
+.computer-use-toggle[aria-expanded="true"] {
+  background: var(--surface-hover);
+}
+.computer-use-toggle small {
+  color: var(--text-muted);
+  font-size: 9px;
+}
+.computer-use-toggle.connected small {
+  color: var(--text-accent-strong);
+}
+.computer-use-toggle:disabled {
+  opacity: 0.5;
+}
+.computer-use-popover {
+  position: absolute;
+  z-index: 35;
+  top: calc(100% + 7px);
+  right: 0;
+  width: min(320px, calc(100vw - 36px));
+  padding: 14px;
+  border: 1px solid var(--line-strong);
+  border-radius: 9px;
+  background: var(--surface);
+  box-shadow: 0 10px 32px rgb(0 0 0 / 12%);
+  color: var(--text-body);
+  font-size: 11px;
+}
+.computer-use-heading,
+.computer-use-status-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.computer-use-heading b {
+  font-weight: 600;
+}
+.computer-use-popover p {
+  margin: 8px 0;
+  color: var(--text-secondary);
+  font-size: 10px;
+  line-height: 1.8;
+}
+.computer-use-status-row {
+  padding: 10px 0;
+  margin-top: 10px;
+  border-top: 1px solid var(--line);
+}
+.computer-use-status-row > span,
+.computer-use-setting-note {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.computer-use-status-row small {
+  color: var(--text-muted);
+  font-size: 9px;
+}
+.computer-use-setting-note {
+  color: var(--text-accent-strong);
+  font-size: 10px;
+}
+.computer-use-parallel-note {
+  padding-bottom: 4px;
+}
+.computer-use-permissions {
+  display: grid;
+  gap: 8px;
+  margin: 10px 0;
+  padding: 10px 0;
+  border-top: 1px solid var(--line);
+  list-style: none;
+  font-size: 10px;
+}
+.computer-use-permissions li {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+}
+.computer-use-permissions b {
+  font-weight: 400;
+}
+.computer-use-setup {
+  padding: 1px 9px;
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  background: var(--surface-subtle);
+}
+.computer-use-setup code {
+  font:
+    11px/1.6 "SFMono-Regular",
+    Consolas,
+    monospace;
+  user-select: text;
+}
+.computer-use-popover .computer-use-error {
+  color: var(--error);
+  overflow-wrap: anywhere;
+}
+.computer-use-connect {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  width: 100%;
+  margin-top: 12px;
+  padding: 9px;
+  border-radius: 5px;
+  background: var(--primary-background);
+  color: var(--primary-foreground);
+  font-size: 11px;
+}
+.computer-use-target {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  margin: 0 10px 10px;
+  color: var(--text-secondary);
+  font-size: 10px;
+  line-height: 1.6;
+}
+.computer-use-target > svg {
+  flex-shrink: 0;
+}
+.computer-use-target > span {
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+.computer-use-target small {
+  flex-shrink: 0;
+  margin-left: auto;
+  font-size: 9px;
+  color: var(--text-muted);
+}
+.computer-use-screenshots {
+  display: grid;
+  gap: 9px;
+  margin: 8px 0 12px;
+}
+.computer-use-screenshots figure {
+  min-width: 0;
+  margin: 0;
+}
+.computer-use-screenshot-preview {
+  position: relative;
+  display: block;
+  width: 100%;
+  overflow: hidden;
+  border: 1px solid var(--line-strong);
+  border-radius: 5px;
+  background: var(--surface-subtle);
+  cursor: zoom-in;
+}
+.computer-use-screenshot-preview img {
+  display: block;
+  width: 100%;
+  max-height: 280px;
+  object-fit: contain;
+}
+.computer-use-screenshot-preview > span {
+  position: absolute;
+  bottom: 7px;
+  right: 7px;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 5px 7px;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: var(--surface);
+  color: var(--text-body);
+  font-size: 9px;
+  opacity: 0;
+}
+.computer-use-screenshot-preview:hover > span,
+.computer-use-screenshot-preview:focus-visible > span {
+  opacity: 1;
+}
+.computer-use-screenshots figcaption {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  margin-top: 4px;
+  color: var(--text-muted);
+  font-size: 9px;
+}
+.computer-use-screenshot-unavailable {
+  padding: 18px;
+  border: 1px dashed var(--line-strong);
+  border-radius: 5px;
+  color: var(--text-muted);
+  font-size: 10px;
+  text-align: center;
+}
+.computer-use-screenshot-dialog {
+  width: min(1200px, calc(100vw - 40px));
+  max-width: none;
+  max-height: calc(100vh - 40px);
+  padding: 0;
+  border: 1px solid var(--line-strong);
+  border-radius: 10px;
+  background: var(--surface);
+  color: var(--text-body);
+}
+.computer-use-screenshot-dialog::backdrop {
+  background: rgb(0 0 0 / 55%);
+}
+.computer-use-screenshot-dialog header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--line);
+  font-size: 12px;
+}
+.computer-use-screenshot-dialog header > span {
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+.computer-use-screenshot-full {
+  max-height: calc(100vh - 100px);
+  overflow: auto;
+  background: var(--surface-subtle);
+}
+.computer-use-screenshot-full img {
+  display: block;
+  width: 100%;
+  height: auto;
+}
+@media (max-width: 650px) {
+  .computer-use-popover {
+    right: auto;
+    left: 0;
+  }
+  .computer-use-screenshot-preview > span {
+    opacity: 1;
+  }
+}

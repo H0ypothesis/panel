@@ -4,6 +4,8 @@ import { randomUUID } from "node:crypto";
 import type {
   AssistantMessage,
   ImageContent,
+  JsonObject,
+  JsonValue,
   Message,
   TextContent,
   Usage,
@@ -15,6 +17,7 @@ import type {
   RunConfig,
   ToolCall,
   TurnNode,
+  SubagentRun,
 } from "../shared/types.ts";
 import { buildContext } from "./context.ts";
 import {
@@ -28,6 +31,7 @@ import {
   MAX_CONTEXT_REFERENCES,
 } from "./context-references.ts";
 import type { StoredNode, StoredRun, StoredWorkspace } from "./store.ts";
+import { validateToolRequests, toolRequestPrompt } from "./tool-requests.ts";
 
 export const MAX_IMPORT_BYTES = 100 * 1024 * 1024;
 const MAX_NODES = 10_000;
@@ -129,7 +133,7 @@ function optional<T>(
 }
 
 /** Only JSON data may appear in tool arguments/details. Never retain object prototypes. */
-function jsonValue(value: unknown, label: string, depth = 0): unknown {
+function jsonValue(value: unknown, label: string, depth = 0): JsonValue {
   if (depth > 100) invalid(`${label}嵌套层级`);
   if (value === null || typeof value === "string" || typeof value === "boolean")
     return value;
@@ -144,9 +148,9 @@ function jsonValue(value: unknown, label: string, depth = 0): unknown {
   );
 }
 
-function jsonObject(value: unknown, label: string): ObjectValue {
+function jsonObject(value: unknown, label: string): JsonObject {
   object(value, label);
-  return jsonValue(value, label) as ObjectValue;
+  return jsonValue(value, label) as JsonObject;
 }
 
 function config(value: unknown, label: string): RunConfig {
@@ -154,6 +158,9 @@ function config(value: unknown, label: string): RunConfig {
   return {
     model: string(source.model, `${label}模型`, true),
     thinking: enumeration(source.thinking, thinkingLevels, `${label}思考强度`),
+    ...(source.longTask === undefined
+      ? {}
+      : { longTask: boolean(source.longTask, `${label}长程任务`) }),
   };
 }
 
@@ -397,6 +404,15 @@ function messages(value: unknown, label: string): Message[] {
         : {
             providerThinkingLevel: string(source.providerThinkingLevel, label),
           }),
+      ...(source.thinkingLevel === undefined
+        ? {}
+        : {
+            thinkingLevel: enumeration(
+              source.thinkingLevel,
+              thinkingLevels,
+              label,
+            ),
+          }),
       ...(source.errorMessage === undefined
         ? {}
         : { errorMessage: string(source.errorMessage, label) }),
@@ -411,6 +427,59 @@ function messages(value: unknown, label: string): Message[] {
         : { diagnostics: diagnostics(source.diagnostics, label) }),
       // A provider deferred handle may resume remote execution; it is not history.
       timestamp,
+    };
+  });
+}
+
+function subagentRuns(
+  value: unknown,
+  label: string,
+  now: number,
+): SubagentRun[] {
+  const records = array(value, label);
+  if (records.length > 24) invalid(`${label}数量`);
+  const ids = new Set<string>();
+  return records.map((item) => {
+    const source = object(item, label);
+    const id = string(source.id, `${label}ID`, true);
+    if (ids.has(id)) invalid(`${label}重复 ID`);
+    ids.add(id);
+    const status = enumeration(
+      source.status,
+      ["queued", "running", "completed", "failed", "cancelled"] as const,
+      label,
+    );
+    const interrupted = status === "queued" || status === "running";
+    return {
+      id,
+      agent: enumeration(
+        source.agent,
+        ["scout", "worker", "reviewer"] as const,
+        label,
+      ),
+      task: string(source.task, `${label}任务`, true),
+      model: string(source.model, `${label}模型`, true),
+      status: interrupted ? "cancelled" : status,
+      response: string(source.response, `${label}结果`),
+      createdAt: number(source.createdAt, label),
+      startedAt: optional(source.startedAt, label, number),
+      finishedAt: interrupted
+        ? now
+        : optional(source.finishedAt, label, number),
+      error: interrupted
+        ? "导入时已取消未完成的子代理，未自动执行。"
+        : optional(source.error, label, string),
+      ...(source.thinking === undefined
+        ? {}
+        : {
+            thinking: {
+              text: string(object(source.thinking, label).text, label),
+              active: false,
+            },
+          }),
+      ...(source.usage === undefined
+        ? {}
+        : { usage: nodeUsage(source.usage, label) }),
     };
   });
 }
@@ -450,6 +519,7 @@ function toolCalls(value: unknown, label: string, now: number): ToolCall[] {
               "auto",
               "policy",
               "safety_model",
+              "cua_takeover",
               "approved",
               "approved_tool",
               "denied",
@@ -467,6 +537,9 @@ function toolCalls(value: unknown, label: string, now: number): ToolCall[] {
     return {
       id,
       name: string(source.name, `${label}名称`, true),
+      ...(source.subagentId === undefined
+        ? {}
+        : { subagentId: string(source.subagentId, `${label}子代理`, true) }),
       arguments: jsonObject(source.arguments, `${label}参数`),
       status: interrupted ? "cancelled" : status,
       startedAt: number(source.startedAt, `${label}开始时间`),
@@ -631,6 +704,7 @@ export function importWorkspace(value: unknown): StoredWorkspace {
     const createdAt = number(original.createdAt, `${label}创建时间`);
     const prompt = string(original.prompt, `${label}问题`);
     const response = string(original.response, `${label}回答`);
+    const toolRequests = validateToolRequests(original.toolRequests);
     const contextReferences = optional(
       original.contextReferences,
       `${label}引用卡片`,
@@ -682,7 +756,7 @@ export function importWorkspace(value: unknown): StoredWorkspace {
     )
       invalid(`${label}附件原件缺失`);
     const fallbackPrompt = attachmentPrompt(
-      `以下是从 JSON 导入的历史轮次：\n用户：${contextReferencePrompt(prompt, contextReferences)}\n助手：${response}`,
+      `以下是从 JSON 导入的历史轮次：\n用户：${toolRequestPrompt(contextReferencePrompt(prompt, contextReferences), toolRequests)}\n助手：${response}`,
       attachmentData ?? [],
     );
     const fallbackImages = imageContent(attachmentData ?? []);
@@ -709,6 +783,20 @@ export function importWorkspace(value: unknown): StoredWorkspace {
           }),
       prompt,
       response,
+      ...(toolRequests === undefined ? {} : { toolRequests }),
+      ...(original.subagentsEnabled === undefined
+        ? {}
+        : {
+            subagentsEnabled: boolean(
+              original.subagentsEnabled,
+              `${label}子代理能力`,
+            ),
+          }),
+      ...(original.subagents === undefined
+        ? {}
+        : {
+            subagents: subagentRuns(original.subagents, `${label}子代理`, now),
+          }),
       ...(original.thinking === undefined
         ? {}
         : {

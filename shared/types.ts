@@ -1,4 +1,5 @@
 import type { Attachment } from "./attachments";
+import type { ContextWindowSource } from "./provider-settings";
 
 export type ThinkingLevel =
   | "off"
@@ -19,6 +20,25 @@ export type BranchColor = "sage" | "violet" | "blue" | "amber";
 export type ApprovalMode = "ask" | "auto";
 export type ToolApprovalDecision = "approve" | "approve_tool" | "deny";
 
+export interface ComputerUseScope {
+  /** Minted by the live adapter; never accepted from model arguments. */
+  id: string;
+  label: string;
+  target:
+    | { kind: "window"; pid: number; windowId: number }
+    | {
+        kind: "page";
+        pid: number;
+        windowId: number;
+        tabId: string;
+      };
+  origin?: string;
+}
+export interface ComputerUseTakeoverOptions {
+  mode?: "observe" | "task";
+  scopeId?: string;
+}
+
 export interface SafetyReviewRequest {
   model: string;
   workingDirectory?: string;
@@ -33,6 +53,7 @@ export interface SafetyReviewRequest {
     output?: string;
   }[];
   tool: Pick<ToolCall, "id" | "name" | "arguments">;
+  computerUseContext?: { scope?: ComputerUseScope; reason: string };
 }
 
 export interface SafetyReviewResult {
@@ -50,6 +71,8 @@ export interface SafetyReview {
 
 export interface ToolCall {
   id: string;
+  /** Child run that owns this tool; authorization still belongs to the card. */
+  subagentId?: string;
   name: string;
   arguments: Record<string, unknown>;
   status:
@@ -60,15 +83,33 @@ export interface ToolCall {
     | "failed"
     | "denied"
     | "cancelled";
-  /** Temporary reason an authorized tool is waiting to access files. */
+  /** Temporary reason a tool is waiting for a file or computer-use target. */
   waitingFor?: string;
   output?: string;
   error?: string;
   sources?: { title: string; url: string }[];
+  images?: {
+    id: string;
+    url: string;
+    mimeType: string;
+    width?: number;
+    height?: number;
+  }[];
+  computerUse?: {
+    targetLabel?: string;
+    scope?: "window" | "page" | "desktop";
+    app?: string;
+    windowId?: string | number;
+    pageId?: string | number;
+    mode?: "background" | "foreground";
+    overlay?: boolean;
+    authorizationReason?: string;
+  };
   approval?:
     | "auto"
     | "policy"
     | "safety_model"
+    | "cua_takeover"
     | "approved"
     | "approved_tool"
     | "denied";
@@ -90,9 +131,20 @@ export interface ToolCall {
   finishedAt?: number;
 }
 
+export interface ComputerUseStatus {
+  available: boolean;
+  connected: boolean;
+  version?: string;
+  error?: string;
+  overlay: boolean;
+  permissions?: { accessibility: boolean; screenRecording: boolean };
+}
+
 export interface RunConfig {
   model: string;
   thinking: ThinkingLevel;
+  /** Explicitly allow this card to continue beyond the normal tool-call limit. */
+  longTask?: boolean;
 }
 
 /** Exact raw-message provenance. A zero count on the final source is filled at runtime. */
@@ -163,6 +215,24 @@ export interface ContextParent {
   revision?: number;
 }
 
+/** Explicit capabilities selected for this turn through the @ menu. */
+export type ToolRequest = "web_search" | "computer_use" | "subagents";
+
+export interface SubagentRun {
+  id: string;
+  agent: "scout" | "worker" | "reviewer";
+  task: string;
+  model: string;
+  status: "queued" | "running" | "completed" | "failed" | "cancelled";
+  response: string;
+  thinking?: ThinkingContent;
+  createdAt: number;
+  startedAt?: number;
+  finishedAt?: number;
+  error?: string;
+  usage?: { input: number; output: number; total: number; cost?: number };
+}
+
 export interface TurnNode {
   id: string;
   /** In-place regeneration revision; legacy nodes start at zero. */
@@ -174,6 +244,14 @@ export interface TurnNode {
   prompt: string;
   attachments?: Attachment[];
   contextReferences?: ContextReference[];
+  toolRequests?: ToolRequest[];
+  subagentsEnabled?: boolean;
+  subagents?: SubagentRun[];
+  /** User-enabled computer-use takeover for this live run; never inherited. */
+  computerUseTakeover?: boolean;
+  /** Current live observation and user-selected task grant; cleared on restart. */
+  computerUseScope?: ComputerUseScope;
+  computerUseTaskScope?: ComputerUseScope;
   response: string;
   thinking?: ThinkingContent;
   status: RunStatus;
@@ -273,12 +351,20 @@ export interface ModelOption {
   default?: boolean;
   thinkingLevels: ThinkingLevel[];
   contextWindow: number;
+  contextWindowSource?: ContextWindowSource;
   supportsImages?: boolean;
   envVar?: string;
 }
 
 export interface WebCapabilities {
+  computerUseTaskControl?: boolean;
+  /** Live per-card takeover for conservative computer-use operations. */
+  computerUseTakeover?: boolean;
   toolBatchApproval?: boolean;
+  /** Supports the per-card long-task option; absent on older backends. */
+  longTasks?: boolean;
+  /** Explicit @ capability choices are preserved and dispatched on submission. */
+  toolRequests?: boolean;
   /** Missing on older backends, which silently discard referenceNodeIds. */
   cardReferences?: boolean;
   /** Supports complete multi-branch model context inputs. */
@@ -291,7 +377,7 @@ export interface WebCapabilities {
   searchKeyEnv: "EXA_API_KEY";
   searchKeyRequired: false;
   plugin: "pi-web-access";
-  pluginVersion: "0.29.0";
+  pluginVersion: "0.34.0";
   pdfRead: boolean;
 }
 

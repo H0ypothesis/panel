@@ -85,6 +85,9 @@ final class PanelApp: NSObject, NSApplicationDelegate, NSWindowDelegate,
     private var stopping = false
     private var terminating = false
     private var checkingRestart = false
+    private let updater = PanelUpdater()
+    private var checkingUpdateInstall = false
+    private var installingUpdate = false
     private var lockDescriptor: Int32 = -1
     private var downloads: [ObjectIdentifier: WKDownload] = [:]
     private var downloadDestinations: [ObjectIdentifier: (temporary: URL, destination: URL)] = [:]
@@ -118,6 +121,17 @@ final class PanelApp: NSObject, NSApplicationDelegate, NSWindowDelegate,
         makeMenu()
         makeWindow()
         startService()
+        updater.onChange = { [weak self] in self?.syncUpdateState() }
+        updater.onReady = { [weak self] in self?.finishUpdate() }
+        updater.onManualResult = { [weak self] message in self?.showAlert("检查更新", message) }
+        updater.start()
+        let report = supportURL.appendingPathComponent("update-error.json")
+        if let bytes = try? Data(contentsOf: report),
+           let failure = try? JSONSerialization.jsonObject(with: bytes) as? [String: Any],
+           let message = failure["message"] as? String {
+            try? files.removeItem(at: report)
+            showAlert("上次更新未完成", message)
+        }
     }
 
     private func acquireInstanceLock() -> Bool {
@@ -173,6 +187,7 @@ final class PanelApp: NSObject, NSApplicationDelegate, NSWindowDelegate,
         let main = NSMenu()
         let applicationMenu = NSMenu(title: "Panel")
         applicationMenu.addItem(item("关于 Panel", #selector(about)))
+        applicationMenu.addItem(item("检查更新…", #selector(checkForUpdates)))
         applicationMenu.addItem(.separator())
         applicationMenu.addItem(item("模型配置…", #selector(openSettings), ","))
         applicationMenu.addItem(item("重启本地服务…", #selector(restartService)))
@@ -455,7 +470,10 @@ final class PanelApp: NSObject, NSApplicationDelegate, NSWindowDelegate,
             chooseDirectory: () => window.webkit.messageHandlers.panel.postMessage({action:'choose-directory'}),
             openSettings: () => window.webkit.messageHandlers.panel.postMessage({action:'open-settings'}),
             openDataDirectory: () => window.webkit.messageHandlers.panel.postMessage({action:'open-data-directory'}),
-            setAppearance: (theme) => window.webkit.messageHandlers.panel.postMessage({action:'set-appearance', theme})
+            setAppearance: (theme) => window.webkit.messageHandlers.panel.postMessage({action:'set-appearance', theme}),
+            getUpdateState: () => window.webkit.messageHandlers.panel.postMessage({action:'update-state'}),
+            checkForUpdates: () => window.webkit.messageHandlers.panel.postMessage({action:'check-updates'}),
+            installUpdate: () => window.webkit.messageHandlers.panel.postMessage({action:'install-update'})
           }), writable: false, configurable: false });
         }
         """
@@ -533,6 +551,14 @@ final class PanelApp: NSObject, NSApplicationDelegate, NSWindowDelegate,
             return
         }
         switch action {
+        case "update-state":
+            replyHandler(updater.state, nil)
+        case "check-updates":
+            updater.check(manual: false)
+            replyHandler(updater.state, nil)
+        case "install-update":
+            beginUpdate()
+            replyHandler(updater.state, nil)
         case "choose-directory":
             guard directoryPicker == nil, filePicker == nil else { replyHandler(nil, "已有文件选择窗口打开。"); return }
             let panel = NSOpenPanel()
@@ -545,7 +571,12 @@ final class PanelApp: NSObject, NSApplicationDelegate, NSWindowDelegate,
             directoryPicker = panel
             panel.beginSheetModal(for: window) { [weak self] response in
                 self?.directoryPicker = nil
-                replyHandler(response == .OK ? panel.url?.path : nil, nil)
+                // Use an explicit JavaScript null; Swift nil resolves to undefined.
+                if response == .OK, let path = panel.url?.path {
+                    replyHandler(path, nil)
+                } else {
+                    replyHandler(NSNull(), nil)
+                }
             }
         case "open-settings":
             openSettings()
@@ -597,6 +628,7 @@ final class PanelApp: NSObject, NSApplicationDelegate, NSWindowDelegate,
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
         guard sameOrigin(webView.url) else { return }
         syncDesktopState()
+        syncUpdateState()
         statusView?.removeFromSuperview()
         statusView = nil
         window.makeFirstResponder(webView)
@@ -825,7 +857,7 @@ final class PanelApp: NSObject, NSApplicationDelegate, NSWindowDelegate,
     }
 
     @objc private func restartService() {
-        guard !stopping, !terminating, !checkingRestart else { return }
+        guard !stopping, !terminating, !checkingRestart, !installingUpdate else { return }
         checkingRestart = true
         activeNodeCount { [weak self] count in
             guard let self = self else { return }
@@ -853,6 +885,62 @@ final class PanelApp: NSObject, NSApplicationDelegate, NSWindowDelegate,
         } catch { showAlert("无法打开模型配置", error.localizedDescription) }
     }
 
+    @objc private func checkForUpdates() { updater.check(manual: true) }
+
+    private func syncUpdateState() {
+        guard let view = webView, sameOrigin(view.url),
+              let bytes = try? JSONSerialization.data(withJSONObject: updater.state),
+              let json = String(data: bytes, encoding: .utf8) else { return }
+        view.evaluateJavaScript("window.dispatchEvent(new CustomEvent('panel:update-state', {detail:\(json)}))", completionHandler: nil)
+    }
+
+    private func beginUpdate() {
+        guard !stopping, !terminating, !checkingRestart, !checkingUpdateInstall, !updater.busy else { return }
+        checkingUpdateInstall = true
+        activeNodeCount { [weak self] count in
+            guard let self = self else { return }
+            self.checkingUpdateInstall = false
+            guard !self.terminating, !self.stopping else { return }
+            guard count == 0 else {
+                self.updater.fail(count == nil ? "暂时无法读取任务状态，请稍后重试。" : "请等待运行中的任务结束，或停止任务后再更新。")
+                return
+            }
+            self.updater.prepare(report: self.supportURL.appendingPathComponent("update-error.json"))
+        }
+    }
+
+    private func finishUpdate() {
+        guard !terminating, !stopping, !checkingRestart else {
+            updater.cancel()
+            return
+        }
+        installingUpdate = true
+        // Remove the interactive workbench before the final status check so it
+        // cannot submit another task while the service is being stopped.
+        destroyWebView()
+        showStatus("正在准备更新", "正在确认任务状态，新版本安装后会自动重新打开。", retry: false)
+        activeNodeCount { [weak self] count in
+            guard let self = self else { return }
+            guard count == 0, !self.terminating else {
+                self.installingUpdate = false
+                self.updater.cancel()
+                self.updater.fail("仍有任务运行或暂时无法确认任务状态，请稍后再更新。")
+                if let url = self.serviceURL { self.makeWebView(url: url) }
+                return
+            }
+            self.stopService {
+                do {
+                    try self.updater.commit()
+                    NSApp.terminate(nil)
+                } catch {
+                    self.installingUpdate = false
+                    self.updater.fail(error.localizedDescription)
+                    self.startService()
+                }
+            }
+        }
+    }
+
     @objc private func openDataDirectory() { NSWorkspace.shared.open(dataURL) }
     @objc private func openLogs() { NSWorkspace.shared.activateFileViewerSelecting([logURL]) }
     @objc private func newWorkspace() { sendNativeAction("new-workspace") }
@@ -872,7 +960,7 @@ final class PanelApp: NSObject, NSApplicationDelegate, NSWindowDelegate,
     }
     @objc private func about() {
         NSApp.orderFrontStandardAboutPanel(options: [
-            .applicationName: "Panel", .applicationVersion: Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0.1.0",
+            .applicationName: "Panel", .applicationVersion: Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "未知版本",
             .credits: NSAttributedString(string: "本地优先的非线性 Agent 工作台\n探索每一种可能。")
         ])
     }
@@ -916,6 +1004,7 @@ final class PanelApp: NSObject, NSApplicationDelegate, NSWindowDelegate,
     }
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        if installingUpdate && !updater.committed { return .terminateCancel }
         if terminating { return .terminateLater }
         cancelFilePicker()
         guard service?.isRunning == true else { return .terminateNow }
@@ -939,6 +1028,7 @@ final class PanelApp: NSObject, NSApplicationDelegate, NSWindowDelegate,
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+        updater.shutdown()
         cancelFilePicker()
         readinessTimer?.invalidate()
         forceStopWork?.cancel()
@@ -975,8 +1065,13 @@ final class PanelApp: NSObject, NSApplicationDelegate, NSWindowDelegate,
     }
 }
 
-let application = NSApplication.shared
-let delegate = PanelApp()
-application.delegate = delegate
-application.setActivationPolicy(.regular)
-application.run()
+@main
+struct PanelMain {
+    static func main() {
+        let application = NSApplication.shared
+        let delegate = PanelApp()
+        application.delegate = delegate
+        application.setActivationPolicy(.regular)
+        withExtendedLifetime(delegate) { application.run() }
+    }
+}

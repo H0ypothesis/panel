@@ -1,5 +1,55 @@
 /* The native titlebar is transparent: each pane paints up to the window edge.
    AppKit supplies this inset in CSS pixels, including page zoom and fullscreen. */
+.powered {
+  flex-wrap: wrap;
+}
+.app-version {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.desktop-update {
+  position: relative;
+  display: inline-flex;
+}
+.desktop-update-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  border: 1px solid var(--success-border);
+  border-radius: 5px;
+  padding: 3px 5px;
+  background: var(--surface-muted);
+  color: var(--text-body);
+  font-size: 9px;
+}
+.desktop-update-button:hover:not(:disabled) {
+  background: var(--surface-hover);
+}
+.desktop-update-button:disabled {
+  cursor: progress;
+  opacity: 0.7;
+}
+.desktop-update-button:focus-visible {
+  outline: 2px solid var(--text-muted);
+  outline-offset: 2px;
+}
+.desktop-update-error {
+  position: absolute;
+  bottom: calc(100% + 8px);
+  right: 0;
+  width: 200px;
+  padding: 10px;
+  border-radius: 8px;
+  background: var(--surface);
+  color: var(--text-body);
+  border: 1px solid var(--error-border);
+  box-shadow: 0 4px 16px #0002;
+  font-size: 11px;
+  line-height: 1.5;
+  z-index: 90;
+}
+
 :root[data-desktop="macos"] .sidebar {
   padding-top: calc(24px + var(--desktop-titlebar-inset, 28px));
 }

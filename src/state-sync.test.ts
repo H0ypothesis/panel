@@ -170,3 +170,40 @@ test("delayed HTTP replies cannot replace the current SSE instance after restart
   );
   assert.equal(reconcileAppState(null, old, "restarted"), null);
 });
+
+test("streamed answers retain persisted computer screenshots and target metadata", () => {
+  const state = fixture();
+  const tool = {
+    id: "screenshot",
+    name: "computer_use_call",
+    arguments: { tool: "screenshot" },
+    status: "completed" as const,
+    startedAt: 1,
+    images: [
+      {
+        id: "capture",
+        url: "/api/workspaces/one/nodes/a/tool-images/screenshot/0?revision=0",
+        mimeType: "image/png",
+      },
+    ],
+    computerUse: {
+      scope: "window" as const,
+      targetLabel: "Safari · 文档",
+      windowId: 42,
+    },
+  };
+  state.workspaces[0].nodes[0].toolCalls = [tool];
+  const changed = structuredClone(state.workspaces[0].nodes[0]);
+  changed.response += " more";
+  const patched = applyStatePatch(state, patchFor(state, changed))!;
+  const reconciled = reconcileAppState(state, patched)!;
+  assert.equal(reconciled.workspaces[0].nodes[0].toolCalls?.[0], tool);
+  assert.equal(
+    reconciled.workspaces[0].nodes[0].toolCalls?.[0].images,
+    tool.images,
+  );
+  assert.deepEqual(
+    reconciled.workspaces[0].nodes[0].toolCalls?.[0].computerUse,
+    tool.computerUse,
+  );
+});

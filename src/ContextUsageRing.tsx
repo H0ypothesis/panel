@@ -90,6 +90,9 @@ export function ContextUsageRing({
       : []),
     `计数来源：${contextUsageSourceLabel(usage)}`,
     `模型：${modelName}`,
+    usage.compressionStatus
+      ? "上限口径：本轮记录的上下文预算，保留运行时配置。"
+      : "上限口径：当前配置的本地上下文预算，不代表服务商已确认的实际限制。",
     ...(usage.source === "provider"
       ? ["最近一次模型调用的输入（含缓存）加该次生成；此前各轮内容已计入输入。"]
       : usage.source === "estimate"

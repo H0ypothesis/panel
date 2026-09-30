@@ -50,9 +50,11 @@ import {
   type Workspace,
   type ModelOption,
   type RunConfig,
+  type ToolRequest,
   type ContextParent,
 } from "../shared/types";
 import { readPreference, savePreference } from "./api";
+import { toolWaitLabel } from "./computer-use";
 import { responseText } from "../shared/response-parts";
 import { canBranchFrom } from "../shared/node-branching";
 import {
@@ -63,6 +65,7 @@ import { ContextUsageRing } from "./ContextUsageRing";
 import { formatContextWindow } from "./model-context";
 import { GitHistoryPanel } from "./GitHistoryPanel";
 import { BranchDraftCard, type BranchDraftNode } from "./BranchDraftCard";
+import { LongTaskBadge } from "./LongTaskControls";
 import { reconcileGraphNodes } from "./graph-nodes";
 import { buildReferenceEdges } from "./reference-edges";
 import {
@@ -80,6 +83,7 @@ import {
   type CompressionGraphEntry,
 } from "../shared/context-graph";
 import "./compression-graph.css";
+import { SubagentAvatars } from "./Subagents";
 
 type CardData = {
   turn: TurnNode;
@@ -89,6 +93,7 @@ type CardData = {
   modelName: string;
   contextUsage: ContextUsage;
   showContext: (id: string) => void;
+  showSubagents: (id: string, childId: string) => void;
   workingDirectory?: string;
   temporaryDirectory?: string;
   chooseDirectory: () => void;
@@ -152,12 +157,13 @@ const TurnCard = memo(function TurnCard({ data }: NodeProps<TurnGraphNode>) {
     (call) => call.status === "awaiting_approval",
   );
   const reviewing = turn.toolCalls?.some((call) => call.status === "reviewing");
-  const waitingFor = turn.toolCalls?.find(
+  const waitingCall = turn.toolCalls?.find(
     (call) => call.status === "running" && call.waitingFor,
-  )?.waitingFor;
+  );
+  const waitingFor = waitingCall?.waitingFor;
   return (
     <div
-      className={`turn-card ${root ? "root-card" : ""} color-${turn.color} ${active ? "active" : ""} ${inPath ? "in-path" : ""} ${data.compressedEntry ? "compression-entry-card" : ""} status-${turn.status}`}
+      className={`turn-card ${root ? "root-card" : ""} color-${turn.color} ${active ? "active" : ""} ${inPath ? "in-path" : ""} ${data.compressedEntry ? "compression-entry-card" : ""} status-${turn.status} ${turn.subagents?.length ? "has-subagents" : ""}`}
     >
       {!root && (
         <Handle
@@ -210,7 +216,7 @@ const TurnCard = memo(function TurnCard({ data }: NodeProps<TurnGraphNode>) {
                 : reviewing
                   ? "安全审核中"
                   : waitingFor
-                    ? "等待文件"
+                    ? toolWaitLabel(waitingCall!)
                     : turn.status === "running"
                       ? "生成中"
                       : turn.status === "queued"
@@ -311,6 +317,10 @@ const TurnCard = memo(function TurnCard({ data }: NodeProps<TurnGraphNode>) {
           {data.retryBusy ? "正在恢复…" : "原地重试"}
         </button>
       )}
+      <SubagentAvatars
+        runs={turn.subagents ?? []}
+        onSelect={(childId) => data.showSubagents(turn.id, childId)}
+      />
       <div className="card-footer">
         {root ? (
           <button
@@ -350,6 +360,13 @@ const TurnCard = memo(function TurnCard({ data }: NodeProps<TurnGraphNode>) {
             <span className="card-thinking">
               {thinkingLabels[turn.config.thinking]}
             </span>
+            <LongTaskBadge
+              config={turn.config}
+              status={turn.status}
+              toolRequests={turn.toolRequests}
+              toolCalls={turn.toolCalls}
+              compact
+            />
           </span>
         )}
         <div className="card-footer-actions">
@@ -569,6 +586,7 @@ interface Props {
   rootModelId: string;
   onSelect: (id: string) => void;
   onShowContext: (id: string) => void;
+  onShowSubagents: (id: string, childId: string) => void;
   onShowCompression: (parentId: string, checkpointId: string) => void;
   onBranch: (id: string, checkpointId?: string) => void;
   branchDisabled: boolean;
@@ -580,6 +598,7 @@ interface Props {
   onDraftTextChange: (text: string) => void;
   onDraftFilesChange: (files: File[]) => void;
   onDraftReferencesChange: (ids: string[]) => void;
+  onDraftToolRequestsChange: (requests: ToolRequest[]) => void;
   onDraftConfigChange: (config: RunConfig) => void;
   onDraftSubmit: () => void;
   onDraftCancel: () => void;
@@ -609,6 +628,7 @@ export function Graph({
   rootModelId,
   onSelect,
   onShowContext,
+  onShowSubagents,
   onShowCompression,
   onBranch,
   branchDisabled,
@@ -620,6 +640,7 @@ export function Graph({
   onDraftTextChange,
   onDraftFilesChange,
   onDraftReferencesChange,
+  onDraftToolRequestsChange,
   onDraftConfigChange,
   onDraftSubmit,
   onDraftCancel,
@@ -716,6 +737,7 @@ export function Graph({
             draft.referenceNodeIds.length,
             draftParents.length,
             draftSummaryOpen,
+            draft.toolRequests?.length,
           )
         : null,
     [
@@ -724,6 +746,7 @@ export function Graph({
       draft?.contextCheckpointId,
       draft?.files.length,
       draft?.referenceNodeIds.length,
+      draft?.toolRequests?.length,
       draftParents.length,
       draftSummaryOpen,
       draftParent?.position,
@@ -763,6 +786,7 @@ export function Graph({
             inPath: path.has(turn.id),
             contextUsage: contextUsage.get(turn.id)!,
             showContext: onShowContext,
+            showSubagents: onShowSubagents,
             branch: onBranch,
             branchDisabled,
             connectable: Boolean(connectionParent(turn.id)),
@@ -858,6 +882,7 @@ export function Graph({
                 draft.referenceNodeIds.length,
                 draftParents.length,
                 draftSummaryOpen,
+                draft.toolRequests?.length,
               ),
               draggable: false,
               selectable: false,
@@ -867,6 +892,7 @@ export function Graph({
                 text: draft.text,
                 files: draft.files,
                 referenceNodeIds: draft.referenceNodeIds,
+                toolRequests: draft.toolRequests,
                 referenceCandidates: workspace.nodes.filter(
                   (node) => node.status === "completed" && !node.contextStale,
                 ),
@@ -893,6 +919,7 @@ export function Graph({
                 onTextChange: onDraftTextChange,
                 onFilesChange: onDraftFilesChange,
                 onReferencesChange: onDraftReferencesChange,
+                onToolRequestsChange: onDraftToolRequestsChange,
                 onConfigChange: onDraftConfigChange,
                 onSubmit: onDraftSubmit,
                 onCancel: onDraftCancel,
@@ -932,6 +959,7 @@ export function Graph({
       rootModelId,
       contextUsage,
       onShowContext,
+      onShowSubagents,
       onShowCompression,
       draft,
       draftParents,
@@ -945,6 +973,7 @@ export function Graph({
       onDraftTextChange,
       onDraftFilesChange,
       onDraftReferencesChange,
+      onDraftToolRequestsChange,
       onDraftConfigChange,
       onDraftSubmit,
       onDraftCancel,
@@ -959,10 +988,7 @@ export function Graph({
     [showReferences, workspace.nodes, draft?.id, draft?.referenceNodeIds],
   );
   useEffect(
-    () =>
-      setNodes((current) =>
-        reconcileGraphNodes(current, derivedNodes),
-      ),
+    () => setNodes((current) => reconcileGraphNodes(current, derivedNodes)),
     [derivedNodes],
   );
   const edges = useMemo<Edge[]>(() => {
@@ -1061,6 +1087,7 @@ export function Graph({
           draft.referenceNodeIds.length,
           draftParents.length,
           draftSummaryOpen,
+          draft.toolRequests?.length,
         ) /
           2,
       {
@@ -1075,6 +1102,7 @@ export function Graph({
     draft?.focusVersion,
     draft?.files.length,
     draft?.referenceNodeIds.length,
+    draft?.toolRequests?.length,
     draftParents.length,
     draftSummaryOpen,
     draftPosition?.x,

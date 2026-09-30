@@ -11,6 +11,7 @@ import {
   FolderOpen,
   Globe,
   LoaderCircle,
+  MousePointer2,
   Search,
   ShieldCheck,
   ShieldQuestion,
@@ -24,6 +25,13 @@ import type {
 } from "../shared/types";
 import { api } from "./api";
 import { getDesktopBridge } from "./desktop";
+import { ComputerUseTarget, ToolScreenshots } from "./ComputerUseTools";
+import {
+  computerUseLabel,
+  computerUseTargetLabel,
+  isComputerUseCall,
+  toolWaitLabel,
+} from "./computer-use";
 
 export function ApprovalModeSwitch({
   mode,
@@ -56,7 +64,7 @@ export function ApprovalModeSwitch({
         aria-pressed={mode === "auto"}
         className={mode === "auto" ? "selected automatic" : ""}
         disabled={disabled}
-        title="每次工具调用由所选安全模型审核，只有明确批准才执行；未通过转交你处理"
+        title="需要审批的工具操作由安全模型审核，未通过时转交你处理；CUA 已授权的常规操作可直接执行，重要操作仍需单次批准"
         onClick={() => onChange("auto")}
       >
         <ShieldCheck size={13} />
@@ -135,7 +143,7 @@ export function DirectoryField({
       const path = await desktop.chooseDirectory();
       if (current !== nativeRequest.current || !selectionAllowed.current)
         return;
-      if (path !== null) {
+      if (typeof path === "string" && path.trim()) {
         onChange(path);
         setOpen(false);
       }
@@ -284,6 +292,8 @@ export function DirectoryField({
 }
 
 const toolLabels: Record<string, string> = {
+  subagents_enable: "开启子代理",
+  subagent: "子代理协作",
   read: "读取文件",
   edit: "修改文件",
   write: "写入文件",
@@ -307,6 +317,7 @@ const approvalLabels: Record<NonNullable<ToolCall["approval"]>, string> = {
   auto: "旧版自动放行（未经安全模型审核）",
   policy: "只读策略放行",
   safety_model: "安全模型已批准",
+  cua_takeover: "CUA 接管已放行",
   approved: "你已批准此操作",
   approved_tool: "你已批量同意此卡片本轮的同名工具操作",
   denied: "你已拒绝此操作",
@@ -345,6 +356,11 @@ function ToolCallCard({
   const [error, setError] = useState("");
   const pending = call.status === "awaiting_approval";
   const reviewing = call.status === "reviewing";
+  const computerUse = isComputerUseCall(call);
+  const label = computerUse
+    ? computerUseLabel(call)
+    : (toolLabels[call.name] ?? call.name);
+  const allowsBatch = call.name !== "computer_use_call";
   const waitingFor = call.status === "running" ? call.waitingFor : undefined;
   const decide = async (decision: ToolApprovalDecision) => {
     setBusy(true);
@@ -377,7 +393,9 @@ function ToolCallCard({
         }
       >
         <summary>
-          {call.name === "bash" ? (
+          {computerUse ? (
+            <MousePointer2 size={14} />
+          ) : call.name === "bash" ? (
             <Terminal size={14} />
           ) : call.name === "web_search" ? (
             <Search size={14} />
@@ -386,16 +404,15 @@ function ToolCallCard({
           ) : (
             <FileCode2 size={14} />
           )}
-          <b>{toolLabels[call.name] ?? call.name}</b>
+          <b>{label}</b>
+          {call.subagentId && (
+            <small title={`子代理 ${call.subagentId}`}>子代理</small>
+          )}
           <span className="tool-call-status" title={waitingFor}>
             {(call.status === "running" || reviewing) && (
               <LoaderCircle size={11} className="spin" />
             )}
-            {waitingFor
-              ? call.name === "bash"
-                ? "等待文件操作"
-                : "等待文件"
-              : toolStatusLabels[call.status]}
+            {waitingFor ? toolWaitLabel(call) : toolStatusLabels[call.status]}
           </span>
           <ChevronDown size={12} />
         </summary>
@@ -433,6 +450,7 @@ function ToolCallCard({
               <pre>{call.output || "操作完成，无文本输出。"}</pre>
             </>
           )}
+          <ToolScreenshots call={call} />
           {sources.length > 0 && (
             <div className="tool-sources" aria-label="网页来源">
               <span className="tool-content-label">网页来源</span>
@@ -451,6 +469,11 @@ function ToolCallCard({
             </div>
           )}
           {call.error && <div className="inline-error">{call.error}</div>}
+          {call.computerUse?.authorizationReason && (
+            <span className="tool-approval-record">
+              {call.computerUse.authorizationReason}
+            </span>
+          )}
           {call.approval && (
             <span className="tool-approval-record">
               {approvalLabels[call.approval]}
@@ -458,6 +481,7 @@ function ToolCallCard({
           )}
         </div>
       </details>
+      {computerUse && <ComputerUseTarget call={call} />}
       {typeof target === "string" && (
         <div className="tool-target" title={target}>
           {target}
@@ -466,20 +490,24 @@ function ToolCallCard({
       {pending && (
         <div className="tool-approval-actions">
           <p>
-            {call.name === "bash"
-              ? "批准后将在本机运行以上命令。"
-              : call.name === "web_search"
-                ? "批准后将以上查询发送给 Exa，搜索结果会交给对话模型。"
-                : call.name === "web_fetch"
-                  ? "批准后将访问以上公开网址，提取的网页或 PDF 文本会交给对话模型。"
-                  : call.name === "read"
-                    ? "批准后将读取以上文件并交给对话模型。"
-                    : "批准后将修改工作目录中的文件。"}
+            {computerUse
+              ? `批准后将对${computerUseTargetLabel(call) ? `「${computerUseTargetLabel(call)}」` : "指定目标"}执行以上电脑操作，截图和界面内容会交给对话模型。`
+              : call.name === "bash"
+                ? "批准后将在本机运行以上命令。"
+                : call.name === "web_search"
+                  ? "批准后将以上查询发送给 Exa，搜索结果会交给对话模型。"
+                  : call.name === "web_fetch"
+                    ? "批准后将访问以上公开网址，提取的网页或 PDF 文本会交给对话模型。"
+                    : call.name === "read"
+                      ? "批准后将读取以上文件并交给对话模型。"
+                      : "批准后将修改工作目录中的文件。"}
           </p>
-          <p className="tool-batch-hint">
-            批量同意后，此卡片本轮的「{toolLabels[call.name] ?? call.name}
-            」将直接执行，其他工具仍按原规则审批。
-          </p>
+          {allowsBatch && (
+            <p className="tool-batch-hint">
+              批量同意后，此卡片本轮的「{label}
+              」将直接执行，其他工具仍按原规则审批。
+            </p>
+          )}
           <div>
             <button
               type="button"
@@ -503,22 +531,24 @@ function ToolCallCard({
               )}
               批准这次操作
             </button>
-            <button
-              type="button"
-              className="tool-approve-batch"
-              disabled={busy || !batchApprovalAvailable}
-              title={
-                batchApprovalAvailable
-                  ? `同意此卡片本轮所有「${toolLabels[call.name] ?? call.name}」操作，运行结束后失效`
-                  : "重启 Panel 服务后可使用批量同意"
-              }
-              onClick={() => void decide("approve_tool")}
-            >
-              <CheckCheck size={13} />
-              批量同意
-            </button>
+            {allowsBatch && (
+              <button
+                type="button"
+                className="tool-approve-batch"
+                disabled={busy || !batchApprovalAvailable}
+                title={
+                  batchApprovalAvailable
+                    ? `同意此卡片本轮所有「${label}」操作，运行结束后失效`
+                    : "重启 Panel 服务后可使用批量同意"
+                }
+                onClick={() => void decide("approve_tool")}
+              >
+                <CheckCheck size={13} />
+                批量同意
+              </button>
+            )}
           </div>
-          {!batchApprovalAvailable && (
+          {allowsBatch && !batchApprovalAvailable && (
             <p className="tool-batch-hint">
               批量同意将在 Panel 服务重启后可用。
             </p>
@@ -557,9 +587,12 @@ export function ToolActivity({
     (call) => call.status === "running" && call.waitingFor,
   );
   const failed = calls.filter((call) => call.status === "failed").length;
+  const waitingComputer = waiting.filter(isComputerUseCall).length;
+  const waitingFiles = waiting.length - waitingComputer;
   const progress = [
     pending > 0 ? `${pending} 待批准` : "",
-    waiting.length > 0 ? `${waiting.length} 等待文件` : "",
+    waitingComputer > 0 ? `${waitingComputer} 等待电脑目标` : "",
+    waitingFiles > 0 ? `${waitingFiles} 等待文件` : "",
     active > 0 ? `${active} 进行中` : "",
   ].filter(Boolean);
 

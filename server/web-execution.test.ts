@@ -38,6 +38,9 @@ async function until(check: () => boolean) {
   assert.fail("Timed out waiting for web tool state");
 }
 
+import { ComputerUse } from "./computer-use.ts";
+import { CuaDriverService } from "./cua-driver.ts";
+
 class WebRuntime extends PiRuntime {
   readonly reviews: SafetyReviewRequest[] = [];
   decision: SafetyReviewResult = {
@@ -117,7 +120,11 @@ async function fixture(
       );
     },
   };
-  const runtime = new WebRuntime(registry, options);
+  const runtime = new WebRuntime(
+    registry,
+    options,
+    new ComputerUse(new CuaDriverService({ rootDir: directory })),
+  );
   const scheduler = new Scheduler(store, runtime);
   t.after(async () => {
     scheduler.shutdown();
@@ -375,7 +382,16 @@ test("the temporary directory exposes local tools alongside web tools without a 
       );
       assert.deepEqual(
         tools.map((tool) => tool.name),
-        ["web_search", "web_fetch", "read", "write", "edit", "bash"],
+        [
+          "web_search",
+          "web_fetch",
+          "subagents_enable",
+          "subagent",
+          "read",
+          "write",
+          "edit",
+          "bash",
+        ],
       );
       return fauxAssistantMessage("可以搜索网页并在临时目录保存文件");
     },

@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { types } from "node:util";
 
-export const TOOL_POLICY_VERSION = "panel-tools-v3-pi-web-0.29.0";
+export const TOOL_POLICY_VERSION = "panel-tools-v6-subagents-0.73.1";
 
 export interface ToolAuthorizationScope {
   workspaceId: string;

@@ -10,8 +10,8 @@ import {
   type TextareaHTMLAttributes,
 } from "react";
 import { createPortal } from "react-dom";
-import { AtSign, Check, X } from "lucide-react";
-import type { TurnNode } from "../shared/types";
+import { AtSign, Check, Globe, MousePointer2, Users, X } from "lucide-react";
+import type { ToolRequest, TurnNode } from "../shared/types";
 import {
   MAX_CARD_REFERENCES,
   cardReferenceLabel,
@@ -19,6 +19,9 @@ import {
   cardReferenceTitle,
   filterCardReferences,
   insertCardReference,
+  filterToolRequests,
+  insertToolRequest,
+  TOOL_REQUEST_OPTIONS,
   type CardReferenceQuery,
 } from "./card-reference-input";
 import "./card-reference-input.css";
@@ -31,6 +34,8 @@ export type CardReferenceInputProps = Omit<
   onChange: (value: string) => void;
   referenceNodeIds: string[];
   onReferencesChange: (nodeIds: string[]) => void;
+  toolRequests?: ToolRequest[];
+  onToolRequestsChange?: (requests: ToolRequest[]) => void;
   candidates: TurnNode[];
   /** Full canvas order, before availability and search filtering. */
   workspaceNodes: TurnNode[];
@@ -42,6 +47,8 @@ export function CardReferenceInput({
   onChange,
   referenceNodeIds,
   onReferencesChange,
+  toolRequests = [],
+  onToolRequestsChange,
   candidates,
   workspaceNodes,
   inputRef,
@@ -66,7 +73,14 @@ export function CardReferenceInput({
   const [notice, setNotice] = useState("");
   const listId = useId();
   const hintId = useId();
-  const options = filterCardReferences(candidates, query?.text ?? "");
+  const cardOptions = filterCardReferences(candidates, query?.text ?? "");
+  const toolOptions = onToolRequestsChange
+    ? filterToolRequests(query?.text ?? "")
+    : [];
+  const options = [
+    ...toolOptions.map((tool) => ({ kind: "tool" as const, tool })),
+    ...cardOptions.map((node) => ({ kind: "card" as const, node })),
+  ];
   const conversationNumbers = new Map(
     workspaceNodes.map((node, index) => [
       node.id,
@@ -76,6 +90,7 @@ export function CardReferenceInput({
   const open = Boolean(query) && !disabled;
   const selectedIndex = Math.min(activeIndex, Math.max(0, options.length - 1));
   const uniqueReferences = [...new Set(referenceNodeIds)];
+  const uniqueTools = [...new Set(toolRequests)];
   const atLimit = uniqueReferences.length >= MAX_CARD_REFERENCES;
 
   const attachInput = useCallback(
@@ -221,6 +236,22 @@ export function CardReferenceInput({
     setNotice("");
   }
 
+  function selectOption(option: (typeof options)[number]) {
+    if (option.kind === "card") return selectReference(option.node);
+    if (!query || disabled || !onToolRequestsChange) return;
+    const insertion = insertToolRequest(
+      value,
+      query,
+      option.tool.id,
+      uniqueTools,
+    );
+    pendingSelection.current = insertion;
+    dismissMenu();
+    setNotice("");
+    onChange(insertion.value);
+    onToolRequestsChange(insertion.toolRequests);
+  }
+
   return (
     <div className="card-reference-input">
       <textarea
@@ -291,8 +322,7 @@ export function CardReferenceInput({
             if (event.key === "Enter" && !event.shiftKey) {
               event.preventDefault();
               event.stopPropagation();
-              if (options[selectedIndex])
-                selectReference(options[selectedIndex]);
+              if (options[selectedIndex]) selectOption(options[selectedIndex]);
               return;
             }
           }
@@ -300,9 +330,51 @@ export function CardReferenceInput({
         }}
       />
       <span id={hintId} className="card-reference-sr-only">
-        输入 @ 选择卡片，将其问题和回答加入上下文；方向键选择，Enter
+        输入 @ 选择本轮工具或引用卡片；工具将在发送消息后调用。方向键选择，Enter
         确认，Escape 关闭。
       </span>
+      {uniqueTools.length > 0 && (
+        <div className="card-reference-selection tool-request-selection">
+          <span className="card-reference-selection-label">
+            本轮指定工具 · 发送后调用
+          </span>
+          <ul aria-label="已选择的工具" className="card-reference-chips">
+            {uniqueTools.map((request) => {
+              const option = TOOL_REQUEST_OPTIONS.find(
+                (item) => item.id === request,
+              );
+              if (!option) return null;
+              return (
+                <li
+                  className="card-reference-chip tool-request-chip"
+                  key={request}
+                >
+                  {request === "web_search" ? (
+                    <Globe size={11} aria-hidden="true" />
+                  ) : request === "subagents" ? (
+                    <Users size={11} aria-hidden="true" />
+                  ) : (
+                    <MousePointer2 size={11} aria-hidden="true" />
+                  )}
+                  <span>{option.label}</span>
+                  <button
+                    type="button"
+                    disabled={disabled}
+                    aria-label={`移除工具「${option.label}」`}
+                    onClick={() =>
+                      onToolRequestsChange?.(
+                        uniqueTools.filter((item) => item !== request),
+                      )
+                    }
+                  >
+                    <X size={11} />
+                  </button>
+                </li>
+              );
+            })}
+          </ul>
+        </div>
+      )}
       {uniqueReferences.length > 0 && (
         <div className="card-reference-selection">
           <span className="card-reference-selection-label">
@@ -355,19 +427,71 @@ export function CardReferenceInput({
             <div className="card-reference-menu-heading">
               <strong>
                 <AtSign size={13} />
-                引用卡片
+                {onToolRequestsChange ? "工具与卡片" : "引用卡片"}
               </strong>
               <span>
-                {uniqueReferences.length}/{MAX_CARD_REFERENCES}
+                卡片 {uniqueReferences.length}/{MAX_CARD_REFERENCES}
               </span>
             </div>
             <div
               id={listId}
               role="listbox"
-              aria-label="选择要引用的卡片"
+              aria-label={
+                onToolRequestsChange
+                  ? "选择本轮工具或引用卡片"
+                  : "选择要引用的卡片"
+              }
               className="card-reference-options"
             >
-              {options.map((node, index) => {
+              {toolOptions.length > 0 && (
+                <div
+                  className="mention-option-group"
+                  role="group"
+                  aria-label="本轮工具"
+                >
+                  <div className="mention-option-group-label">本轮工具</div>
+                  {toolOptions.map((tool, index) => (
+                    <button
+                      type="button"
+                      key={tool.id}
+                      id={`${listId}-${index}`}
+                      role="option"
+                      aria-selected={index === selectedIndex}
+                      tabIndex={-1}
+                      data-option-index={index}
+                      className={`card-reference-option${index === selectedIndex ? " is-active" : ""}`}
+                      onMouseEnter={() => setActiveIndex(index)}
+                      onClick={() => selectOption({ kind: "tool", tool })}
+                    >
+                      <span className="tool-request-option-icon">
+                        {tool.id === "web_search" ? (
+                          <Globe size={14} />
+                        ) : tool.id === "subagents" ? (
+                          <Users size={14} />
+                        ) : (
+                          <MousePointer2 size={14} />
+                        )}
+                      </span>
+                      <span className="card-reference-option-content">
+                        <span className="card-reference-option-heading">
+                          <strong>{tool.label}</strong>
+                          {uniqueTools.includes(tool.id) && (
+                            <Check size={12} aria-label="已选择" />
+                          )}
+                        </span>
+                        <span className="card-reference-option-preview">
+                          {tool.description}
+                        </span>
+                      </span>
+                    </button>
+                  ))}
+                </div>
+              )}
+              {onToolRequestsChange && (
+                <div className="mention-option-group-label">引用卡片</div>
+              )}
+              {cardOptions.map((node, cardIndex) => {
+                const index = toolOptions.length + cardIndex;
                 const selected = uniqueReferences.includes(node.id);
                 return (
                   <button
@@ -406,7 +530,7 @@ export function CardReferenceInput({
                   </button>
                 );
               })}
-              {!options.length && (
+              {!cardOptions.length && (
                 <p className="card-reference-empty">
                   {query?.text.trim()
                     ? "没有匹配的卡片，试试其他关键词。"
@@ -415,7 +539,7 @@ export function CardReferenceInput({
               )}
             </div>
             <div className="card-reference-menu-footer">
-              ↑ ↓ 选择 · Enter 引用 · Esc 关闭
+              ↑ ↓ 选择 · Enter 确认 · Esc 关闭
             </div>
           </div>,
           input.current?.closest("dialog") ?? document.body,

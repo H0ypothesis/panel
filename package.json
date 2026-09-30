@@ -1,41 +1,56 @@
 {
   "name": "panel-agent-workbench",
-  "version": "0.1.0",
+  "version": "0.5.0",
   "private": true,
   "type": "module",
   "scripts": {
     "dev": "tsx server/index.ts",
     "check": "tsc --noEmit && tsc --project tsconfig.server.json --noEmit",
-    "setup:pi": "node --import ./scripts/pi-models-dev-compat.mjs pi/packages/ai/scripts/generate-models.ts --strict --data-only",
-    "test:setup": "node --test scripts/setup-pi.test.mjs",
+    "setup:pi": "node scripts/setup-pi.mjs",
+    "setup:cua": "node scripts/setup-cua.mjs",
+    "test:setup": "node --test scripts/setup-pi.test.mjs scripts/setup-cua.test.mjs",
     "test:core": "tsx --test server/*.test.ts",
+    "test:ui": "node --import tsx --test src/*.test.ts src/*.test.tsx && node --test scripts/test-inspector.mjs scripts/test-provider-settings.mjs scripts/test-directory-picker.mjs",
     "build": "vite build",
     "format": "prettier --write src server shared vite.config.ts tsconfig*.json package.json docs/PRD.md README.md",
     "start": "NODE_ENV=production tsx server/index.ts",
     "desktop:bundle": "node scripts/bundle-desktop.mjs",
     "build:mac": "npm run build && npm run desktop:bundle && node scripts/build-mac.mjs",
-    "test:desktop": "node scripts/test-desktop.mjs"
+    "test:desktop": "node scripts/test-desktop.mjs",
+    "test:updater": "node --test scripts/test-updater.mjs scripts/test-desktop-update.mjs"
   },
   "dependencies": {
     "@earendil-works/chord": "file:./pi/packages/chord",
     "@earendil-works/pi-agent-core": "file:./pi/packages/agent",
     "@earendil-works/pi-ai": "file:./pi/packages/ai",
+    "@earendil-works/pi-coding-agent": "0.99.1",
     "@earendil-works/pi-telemetry": "file:./pi/packages/telemetry",
+    "@earendil-works/pi-tui": "0.99.1",
+    "@modelcontextprotocol/sdk": "1.30.0",
     "@xyflow/react": "12.8.5",
     "lucide-react": "0.468.0",
-    "pi-mcp-adapter": "2.34.0",
-    "pi-web-access": "0.29.0",
+    "pi-mcp-adapter": "3.3.0",
+    "pi-subagents": "0.73.1",
+    "pi-web-access": "0.34.0",
     "react": "19.1.1",
     "react-dom": "19.1.1",
     "react-markdown": "10.1.0",
-    "remark-gfm": "4.0.1"
+    "remark-gfm": "4.0.1",
+    "yauzl": "3.4.0"
+  },
+  "overrides": {
+    "pi-mcp-adapter@3.3.0": {
+      "@earendil-works/pi-ai": "$@earendil-works/pi-ai"
+    }
   },
   "devDependencies": {
+    "@panel/pi-model-data": "npm:@earendil-works/pi-ai@0.99.1",
     "@types/node": "22.19.19",
     "@types/react": "19.1.16",
     "@types/react-dom": "19.1.9",
     "@vitejs/plugin-react": "5.0.4",
     "esbuild": "0.28.2",
+    "jsdom": "26.1.0",
     "prettier": "3.6.2",
     "tsx": "4.22.1",
     "typescript": "5.9.3",

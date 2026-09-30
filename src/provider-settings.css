@@ -79,6 +79,21 @@
   color: var(--text-muted);
   margin: -11px 0 19px;
 }
+.provider-context-inputs {
+  display: grid;
+  grid-template-columns: 96px minmax(0, 1fr);
+  gap: 8px;
+}
+.provider-context-inputs > input,
+.provider-context-inputs > select {
+  min-width: 0;
+}
+@media (max-width: 420px) {
+  .provider-context-inputs {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 0;
+  }
+}
 .provider-key-label > .provider-key-input {
   display: block;
   position: relative;
@@ -154,4 +169,82 @@
 }
 .provider-settings-success svg {
   flex-shrink: 0;
+}
+.provider-model-label {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+.provider-model-refresh {
+  display: grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  color: var(--text-secondary);
+}
+.provider-model-refresh:disabled {
+  opacity: 0.5;
+}
+.provider-model-picker {
+  position: relative;
+}
+.provider-model-input {
+  position: relative;
+  margin-top: 9px;
+}
+.provider-settings-dialog .provider-model-input input {
+  padding-right: 38px;
+  margin-top: 0;
+}
+.provider-model-input > button {
+  position: absolute;
+  right: 4px;
+  top: 4px;
+  bottom: 4px;
+  width: 30px;
+  display: grid;
+  place-items: center;
+  color: var(--text-secondary);
+}
+.provider-model-options {
+  position: relative;
+  padding: 4px;
+  margin: 4px 0 0;
+  max-height: 190px;
+  overflow-y: auto;
+  list-style: none;
+  border: 1px solid var(--line-strong);
+  border-radius: 6px;
+  background: var(--surface);
+}
+.provider-model-options li {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 8px;
+  cursor: pointer;
+  color: var(--text-body);
+  overflow-wrap: anywhere;
+}
+.provider-model-options li.is-active {
+  background: var(--surface-hover);
+}
+.provider-model-options li > span {
+  min-width: 0;
+}
+.provider-model-options li > svg {
+  flex-shrink: 0;
+}
+.provider-model-options b {
+  font-weight: 500;
+}
+.provider-model-options small {
+  display: block;
+  color: var(--text-muted);
+  margin-top: 3px;
+}
+.provider-model-options .provider-model-empty {
+  color: var(--text-muted);
+  cursor: default;
 }

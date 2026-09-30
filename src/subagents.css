@@ -1,0 +1,231 @@
+.turn-card.has-subagents .card-preview {
+  -webkit-line-clamp: 1;
+  height: 21px;
+}
+.turn-card.has-subagents .card-retry-button {
+  left: auto;
+  right: 18px;
+}
+.card-subagents {
+  position: absolute;
+  bottom: 47px;
+  left: 18px;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+.subagent-avatar-stack {
+  display: flex;
+  align-items: center;
+}
+.subagent-avatar-stack button {
+  padding: 0;
+  border: 0;
+  background: transparent;
+  border-radius: 50%;
+  position: relative;
+}
+.subagent-avatar-stack button + button {
+  margin-left: -5px;
+}
+.turn-card:is(.status-failed, .status-cancelled)
+  .subagent-avatar-stack
+  button
+  + button {
+  margin-left: -10px;
+}
+.turn-card:is(.status-failed, .status-cancelled) .subagent-card-count {
+  display: none;
+}
+.subagent-avatar-stack button:hover,
+.subagent-avatar-stack button:focus-visible {
+  z-index: 1;
+  transform: translateY(-2px);
+  outline: 2px solid var(--focus-ring);
+}
+.subagent-avatar {
+  width: 29px;
+  height: 29px;
+  border: 2px solid var(--card-background);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  position: relative;
+  flex-shrink: 0;
+}
+.subagent-avatar.tone-0 {
+  background: #dceade;
+  color: #366044;
+}
+.subagent-avatar.tone-1 {
+  background: #e7e0f6;
+  color: #6a4b92;
+}
+.subagent-avatar.tone-2 {
+  background: #dbe8f8;
+  color: #3d618c;
+}
+.subagent-avatar.tone-3 {
+  background: #f5e7cf;
+  color: #8b642b;
+}
+.subagent-avatar i {
+  position: absolute;
+  right: -1px;
+  bottom: -1px;
+  width: 7px;
+  height: 7px;
+  border: 1px solid var(--card-background);
+  border-radius: 50%;
+  background: #899091;
+}
+.subagent-avatar.completed i {
+  background: #46966b;
+}
+.subagent-avatar.running i {
+  background: #578fe0;
+  box-shadow: 0 0 0 2px #578fe030;
+}
+.subagent-avatar.failed i {
+  background: #d46969;
+}
+.subagent-avatar-stack .subagent-overflow {
+  width: 29px;
+  height: 29px;
+  border: 2px solid var(--card-background);
+  background: var(--surface-muted);
+  color: var(--text-body);
+  font-size: 10px;
+}
+.inspector-tabs:has(button:nth-child(3)) {
+  gap: 14px;
+}
+.inspector-tabs:has(button:nth-child(3)) button {
+  white-space: nowrap;
+  gap: 4px;
+}
+.subagent-card-count {
+  color: var(--text-muted);
+  font-size: 10px;
+}
+.subagents-heading {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin-bottom: 14px;
+  font-size: 12px;
+  color: var(--text-heading);
+}
+.subagents-heading span {
+  margin-left: auto;
+  color: var(--text-muted);
+}
+.subagent-list {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+}
+.subagent-list-item {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  width: 100%;
+  padding: 10px;
+  text-align: left;
+  border: 1px solid var(--line-subtle);
+  border-radius: 8px;
+  background: var(--card-background);
+  color: var(--text-body);
+}
+.subagent-list-item:hover,
+.subagent-list-item.selected {
+  border-color: var(--branch-green);
+}
+.subagent-list-item.selected {
+  background: var(--branch-green-background);
+}
+.subagent-list-item > span:last-child {
+  flex: 1;
+  min-width: 0;
+}
+.subagent-list-item b {
+  display: flex;
+  justify-content: space-between;
+  gap: 6px;
+  font-size: 11px;
+  font-weight: 550;
+}
+.subagent-list-item small {
+  font-size: 10px;
+  font-weight: 400;
+  color: var(--text-muted);
+}
+.subagent-list-item small.needs-approval {
+  color: var(--error);
+}
+.subagent-list-item em {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  margin-top: 4px;
+  font-size: 11px;
+  font-style: normal;
+  color: var(--text-muted);
+}
+.subagent-detail {
+  border-top: 1px solid var(--line-subtle);
+  margin-top: 18px;
+  padding-top: 16px;
+}
+.subagent-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px 10px;
+  color: var(--text-muted);
+  font-size: 10px;
+  overflow-wrap: anywhere;
+}
+.subagent-detail h3 {
+  font-size: 11px;
+  color: var(--text-muted);
+  margin: 18px 0 8px;
+  font-weight: 500;
+}
+.subagent-task {
+  font-size: 12px;
+  line-height: 1.8;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  color: var(--text-heading);
+}
+.subagent-error {
+  font-size: 12px;
+  line-height: 1.7;
+  color: var(--error);
+  overflow-wrap: anywhere;
+}
+.subagents-empty {
+  padding: 40px 12px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+  text-align: center;
+  color: var(--text-muted);
+  font-size: 12px;
+  line-height: 1.7;
+}
+.subagents-empty strong {
+  color: var(--text-heading);
+  font-size: 14px;
+}
+.subagents-empty p {
+  margin: 0;
+}
+.subagent-empty-output {
+  color: var(--text-muted);
+  font-size: 12px;
+  padding: 10px 0;
+}

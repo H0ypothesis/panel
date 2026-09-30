@@ -7,10 +7,14 @@ Web 版和 macOS 应用均可直接在界面中配置模型。macOS 应用的文
 ## 在界面中配置
 
 1. 打开左下角「模型连接」，点击供应商右侧的「未配置」；已有配置时点击「已配置」可继续编辑。
-2. 在配置子页填写 API URL、API Key 和 Model。URL 为服务商提供的 API 基础地址，不包含 `/chat/completions` 等具体请求路径。Model 可从已有目录选择，也可填写完整模型 ID；地址需要支持所选供应商的接口协议。
+2. 在配置子页填写 API URL 和 API Key，稍作停顿后会自动获取模型列表。URL 为服务商提供的 API 基础地址，不包含 `/chat/completions` 等具体请求路径；地址需要支持所选供应商的接口协议。点击 Model 输入框可浏览、搜索并选择模型，也可手动填写完整模型 ID。
 3. 点击「保存配置」，模型列表立即更新，无需重启。保存表示配置已写入本机，不代表已向供应商验证连接。
 
-OpenAI 可选择接口协议：自动模式下，内置模型使用 Responses，自定义模型使用 Chat Completions；使用仅支持 Chat Completions 的兼容网关时，选择「Chat Completions（兼容接口）」。自定义模型采用文本输入、关闭思考及 128,000 tokens 的本地上下文预算，实际能力与限制以服务商为准。
+OpenAI 可选择接口协议：自动模式下，内置模型使用 Responses，自定义模型使用 Chat Completions；使用仅支持 Chat Completions 的兼容网关时，选择「Chat Completions（兼容接口）」。自定义模型采用文本输入、关闭思考，实际能力与限制以服务商为准。
+
+「上下文长度（tokens）」可设置当前模型的本地上下文预算，提供 128K、256K、512K、1M 快捷选项（十进制，1K = 1,000、1M = 1,000,000 tokens），也可手动填写精确整数。目录返回有效 `contextWindow` 时自动带入并保留原始数值；未提供或返回 `null` 时保持未知，自定义模型暂用 128,000 tokens 兜底，并在对话模型选择器标为「预算 128K」，不代表真实模型上限。可根据服务商文档填写准确数值，保存后界面与后端压缩使用同一预算，按服务地址和模型分别保留；更换 URL 不继承旧地址的配置。清空该字段并保存可恢复默认。已完成对话的用量环保留当时运行的预算，新设置不会改写历史记录。
+
+模型列表通过本机后端按供应商协议获取，支持 OpenAI 兼容接口、Anthropic 和 Gemini；可点击 Model 右侧刷新按钮重试。获取列表不会保存配置或自动启用所有模型，只有点击「保存配置」才会保存选中的 Model ID。接口不支持列表、认证失败或网络超时时仍可手动填写。打开已有连接会使用已保存的密钥获取列表；若修改了 URL，必须填写该地址的 Key 才会再次获取，避免自动向新地址发送原密钥。
 
 再次编辑时不会显示原密钥，API Key 留空会保留原有密钥。配置保存到 `<PANEL_DATA_DIR>/model-providers.json`（源码启动默认 `.panel/model-providers.json`），文件仅允许当前用户读写。界面保存的供应商配置优先于环境变量；未设置的供应商继续使用原有环境配置。密钥不写入浏览器存储，也不包含在探索导出中。
 
@@ -36,6 +40,8 @@ PANEL_DEFAULT_MODEL=paperbypass/openai/gpt-5.6-luna-pro
 ```
 
 网关通过 `Authorization: Bearer` 调用 `/api/v1/messages`，支持流式文本对话和工具调用。通过 Paperbypass 使用 Atria 只需 `PAPERBYPASS_API_KEY`，无需配置直连服务的 `ATRIA_API_KEY`；如需设为默认模型，将 `PANEL_DEFAULT_MODEL` 改为 `paperbypass/Atria-Dawn-Preview`。
+
+Paperbypass 分组内置 `z-ai/glm-5.3-flash` 的图片输入支持，依据[智谱官方模型卡](https://huggingface.co/zai-org/GLM-5.3-Flash)，可接收图片附件和电脑控制截图。此前已作为自定义模型保存的同名型号会自动使用这项能力，保留已配置的上下文预算。此声明不扩展到 `z-ai/glm-5.3` 或其他未知型号，也不代表 Panel 已支持视频或音频输入。
 
 `PANEL_DEFAULT_MODEL` 决定从探索起点发起对话时的默认模型；历史对话仍继承各自的模型设置。`PAPERBYPASS_MODEL` 可替换默认的 Luna Pro 模型 ID，Atria 选项始终保留。当前网关配置不发送额外思考参数，Atria 采用其[官方文档](https://api.atria-asi.ai/docs)中的 256,000 上下文窗口，其余模型采用 128,000 的本地上下文预算，输出上限均为 8,192，不提供网关费用估算。
 

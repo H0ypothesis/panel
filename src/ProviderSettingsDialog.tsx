@@ -6,11 +6,27 @@ import {
   KeyRound,
   LoaderCircle,
   Save,
+  RefreshCw,
 } from "lucide-react";
 import type { ModelOption } from "../shared/types";
-import type { ProviderSettings } from "../shared/provider-settings";
+import type {
+  ProviderSettings,
+  ProviderModelCatalog,
+} from "../shared/provider-settings";
+import {
+  MAX_CONTEXT_WINDOW,
+  validContextWindow,
+} from "../shared/provider-settings";
 import { api } from "./api";
+import { ProviderModelPicker } from "./ProviderModelPicker";
 import "./provider-settings.css";
+
+const CONTEXT_PRESETS = [
+  { label: "128K", value: 128_000 },
+  { label: "256K", value: 256_000 },
+  { label: "512K", value: 512_000 },
+  { label: "1M", value: 1_000_000 },
+];
 
 export function ProviderSettingsDialog({
   providerId,
@@ -25,6 +41,7 @@ export function ProviderSettingsDialog({
 }) {
   const dialog = useRef<HTMLDialogElement>(null);
   const urlInput = useRef<HTMLInputElement>(null);
+  const contextInput = useRef<HTMLInputElement>(null);
   const pending = useRef(false);
   const mounted = useRef(false);
   const [settings, setSettings] = useState<ProviderSettings | null>(null);
@@ -39,6 +56,98 @@ export function ProviderSettingsDialog({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [attempt, setAttempt] = useState(0);
+  const [catalog, setCatalog] = useState<ProviderModelCatalog | null>(null);
+  const [catalogBusy, setCatalogBusy] = useState(false);
+  const [catalogError, setCatalogError] = useState("");
+  const [catalogAttempt, setCatalogAttempt] = useState(0);
+  const [contextOverride, setContextOverride] = useState<string | null>(null);
+  const normalizedUrl = baseUrl.trim().replace(/\/+$/, "");
+  const unchangedUrl = normalizedUrl === settings?.baseUrl.replace(/\/+$/, "");
+  let validUrl = false;
+  try {
+    const url = new URL(normalizedUrl);
+    validUrl =
+      ["https:", "http:"].includes(url.protocol) &&
+      !url.username &&
+      !url.password &&
+      !url.search &&
+      !url.hash;
+  } catch {
+    /* Wait until the user has entered a URL. */
+  }
+  const canDiscover =
+    validUrl &&
+    Boolean(apiKey.trim() || (settings?.apiKeyConfigured && unchangedUrl));
+  const catalogModel = catalog?.models.find((item) => item.id === model.trim());
+  const savedModel = unchangedUrl
+    ? settings?.models.find((item) => item.id === model.trim())
+    : undefined;
+  const savedContext =
+    savedModel?.contextWindowSource !== "fallback"
+      ? savedModel?.contextWindow
+      : undefined;
+  const suggestedContext =
+    savedModel?.contextWindowSource === "configured"
+      ? savedContext
+      : (catalogModel?.contextWindow ?? savedContext);
+  const contextValue = contextOverride ?? suggestedContext?.toString() ?? "";
+
+  useEffect(() => {
+    setCatalog(null);
+    setCatalogError("");
+    setCatalogBusy(false);
+    if (loading || !settings || !canDiscover) return;
+    const controller = new AbortController();
+    setCatalogBusy(true);
+    const timer = setTimeout(() => {
+      void (async () => {
+        try {
+          const response = await fetch(
+            `/api/model-providers/${encodeURIComponent(providerId)}/models`,
+            {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                baseUrl: normalizedUrl,
+                ...(apiKey.trim() ? { apiKey: apiKey.trim() } : {}),
+              }),
+              signal: controller.signal,
+            },
+          );
+          if (response.status === 404)
+            throw new Error("当前服务不支持获取模型列表，请更新并重启 Panel。");
+          const result = await response.json();
+          if (!response.ok)
+            throw new Error(
+              result.error || "获取模型列表失败，可手动填写 Model ID。",
+            );
+          if (!controller.signal.aborted)
+            setCatalog(result as ProviderModelCatalog);
+        } catch (reason) {
+          if (!controller.signal.aborted)
+            setCatalogError(
+              reason instanceof Error
+                ? reason.message
+                : "获取失败，可手动填写 Model ID。",
+            );
+        } finally {
+          if (!controller.signal.aborted) setCatalogBusy(false);
+        }
+      })();
+    }, 650);
+    return () => {
+      clearTimeout(timer);
+      controller.abort();
+    };
+  }, [
+    loading,
+    settings,
+    providerId,
+    normalizedUrl,
+    apiKey,
+    canDiscover,
+    catalogAttempt,
+  ]);
 
   useEffect(() => {
     mounted.current = true;
@@ -100,6 +209,24 @@ export function ProviderSettingsDialog({
     setBusy(true);
     setError("");
     try {
+      const contextWindow =
+        contextOverride !== null
+          ? contextOverride.trim()
+            ? Number(contextOverride)
+            : null
+          : savedModel?.contextWindowSource !== "configured"
+            ? catalogModel?.contextWindow
+            : undefined;
+      if (
+        contextWindow !== undefined &&
+        contextWindow !== null &&
+        !validContextWindow(contextWindow)
+      )
+        throw new Error(
+          "上下文长度必须是 1024 到 100000000 之间的整数（tokens）。",
+        );
+      if (contextWindow !== undefined && !settings.supportsContextWindow)
+        throw new Error("当前服务不支持设置上下文长度，请更新并重启 Panel。");
       const result = await api<{
         provider: ProviderSettings;
         models: ModelOption[];
@@ -110,6 +237,7 @@ export function ProviderSettingsDialog({
           model: model.trim(),
           ...(providerId === "openai" ? { protocol } : {}),
           ...(apiKey.trim() ? { apiKey: apiKey.trim() } : {}),
+          ...(contextWindow !== undefined ? { contextWindow } : {}),
         },
         "PUT",
       );
@@ -174,7 +302,10 @@ export function ProviderSettingsDialog({
                 spellCheck={false}
                 value={baseUrl}
                 placeholder="https://api.example.com/v1"
-                onChange={(event) => setBaseUrl(event.target.value)}
+                onChange={(event) => {
+                  setBaseUrl(event.target.value);
+                  setContextOverride(null);
+                }}
                 aria-describedby="provider-url-hint"
               />
             </label>
@@ -216,30 +347,107 @@ export function ProviderSettingsDialog({
                 </button>
               </span>
             </label>
-            <label className="form-label" htmlFor="provider-model">
-              Model
-              <input
-                id="provider-model"
-                required
-                maxLength={240}
-                autoComplete="off"
-                spellCheck={false}
-                list="provider-model-options"
+            <div className="form-label">
+              <div className="provider-model-label">
+                <label htmlFor="provider-model">Model</label>
+                <button
+                  type="button"
+                  className="provider-model-refresh"
+                  aria-label="刷新模型列表"
+                  title="刷新模型列表"
+                  disabled={!canDiscover || catalogBusy}
+                  onClick={() => setCatalogAttempt((value) => value + 1)}
+                >
+                  {catalogBusy ? (
+                    <LoaderCircle size={14} className="spin" />
+                  ) : (
+                    <RefreshCw size={14} />
+                  )}
+                </button>
+              </div>
+              <ProviderModelPicker
+                disabled={busy}
                 value={model}
-                placeholder="选择或输入模型 ID"
-                onChange={(event) => setModel(event.target.value)}
-                aria-describedby="provider-model-hint"
+                onChange={(value) => {
+                  setModel(value);
+                  setContextOverride(null);
+                }}
+                models={
+                  catalog?.models ?? (unchangedUrl ? settings.models : [])
+                }
               />
-              <datalist id="provider-model-options">
-                {settings.models.map((item) => (
-                  <option key={item.id} value={item.id}>
-                    {item.name}
-                  </option>
-                ))}
-              </datalist>
-            </label>
-            <p className="provider-field-hint" id="provider-model-hint">
-              可选择已有模型，或输入服务商提供的完整模型 ID。
+            </div>
+            <p
+              className="provider-field-hint"
+              id="provider-model-hint"
+              role="status"
+            >
+              {catalogBusy
+                ? "正在获取模型列表…"
+                : catalogError ||
+                  (catalog
+                    ? `已获取 ${catalog.models.length} 个模型${catalog.truncated ? "（部分结果）" : ""}${catalog.models.length ? "" : "，可手动填写 Model ID"}`
+                    : !unchangedUrl &&
+                        settings.apiKeyConfigured &&
+                        !apiKey.trim()
+                      ? "地址已改变，请填写对应的 API Key。"
+                      : "可手动填写完整 Model ID。")}
+            </p>
+            <div className="form-label">
+              <label htmlFor="provider-context-window">
+                上下文长度（tokens）
+              </label>
+              <div className="provider-context-inputs">
+                <select
+                  id="provider-context-preset"
+                  aria-label="上下文长度预设"
+                  value={
+                    CONTEXT_PRESETS.some(
+                      (preset) => preset.value === Number(contextValue),
+                    )
+                      ? Number(contextValue).toString()
+                      : "custom"
+                  }
+                  onChange={(event) => {
+                    const value = event.target.value;
+                    setContextOverride(value === "custom" ? "" : value);
+                    if (value === "custom") contextInput.current?.focus();
+                  }}
+                >
+                  <option value="custom">自定义</option>
+                  {CONTEXT_PRESETS.map((preset) => (
+                    <option key={preset.value} value={preset.value}>
+                      {preset.label}
+                    </option>
+                  ))}
+                </select>
+                <input
+                  ref={contextInput}
+                  id="provider-context-window"
+                  type="number"
+                  min={1024}
+                  max={MAX_CONTEXT_WINDOW}
+                  step={1}
+                  value={contextValue}
+                  placeholder="未知（本地预算 128000）"
+                  onChange={(event) => setContextOverride(event.target.value)}
+                  aria-describedby="provider-context-hint"
+                />
+              </div>
+            </div>
+            <p className="provider-field-hint" id="provider-context-hint">
+              {contextOverride !== null
+                ? contextValue
+                  ? "自定义上下文预算"
+                  : "保存后恢复默认预算"
+                : savedModel?.contextWindowSource === "configured" &&
+                    contextOverride === null
+                  ? "已保存的上下文预算"
+                  : catalogModel?.contextWindow && contextOverride === null
+                    ? "来源：服务商模型目录"
+                    : savedContext
+                      ? "来源：内置模型目录"
+                      : "模型上限未知；当前使用 128,000 tokens 本地兜底预算。"}
             </p>
             {providerId === "openai" && (
               <label className="form-label" htmlFor="provider-protocol">

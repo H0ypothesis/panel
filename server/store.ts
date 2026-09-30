@@ -19,6 +19,7 @@ import {
 import { exampleWorkspace } from "./seed.ts";
 import { snapshotRequestUsage } from "./request-context-usage.ts";
 import { snapshotThinking } from "./thinking.ts";
+import { toolImageReferences } from "./tool-images.ts";
 import { preparedContextCheckpoints } from "./context.ts";
 import type { StoredAttachment } from "./attachments.ts";
 import {
@@ -136,6 +137,15 @@ export class Store extends EventEmitter {
           }
         }
         for (const node of workspace.nodes) {
+          // Takeover is a process-local user grant, never restored from disk.
+          delete node.computerUseTakeover;
+          delete node.computerUseScope;
+          delete node.computerUseTaskScope;
+          for (const run of node.previousRuns ?? []) {
+            delete run.computerUseTakeover;
+            delete run.computerUseScope;
+            delete run.computerUseTaskScope;
+          }
           for (const request of node.preparationRequests ?? []) {
             if (request.status === "compacting") {
               request.status = "failed";
@@ -154,6 +164,14 @@ export class Store extends EventEmitter {
             node.error =
               "运行被服务重启中断。可以在新节点继续，或在当前卡片原地重试。";
             node.finishedAt = Date.now();
+          }
+          for (const child of node.subagents ?? []) {
+            if (child.status === "running" || child.status === "queued") {
+              child.status = "cancelled";
+              child.error = "服务已重启，子代理运行已中断。";
+              child.finishedAt = Date.now();
+              if (child.thinking) child.thinking.active = false;
+            }
           }
           for (const call of node.toolCalls ?? []) {
             call.waitingFor = undefined;
@@ -251,6 +269,16 @@ export class Store extends EventEmitter {
               ...node
             }) => ({
               ...node,
+              toolCalls: node.toolCalls?.map((call) => ({
+                ...call,
+                images: toolImageReferences(
+                  workspace.id,
+                  node.id,
+                  node.revision ?? 0,
+                  _messages,
+                  call.id,
+                ),
+              })),
               thinking: snapshotThinking(node, _messages),
               preparedCompactions: preparedContextCheckpoints({
                 ...node,

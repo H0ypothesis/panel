@@ -3,6 +3,7 @@ import type {
   ContextCheckpoint,
   ContextParent,
   RunConfig,
+  ToolRequest,
   TurnNode,
 } from "../shared/types";
 import { ancestorPath } from "../shared/types";
@@ -33,6 +34,7 @@ export type CanvasBranchDraft = {
   text: string;
   files: File[];
   referenceNodeIds: string[];
+  toolRequests?: ToolRequest[];
   config: RunConfig;
   requestId: string;
   error: string;
@@ -45,14 +47,16 @@ export function branchDraftHeight(
   referenceCount = 0,
   parentCount = 1,
   mergedSummaryOpen = false,
+  toolRequestCount = 0,
 ) {
   return (
-    374 +
+    408 +
     (parentCount > 1 ? Math.min(parentCount * 28, 112) + 24 : 0) +
     (parentCount >= 2 ? 44 : 0) +
     (parentCount >= 2 && mergedSummaryOpen ? 160 : 0) +
     (fileCount ? Math.min(fileCount * 47, 158) + 7 : 0) +
-    (referenceCount ? Math.min(referenceCount * 34, 110) + 25 : 0)
+    (referenceCount ? Math.min(referenceCount * 34, 110) + 25 : 0) +
+    (toolRequestCount ? 55 : 0)
   );
 }
 
@@ -65,6 +69,7 @@ export function branchDraftPosition(
   referenceCount = 0,
   parentCount = 1,
   mergedSummaryOpen = false,
+  toolRequestCount = 0,
 ) {
   // Leave extra room for multiline validation or submission feedback.
   const height =
@@ -73,6 +78,7 @@ export function branchDraftPosition(
       referenceCount,
       parentCount,
       mergedSummaryOpen,
+      toolRequestCount,
     ) + 48;
   const x = compressionPosition
     ? Math.max(

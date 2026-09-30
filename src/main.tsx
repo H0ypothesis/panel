@@ -5,6 +5,9 @@ import "@xyflow/react/dist/style.css";
 import "./styles.css";
 import "./theme-palettes.css";
 import "./desktop.css";
+import "./computer-use.css";
+import "./long-task.css";
+import "./subagents.css";
 import { App } from "./App";
 
 ReactDOM.createRoot(document.getElementById("root")!).render(

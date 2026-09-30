@@ -5,6 +5,10 @@ import { paperbypassProvider } from "./paperbypass.ts";
 import { createServer, type IncomingHttpHeaders } from "node:http";
 import { test } from "node:test";
 import { PiRuntime, safeError } from "./runtime.ts";
+import { prepareAttachments } from "./attachments.ts";
+
+const png =
+  "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/5d8AAAAASUVORK5CYII=";
 
 for (const { modelId, reply, contextWindow } of [
   {
@@ -17,7 +21,13 @@ for (const { modelId, reply, contextWindow } of [
     reply: " from Atria",
     contextWindow: 256000,
   },
+  {
+    modelId: "z-ai/glm-5.3-flash",
+    reply: " from GLM",
+    contextWindow: 128000,
+  },
 ]) {
+  const supportsImages = modelId === "z-ai/glm-5.3-flash";
   test(`Paperbypass streams ${modelId} with Messages routing and server-side Bearer auth`, async (t) => {
     const configId = `paperbypass/${modelId}`;
     const dummyKey = "sk-panel-local-mock-key";
@@ -131,6 +141,7 @@ for (const { modelId, reply, contextWindow } of [
     assert.ok(model?.available);
     assert.equal(model.default, true);
     assert.equal(model.contextWindow, contextWindow);
+    assert.equal(model.supportsImages, supportsImages);
     assert.equal(model.envVar, "PAPERBYPASS_API_KEY");
     assert.deepEqual(model.thinkingLevels, ["off"]);
     assert.equal(JSON.stringify(models).includes(dummyKey), false);
@@ -146,6 +157,16 @@ for (const { modelId, reply, contextWindow } of [
       "Say hello",
       AbortSignal.timeout(10000),
       (text) => updates.push(text),
+      undefined,
+      supportsImages
+        ? {
+            autoCompact: false,
+            sources: [{ nodeId: "current", revision: 0, messageCount: 0 }],
+            attachments: await prepareAttachments([
+              { name: "pixel.png", mediaType: "image/png", data: png },
+            ]),
+          }
+        : undefined,
     );
     assert.equal(requests.length, 1);
     const request = requests[0];
@@ -159,6 +180,19 @@ for (const { modelId, reply, contextWindow } of [
     assert.equal(request.body.thinking, undefined);
     assert.equal(request.body.reasoning_effort, undefined);
     assert.equal(JSON.stringify(request.body).includes(dummyKey), false);
+    if (supportsImages) {
+      const messages = request.body.messages as {
+        content: { type: string; source?: unknown }[];
+      }[];
+      const image = messages
+        .flatMap((message) => message.content)
+        .find((block) => block.type === "image");
+      assert.deepEqual(image?.source, {
+        type: "base64",
+        media_type: "image/png",
+        data: png,
+      });
+    }
     assert.deepEqual(updates, ["Hello", `Hello${reply}`]);
     assert.equal(result.response, `Hello${reply}`);
     assert.equal(result.messages.at(-1)?.role, "assistant");
@@ -305,6 +339,15 @@ for (const { modelId, reply, contextWindow } of [
                 return {
                   content: [
                     { type: "text", text: "export const answer = 42;" },
+                    ...(supportsImages
+                      ? [
+                          {
+                            type: "image" as const,
+                            mimeType: "image/png",
+                            data: png,
+                          },
+                        ]
+                      : []),
                   ],
                   details: {},
                 };
@@ -368,7 +411,15 @@ for (const { modelId, reply, contextWindow } of [
         "Earlier results remain in context across multiple tool turns",
       );
       assert.equal(results[0].tool_use_id, "tool_read");
-      assert.equal(results[0].content, "export const answer = 42;");
+      if (supportsImages)
+        assert.deepEqual(results[0].content, [
+          { type: "text", text: "export const answer = 42;" },
+          {
+            type: "image",
+            source: { type: "base64", media_type: "image/png", data: png },
+          },
+        ]);
+      else assert.equal(results[0].content, "export const answer = 42;");
       assert.equal(results[0].is_error, false);
       assert.equal(results[1].tool_use_id, "tool_bash");
       assert.equal(results[1].is_error, true);
@@ -402,7 +453,12 @@ test("Paperbypass retains Atria alongside a custom model without duplicates or c
   for (const key of [undefined, "   "]) {
     if (key === undefined) delete process.env.PAPERBYPASS_API_KEY;
     else process.env.PAPERBYPASS_API_KEY = key;
-    for (const id of ["gateway/custom-model", "Atria-Dawn-Preview"]) {
+    for (const id of [
+      "gateway/custom-model",
+      "Atria-Dawn-Preview",
+      "z-ai/glm-5.3-flash",
+      "z-ai/glm-5.3",
+    ]) {
       process.env.PAPERBYPASS_MODEL = id;
       const models = new PiRuntime()
         .models()
@@ -413,6 +469,16 @@ test("Paperbypass retains Atria alongside a custom model without duplicates or c
           .length,
         1,
       );
+      assert.equal(
+        models.filter((model) => model.id === "paperbypass/z-ai/glm-5.3-flash")
+          .length,
+        1,
+      );
+      for (const model of models)
+        assert.equal(
+          model.supportsImages,
+          model.id === "paperbypass/z-ai/glm-5.3-flash",
+        );
       assert.ok(
         models.every(
           (model) => !model.available && model.envVar === "PAPERBYPASS_API_KEY",

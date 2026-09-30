@@ -5,6 +5,7 @@ import {
   directParentIds,
   type ModelOption,
   type RunConfig,
+  type ToolRequest,
   type TurnNode,
   type Workspace,
 } from "../shared/types";
@@ -36,6 +37,7 @@ export interface RegenerateInput {
   requestId: string;
   expectedRevision: number;
   referenceNodeIds?: string[];
+  toolRequests?: ToolRequest[];
 }
 
 export function NodeActionsDialog({
@@ -63,6 +65,10 @@ export function NodeActionsDialog({
     (target.node.contextReferences ?? []).map((item) => item.nodeId),
   );
   const [referencesChanged, setReferencesChanged] = useState(false);
+  const [toolRequests, setToolRequests] = useState<ToolRequest[]>(
+    target.node.toolRequests ?? [],
+  );
+  const [toolsChanged, setToolsChanged] = useState(false);
   const referenceCandidates = workspace.nodes.filter(
     (node) =>
       node.id !== target.node.id &&
@@ -171,6 +177,7 @@ export function NodeActionsDialog({
           requestId,
           expectedRevision: target.node.revision ?? 0,
           ...(referencesChanged ? { referenceNodeIds } : {}),
+          ...(toolsChanged ? { toolRequests } : {}),
         });
       else await onDelete();
     } catch (reason) {
@@ -222,6 +229,12 @@ export function NodeActionsDialog({
                 candidates={referenceCandidates}
                 workspaceNodes={workspace.nodes}
                 referenceNodeIds={referenceNodeIds}
+                toolRequests={toolRequests}
+                onToolRequestsChange={(requests) => {
+                  setToolRequests(requests);
+                  setToolsChanged(true);
+                  setRequestId(crypto.randomUUID());
+                }}
                 onReferencesChange={(ids) => {
                   setReferenceNodeIds(ids);
                   setReferencesChanged(true);
@@ -250,6 +263,7 @@ export function NodeActionsDialog({
             <ComposerModelControls
               models={models}
               config={config}
+              toolRequests={toolRequests}
               disabled={busy}
               onConfigChange={(next) => {
                 setConfig(next);

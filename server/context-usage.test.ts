@@ -22,6 +22,24 @@ const model = (id: string, contextWindow: number): ModelOption => ({
   thinkingLevels: ["medium"],
 });
 
+test("updated model budgets affect new context estimates without rewriting historical run limits", () => {
+  const root = node("root", null, "root", "");
+  const completed = node("completed", "root", "question", "answer");
+  completed.contextState = {
+    status: "full",
+    updatedAt: 1,
+    inputTokens: 1000,
+    contextWindow: 128000,
+  };
+  const usage = buildContextUsageMap(
+    [root, completed],
+    [model(DEFAULT_CONFIG.model, 1000000)],
+    DEFAULT_CONFIG.model,
+  );
+  assert.equal(usage.get(root.id)?.limit, 1000000);
+  assert.equal(usage.get(completed.id)?.limit, 128000);
+});
+
 test("context estimates count saved references only along the inheriting branch", () => {
   const root = node("root", null, "", "");
   const referenced = node(

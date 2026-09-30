@@ -1,3 +1,4 @@
+import { version as appVersion } from "../package.json";
 import {
   useCallback,
   useEffect,
@@ -55,6 +56,7 @@ import {
   type ModelOption,
   type RunConfig,
   type ToolApprovalDecision,
+  type ToolRequest,
   type TurnNode,
   type WebCapabilities,
   type Workspace,
@@ -71,6 +73,7 @@ import { applyStatePatch, reconcileAppState } from "./state-sync";
 import type { AppStatePatch } from "../shared/state-events";
 import { ResizableWorkspace } from "./ResizableWorkspace";
 import { ToolActivity } from "./CodingControls";
+import { hasSubagents, SubagentsPanel } from "./Subagents";
 import { GenerationIndicator } from "./GenerationIndicator";
 import { AssistantResponse } from "./AssistantResponse";
 import "./assistant-response.css";
@@ -101,17 +104,22 @@ import {
   contextUsageForNode,
   estimatePathContextTokens,
 } from "../shared/context-usage";
-import { formatContextWindow } from "./model-context";
+import { modelContextLabel, modelContextTitle } from "./model-context";
 import type { CanvasBranchDraft } from "./branch-draft";
 import { AttachmentPicker, AttachmentList } from "./Attachments";
 import { encodeAttachments } from "./attachment-draft";
 import { CardReferenceInput } from "./CardReferenceInput";
 import { CardReferenceList } from "./CardReferenceList";
+import { canShowComputerUseTakeover, ToolRequestList } from "./ToolRequestList";
+import { LongTaskBadge } from "./LongTaskControls";
+import type { ComputerUseTakeoverOptions } from "../shared/types";
+import { newBranchConfig } from "./run-config";
 import { BrandHint } from "./BrandHint";
 import { DeleteWorkspaceDialog } from "./DeleteWorkspaceDialog";
 import { NewWorkspace } from "./NewWorkspace";
 import { ProviderSettingsDialog } from "./ProviderSettingsDialog";
 import { getDesktopBridge, onDesktopAction } from "./desktop";
+import { DesktopUpdate } from "./DesktopUpdate";
 import {
   NodeActionsDialog,
   subtreeIds,
@@ -171,6 +179,9 @@ export function App() {
     Record<string, boolean>
   >({});
   const autoCompactLocks = useRef(new Set<string>());
+  const [changingComputerUseTakeover, setChangingComputerUseTakeover] =
+    useState<Record<string, boolean>>({});
+  const computerUseTakeoverLocks = useRef(new Set<string>());
   const [compactingPaths, setCompactingPaths] = useState<
     Record<string, boolean>
   >({});
@@ -193,7 +204,10 @@ export function App() {
   const [search, setSearch] = useState("");
   const [searchOpen, setSearchOpen] = useState(false);
   const [exportOpen, setExportOpen] = useState(false);
-  const [tab, setTab] = useState<"conversation" | "context">("conversation");
+  const [tab, setTab] = useState<"conversation" | "context" | "subagents">(
+    "conversation",
+  );
+  const [selectedSubagentId, setSelectedSubagentId] = useState<string>();
   const [drafts, setDrafts] = useState<
     Record<
       string,
@@ -201,13 +215,20 @@ export function App() {
         text: string;
         files?: File[];
         referenceNodeIds?: string[];
+        toolRequests?: ToolRequest[];
+        config?: RunConfig;
         requestId: string;
         contextMode?: "raw";
       }
     >
   >({});
   const [config, setConfig] = useState<RunConfig>({ ...DEFAULT_CONFIG });
-  const configSelection = useRef({ nodeId: "", revision: -1, resolved: false });
+  const configSelection = useRef({
+    nodeId: "",
+    draftKey: "",
+    revision: -1,
+    resolved: false,
+  });
   const [submitting, setSubmitting] = useState(false);
   const submissionLock = useRef(false);
   const [canvasDrafts, setCanvasDrafts] = useState<
@@ -479,6 +500,17 @@ export function App() {
         : submitting
           ? "当前操作正在提交，请稍候。"
           : "";
+  useEffect(() => {
+    if (
+      selected?.toolRequests?.includes("subagents") &&
+      (selected.status === "queued" || selected.status === "running")
+    )
+      setTab("subagents");
+  }, [selected?.id]);
+  useEffect(() => {
+    if (tab === "subagents" && selected && !hasSubagents(selected))
+      setTab("conversation");
+  }, [selected, tab]);
   const selectedRetryBusy =
     retryingId === selected?.id ||
     selected?.retryRestore?.status === "restoring";
@@ -540,6 +572,7 @@ export function App() {
   const draft = drafts[draftKey]?.text ?? "";
   const draftFiles = drafts[draftKey]?.files ?? EMPTY_ATTACHMENT_FILES;
   const draftReferenceIds = drafts[draftKey]?.referenceNodeIds ?? [];
+  const draftToolRequests = drafts[draftKey]?.toolRequests ?? [];
   const referenceCandidates =
     workspace?.nodes.filter(
       (node) => node.status === "completed" && !node.contextStale,
@@ -608,15 +641,17 @@ export function App() {
   useEffect(() => {
     if (!selected) return;
     if (
-      configSelection.current.nodeId !== selected.id ||
+      configSelection.current.draftKey !== draftKey ||
       configSelection.current.revision !== (selected.revision ?? 0)
     ) {
       configSelection.current = {
         nodeId: selected.id,
+        draftKey,
         revision: selected.revision ?? 0,
-        resolved: selected.status !== "root",
+        resolved:
+          Boolean(drafts[draftKey]?.config) || selected.status !== "root",
       };
-      setConfig({ ...selected.config });
+      setConfig(drafts[draftKey]?.config ?? newBranchConfig(selected.config));
       detailRef.current?.scrollTo({ top: 0 });
       savePreference("node", selected.id);
     }
@@ -626,9 +661,13 @@ export function App() {
       defaultThinking
     ) {
       configSelection.current.resolved = true;
-      setConfig({ model: defaultModelId, thinking: defaultThinking });
+      setConfig((current) => ({
+        ...current,
+        model: defaultModelId,
+        thinking: defaultThinking,
+      }));
     }
-  }, [selected?.id, selected?.revision, defaultModelId, defaultThinking]);
+  }, [draftKey, selected?.revision, defaultModelId, defaultThinking]);
   useEffect(() => {
     if (workspace) savePreference("workspace", workspace.id);
     setSafetyModelRequired(false);
@@ -787,7 +826,7 @@ export function App() {
                 model: defaultModelId ?? DEFAULT_CONFIG.model,
                 thinking: defaultThinking ?? DEFAULT_CONFIG.thinking,
               }
-            : source.config;
+            : newBranchConfig(source.config);
       const initialModel = models.find((item) => item.id === initial.model);
       const siblings = workspace.nodes.filter((node) => node.parentId === id);
       const colors = ["sage", "violet", "blue", "amber"] as const;
@@ -832,6 +871,7 @@ export function App() {
             text: existing?.text ?? "",
             files: existing?.files ?? [],
             referenceNodeIds: existing?.referenceNodeIds ?? [],
+            toolRequests: existing?.toolRequests ?? [],
             config: existing?.config ?? {
               ...initial,
               thinking: initialModel?.thinkingLevels.includes(initial.thinking)
@@ -873,6 +913,7 @@ export function App() {
         | "config"
         | "files"
         | "referenceNodeIds"
+        | "toolRequests"
         | "contextParents"
         | "contextCheckpointId"
         | "contextMode"
@@ -1144,6 +1185,7 @@ export function App() {
           prompt: submitted.text,
           attachments,
           referenceNodeIds: submitted.referenceNodeIds,
+          toolRequests: submitted.toolRequests,
           config: submitted.config,
           requestId: submitted.requestId,
           contextCheckpointId: submitted.contextCheckpointId,
@@ -1223,6 +1265,7 @@ export function App() {
       [draftKey]: {
         ...current[draftKey],
         text: current[draftKey]?.text ?? "",
+        config: { ...next },
         requestId: crypto.randomUUID(),
         contextMode: selectedRawContext ? "raw" : undefined,
       },
@@ -1249,6 +1292,19 @@ export function App() {
         ...current[draftKey],
         text: current[draftKey]?.text ?? "",
         referenceNodeIds,
+        requestId: crypto.randomUUID(),
+        contextMode: selectedRawContext ? "raw" : undefined,
+      },
+    }));
+  };
+
+  const changeDraftToolRequests = (toolRequests: ToolRequest[]) => {
+    setDrafts((current) => ({
+      ...current,
+      [draftKey]: {
+        ...current[draftKey],
+        text: current[draftKey]?.text ?? "",
+        toolRequests,
         requestId: crypto.randomUUID(),
         contextMode: selectedRawContext ? "raw" : undefined,
       },
@@ -1284,6 +1340,7 @@ export function App() {
           prompt: draft,
           attachments,
           referenceNodeIds: draftReferenceIds,
+          toolRequests: draftToolRequests,
           config,
           requestId,
           ...(selectedContextCheckpointId
@@ -1332,6 +1389,7 @@ export function App() {
       selected.revision ?? 0,
       config.model,
       config.thinking,
+      config.longTask === true,
     ]);
     const requestId =
       continuationRequestIds.current.get(key) ?? crypto.randomUUID();
@@ -1434,6 +1492,8 @@ export function App() {
         referenceNodeIds: (selected.contextReferences ?? []).map(
           (reference) => reference.nodeId,
         ),
+        toolRequests: selected.toolRequests,
+        config: { ...selected.config },
         requestId: crypto.randomUUID(),
         contextMode:
           !checkpointId && preparedCheckpoints(parent).length
@@ -1521,6 +1581,43 @@ export function App() {
       setChangingAutoCompact((current) => {
         const next = { ...current };
         delete next[id];
+        return next;
+      });
+    }
+  };
+
+  const changeComputerUseTakeover = async (
+    enabled: boolean,
+    options: ComputerUseTakeoverOptions = {},
+  ) => {
+    if (
+      !workspace ||
+      !selected ||
+      !online ||
+      !canShowComputerUseTakeover(selected) ||
+      computerUseTakeoverLocks.current.has(contextScope)
+    )
+      return;
+    const scope = contextScope;
+    computerUseTakeoverLocks.current.add(scope);
+    setChangingComputerUseTakeover((current) => ({
+      ...current,
+      [scope]: true,
+    }));
+    try {
+      apply(
+        await api<AppState>(
+          `/workspaces/${workspace.id}/nodes/${selected.id}/computer-use-takeover`,
+          { enabled, expectedRevision: selected.revision ?? 0, ...options },
+        ),
+      );
+    } catch (reason) {
+      fail(reason);
+    } finally {
+      computerUseTakeoverLocks.current.delete(scope);
+      setChangingComputerUseTakeover((current) => {
+        const next = { ...current };
+        delete next[scope];
         return next;
       });
     }
@@ -1869,7 +1966,8 @@ export function App() {
           </button>
         </div>
         <div className="powered">
-          <span className="pi-mark">π</span> Powered by Pi <span>v0.1</span>
+          <span className="pi-mark">π</span> Powered by Pi
+          <span className="app-version">v{appVersion.replace(/\.0$/, "")}<DesktopUpdate /></span>
         </div>
       </aside>
 
@@ -2115,6 +2213,11 @@ export function App() {
                 select(id);
                 setTab("context");
               }}
+              onShowSubagents={(id, childId) => {
+                select(id);
+                setSelectedSubagentId(childId);
+                setTab("subagents");
+              }}
               onShowCompression={showCompression}
               selectedCompressionId={
                 selectedPreparedCheckpoint
@@ -2140,6 +2243,9 @@ export function App() {
               onDraftFilesChange={(files) => changeCanvasDraft({ files })}
               onDraftReferencesChange={(referenceNodeIds) =>
                 changeCanvasDraft({ referenceNodeIds })
+              }
+              onDraftToolRequestsChange={(toolRequests) =>
+                changeCanvasDraft({ toolRequests })
               }
               onDraftConnect={connectCanvasDraft}
               onDraftDisconnect={disconnectCanvasDraft}
@@ -2236,8 +2342,18 @@ export function App() {
                 <Layers size={13} />
                 上下文路径<span>{contextNodes.length}</span>
               </button>
+              {hasSubagents(selected) && (
+                <button
+                  className={tab === "subagents" ? "active" : ""}
+                  onClick={() => setTab("subagents")}
+                >
+                  <Network size={13} />
+                  Subagents<span>{selected.subagents?.length ?? 0}</span>
+                </button>
+              )}
             </div>
             <div
+              key={contextScope}
               className="inspector-content"
               ref={detailRef}
               tabIndex={0}
@@ -2311,6 +2427,15 @@ export function App() {
                       nodes={workspace.nodes}
                       onLocate={locate}
                     />
+                    <ToolRequestList
+                      requests={selected.toolRequests}
+                      node={selected}
+                      takeoverBusy={!!changingComputerUseTakeover[contextScope]}
+                      takeoverDisabled={!online}
+                      onComputerUseTakeoverChange={(enabled, options) =>
+                        void changeComputerUseTakeover(enabled, options)
+                      }
+                    />
                     <AttachmentList
                       attachments={selected.attachments ?? []}
                       workspaceId={workspace.id}
@@ -2324,14 +2449,9 @@ export function App() {
                       </b>
                       <span
                         className="model-context-capacity"
-                        title={
-                          selectedModel?.contextWindow &&
-                          selectedModel.contextWindow > 0
-                            ? `上下文容量：${selectedModel.contextWindow.toLocaleString("zh-CN")} tokens`
-                            : "上下文容量未知"
-                        }
+                        title={modelContextTitle(selectedModel)}
                       >
-                        {formatContextWindow(selectedModel?.contextWindow)}
+                        {modelContextLabel(selectedModel)}
                       </span>
                       {selected.config.model.startsWith("demo/") && (
                         <span className="demo-badge">演示</span>
@@ -2340,10 +2460,15 @@ export function App() {
                         <Zap size={11} />
                         {thinkingLabels[selected.config.thinking]}
                       </span>
+                      <LongTaskBadge
+                        config={selected.config}
+                        status={selected.status}
+                        toolRequests={selected.toolRequests}
+                        toolCalls={selected.toolCalls}
+                      />
                     </div>
                     {!!selected.toolCalls?.length && (
                       <ToolActivity
-                        key={selected.id}
                         calls={selected.toolCalls}
                         workingDirectory={selected.execution?.workingDirectory}
                         onDecision={decideApproval}
@@ -2353,7 +2478,6 @@ export function App() {
                       />
                     )}
                     <AssistantResponse
-                      key={`${selected.id}:${selected.revision ?? 0}`}
                       response={selected.response}
                       thinking={selected.thinking}
                       status={selected.status}
@@ -2361,7 +2485,6 @@ export function App() {
                     {selected.status === "running" ||
                     selected.status === "queued" ? (
                       <GenerationIndicator
-                        key={selected.id}
                         hasResponse={Boolean(selected.response)}
                         active={tab === "conversation"}
                         activityKey={getGenerationActivity(selected).key}
@@ -2465,6 +2588,17 @@ export function App() {
                   </>
                 )}
               </div>
+              {tab === "subagents" && (
+                <SubagentsPanel
+                  node={selected}
+                  selectedId={selectedSubagentId}
+                  onSelect={setSelectedSubagentId}
+                  onDecision={decideApproval}
+                  batchApprovalAvailable={
+                    webCapabilities?.toolBatchApproval === true
+                  }
+                />
+              )}
               {tab === "context" && (
                 <div className="context-view">
                   <ContextCompression
@@ -2523,6 +2657,13 @@ export function App() {
                           references={node.contextReferences ?? []}
                           nodes={workspace.nodes}
                           onLocate={locate}
+                        />
+                        <ToolRequestList requests={node.toolRequests} />
+                        <LongTaskBadge
+                          config={node.config}
+                          status={node.status}
+                          toolRequests={node.toolRequests}
+                          toolCalls={node.toolCalls}
                         />
                         {node.status === "root" ? (
                           <Markdown text={node.response || "没有额外背景。"} />
@@ -2629,15 +2770,17 @@ export function App() {
                           inputRef={inputRef}
                           referenceNodeIds={draftReferenceIds}
                           onReferencesChange={changeDraftReferences}
+                          toolRequests={draftToolRequests}
+                          onToolRequestsChange={changeDraftToolRequests}
                           candidates={referenceCandidates}
                           workspaceNodes={workspace.nodes}
                           aria-label="新分支问题"
                           placeholder={
                             selected.status === "root"
-                              ? "你想先探索哪个方向？输入 @ 引用卡片"
+                              ? "你想先探索哪个方向？输入 @ 选择工具或卡片"
                               : canRetry
                                 ? "补充继续执行的要求，或点击上方「在新节点继续」"
-                                : "追问一个细节，或输入 @ 引用卡片…"
+                                : "追问一个细节，或输入 @ 选择工具或卡片…"
                           }
                           value={draft}
                           disabled={submitting}
@@ -2693,6 +2836,7 @@ export function App() {
                       <ComposerModelControls
                         models={models}
                         config={config}
+                        toolRequests={draftToolRequests}
                         onConfigChange={changeConfig}
                         disabled={!online || submitting}
                       />
@@ -2868,9 +3012,10 @@ export function App() {
             );
             apply(result.state);
             select(nodeAction.node.id);
-            setConfig({ ...input.config });
+            setConfig(newBranchConfig(input.config));
             configSelection.current = {
               nodeId: nodeAction.node.id,
+              draftKey,
               revision: input.expectedRevision + 1,
               resolved: true,
             };

@@ -37,6 +37,80 @@ async function requireCardReferences() {
   }
 }
 
+async function requireToolRequests() {
+  let capabilities: unknown;
+  try {
+    const response = await fetch("/api/capabilities", { cache: "no-store" });
+    if (!response.ok) throw new Error("Capability request failed");
+    capabilities = await response.json();
+  } catch {
+    throw new Error(
+      "无法确认当前后端支持指定工具，请检查连接后重试。消息尚未发送。",
+    );
+  }
+  if (
+    !capabilities ||
+    typeof capabilities !== "object" ||
+    !("toolRequests" in capabilities) ||
+    capabilities.toolRequests !== true
+  )
+    throw new Error(
+      "当前后端尚未加载指定工具功能，请重启 Panel 服务后重试。消息尚未发送。",
+    );
+}
+
+async function requireLongTasks() {
+  let capabilities: unknown;
+  try {
+    const response = await fetch("/api/capabilities", { cache: "no-store" });
+    if (!response.ok) throw new Error("Capability request failed");
+    capabilities = await response.json();
+  } catch {
+    throw new Error(
+      "无法确认当前后端支持长程任务，请检查连接后重试。消息尚未发送。",
+    );
+  }
+  if (
+    !capabilities ||
+    typeof capabilities !== "object" ||
+    !("longTasks" in capabilities) ||
+    capabilities.longTasks !== true
+  )
+    throw new Error(
+      "当前后端尚不支持长程任务，请更新并重启 Panel 服务或桌面应用后重试。消息尚未发送。",
+    );
+}
+
+async function requireComputerUseTakeover(taskControl = false) {
+  let capabilities: unknown;
+  try {
+    const response = await fetch("/api/capabilities", { cache: "no-store" });
+    if (!response.ok) throw new Error("Capability request failed");
+    capabilities = await response.json();
+  } catch {
+    throw new Error(
+      "无法确认当前后端支持 CUA 接管，请检查连接后重试。开关尚未更改。",
+    );
+  }
+  if (
+    !capabilities ||
+    typeof capabilities !== "object" ||
+    !("computerUseTakeover" in capabilities) ||
+    capabilities.computerUseTakeover !== true
+  )
+    throw new Error(
+      "当前后端尚不支持 CUA 接管，请更新并重启 Panel 服务或桌面应用后重试。开关尚未更改。",
+    );
+  if (
+    taskControl &&
+    (!("computerUseTaskControl" in capabilities) ||
+      capabilities.computerUseTaskControl !== true)
+  )
+    throw new Error(
+      "当前后端尚不支持本任务控制，请更新并重启 Panel 服务或桌面应用后重试。授权尚未更改。",
+    );
+}
+
 async function requireBranchMerging(preparation = false) {
   let capabilities: {
     branchMerging?: boolean;
@@ -97,6 +171,41 @@ export async function api<T>(
       usesMergedCheckpoint || path.endsWith("/merge-context/compact"),
     );
   if (needsCardReferences(path, body, method)) await requireCardReferences();
+  if (
+    method === "POST" &&
+    /^\/workspaces\/[^/]+\/nodes(?:\/[^/]+\/regenerate)?$/.test(path) &&
+    body &&
+    typeof body === "object" &&
+    "toolRequests" in body &&
+    Array.isArray(body.toolRequests) &&
+    body.toolRequests.length
+  )
+    await requireToolRequests();
+  if (
+    method === "POST" &&
+    /^\/workspaces\/[^/]+\/nodes(?:\/[^/]+\/regenerate)?$/.test(path) &&
+    body &&
+    typeof body === "object" &&
+    (("config" in body &&
+      body.config &&
+      typeof body.config === "object" &&
+      "longTask" in body.config &&
+      body.config.longTask === true) ||
+      ("toolRequests" in body &&
+        Array.isArray(body.toolRequests) &&
+        body.toolRequests.includes("computer_use")))
+  )
+    await requireLongTasks();
+  if (
+    method === "POST" &&
+    /^\/workspaces\/[^/]+\/nodes\/[^/]+\/computer-use-takeover$/.test(path)
+  )
+    await requireComputerUseTakeover(
+      !!body &&
+        typeof body === "object" &&
+        "mode" in body &&
+        body.mode === "task",
+    );
   const response = await fetch(
     `/api${path}`,
     body === undefined

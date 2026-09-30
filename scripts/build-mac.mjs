@@ -8,6 +8,9 @@ if (process.platform !== "darwin")
     "Build the Mac app on macOS with Xcode Command Line Tools installed.",
   );
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+const appVersion = JSON.parse(
+  await readFile(join(root, "package.json"), "utf8"),
+).version;
 const node = resolve(process.env.PANEL_NODE_BINARY || process.execPath);
 const nodeLicense =
   process.env.PANEL_NODE_LICENSE || resolve(dirname(node), "../LICENSE");
@@ -53,12 +56,20 @@ const resources = join(contents, "Resources");
 await mkdir(join(contents, "MacOS"), { recursive: true });
 await mkdir(join(resources, "runtime/bin"), { recursive: true });
 await cp(join(root, "build/desktop/app"), join(resources, "app"), {
+  verbatimSymlinks: true,
   recursive: true,
 });
 await cp(node, join(resources, "runtime/bin/node"));
 await chmod(join(resources, "runtime/bin/node"), 0o755);
 await cp(nodeLicense, join(resources, "app/licenses/Node-LICENSE.txt"));
 await cp(join(root, "desktop/macos/Info.plist"), join(contents, "Info.plist"));
+for (const key of ["CFBundleShortVersionString", "CFBundleVersion"]) {
+  run("/usr/libexec/PlistBuddy", [
+    "-c",
+    `Set :${key} ${appVersion}`,
+    join(contents, "Info.plist"),
+  ]);
+}
 run("/usr/libexec/PlistBuddy", [
   "-c",
   `Set :LSMinimumSystemVersion ${minimumOS}`,
@@ -74,6 +85,7 @@ run("xcrun", [
   "-module-cache-path",
   join(root, "build/swift-cache"),
   "desktop/macos/Panel.swift",
+  "desktop/macos/Updater.swift",
   "-o",
   join(contents, "MacOS/Panel"),
   "-framework",
@@ -111,8 +123,7 @@ await writeFile(
   join(root, "release/build-info.json"),
   JSON.stringify(
     {
-      version: JSON.parse(await readFile(join(root, "package.json"), "utf8"))
-        .version,
+      version: appVersion,
       architecture,
       node: version,
       minimumOS,

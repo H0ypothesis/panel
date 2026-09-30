@@ -20,6 +20,7 @@ import {
   fauxProvider,
   fauxToolCall,
   type AssistantMessage,
+  type JsonObject,
   type Message,
 } from "@earendil-works/pi-ai";
 import type {
@@ -37,7 +38,7 @@ import { Store } from "./store.ts";
 import { TOOL_POLICY_VERSION } from "./tool-authorization.ts";
 
 const config: RunConfig = { model: "openai/tools-test", thinking: "off" };
-const tool = (name: string, args: Record<string, unknown>, id: string) =>
+const tool = (name: string, args: JsonObject, id: string) =>
   fauxAssistantMessage(fauxToolCall(name, args, { id }), {
     stopReason: "toolUse",
   });

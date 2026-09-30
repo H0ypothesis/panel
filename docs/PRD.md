@@ -201,7 +201,7 @@ Panel 是一个以对话图为主界面的 Agent 工作台。用户围绕一个�
 
 ### 6.4 网页搜索与网页、PDF 读取
 
-- 通过 Panel 适配层复用 [pi-web-access](https://github.com/nicobailon/pi-web-access) `0.29.0` 的 Exa 搜索和网页、PDF 文本提取，保持 `web_search` 和 `web_fetch` 工具名，无需选择本地项目；演示模型不注册工具。本次不加载插件其他工具或提供通用 Pi 扩展加载能力。
+- 通过 Panel 适配层复用 [pi-web-access](https://github.com/nicobailon/pi-web-access) `0.34.0` 的 Exa 搜索和网页、PDF 文本提取，保持 `web_search` 和 `web_fetch` 工具名，无需选择本地项目；演示模型不注册工具。本次不加载插件其他工具或提供通用 Pi 扩展加载能力。
 - `web_search` 接受查询、结果数和时间范围，返回搜索结果和来源网址；默认使用无需密钥的 Exa MCP，服务端可选配置 `EXA_API_KEY` 使用 Exa API。设置页显示当前模式和可选密钥的配置说明，不暴露或编辑密钥。无密钥不代表离线可用，搜索服务失败时必须明确报错，不伪造结果。
 - `web_fetch` 接受公开 HTTP(S) 网址，提取可阅读的 HTML、文本或 PDF 内容，无需搜索密钥。不执行网页 JavaScript，不读取登录态，不提供浏览器自动化。
 - 搜索和网页/PDF 提取沿用所调用的插件引擎默认行为，移除 Panel 对标题、单条摘要、汇总摘要、正文和工具输出的固定字符裁剪。插件自身的摘要策略、提取大小及页数限制仍生效；不接入完整插件扩展的缓存/分页工具，不保证原站全部内容。返回内容完整进入 Pi 工具消息和联网工具记录；上下文容量不足时按现有压缩或明确超限流程处理，不静默截掉工具结果。
@@ -266,7 +266,7 @@ v0.1 本次扩展包含节点编辑后重新生成与子树删除、工作目录
 | 本地服务 | Node.js + TypeScript                  | 校验、图 CRUD、任务队列、SSE、持久化            |
 | Agent    | 当前 checkout 的 Pi Agent + Pi AI     | 多模型、思考强度、流式消息、取消                |
 | 编码工具 | Pi harness 工厂 + NodeExecutionEnv    | 文件操作、命令执行、取消与输出截断              |
-| 联网工具 | pi-web-access 0.29.0 + Panel 工具适配 | Exa 搜索、网页/PDF 文本提取、来源记录与网络边界 |
+| 联网工具 | pi-web-access 0.34.0 + Panel 工具适配 | Exa 搜索、网页/PDF 文本提取、来源记录与网络边界 |
 | 存储     | 本地 JSON + 原子替换                  | 单用户首版，后续可迁移 SQLite                   |
 | 测试     | Node test runner + 浏览器验收         | 分支隔离、并行、取消、重启、幂等与交互          |
 

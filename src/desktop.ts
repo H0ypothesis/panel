@@ -1,5 +1,20 @@
 export type DesktopAction = "new-workspace" | "search";
 
+export interface DesktopUpdateState {
+  phase:
+    | "idle"
+    | "checking"
+    | "available"
+    | "downloading"
+    | "verifying"
+    | "ready"
+    | "installing"
+    | "error";
+  version?: string;
+  progress?: number;
+  message?: string;
+}
+
 export interface PanelDesktop {
   readonly platform: "macos";
   readonly fullscreen: boolean;
@@ -7,6 +22,9 @@ export interface PanelDesktop {
   openSettings: () => Promise<unknown>;
   openDataDirectory: () => Promise<unknown>;
   setAppearance: (theme: "light" | "dark" | "system") => Promise<unknown>;
+  getUpdateState?: () => Promise<DesktopUpdateState>;
+  checkForUpdates?: () => Promise<DesktopUpdateState>;
+  installUpdate?: () => Promise<DesktopUpdateState>;
 }
 
 declare global {

@@ -3,7 +3,7 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-export const PI_WEB_VERSION = "0.29.0";
+export const PI_WEB_VERSION = "0.34.0";
 export type PiWebJob =
   | {
       kind: "search";

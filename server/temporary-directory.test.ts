@@ -20,6 +20,7 @@ import {
   fauxProvider,
   fauxToolCall,
   type FauxResponseStep,
+  type JsonObject,
 } from "@earendil-works/pi-ai";
 import type { RunConfig } from "../shared/types.ts";
 import { PiRuntime, type Runtime } from "./runtime.ts";
@@ -28,7 +29,7 @@ import { createWorkspace } from "./seed.ts";
 import { Store, type StoredNode, type StoredWorkspace } from "./store.ts";
 
 const config: RunConfig = { model: "openai/temporary-test", thinking: "off" };
-const tool = (name: string, args: Record<string, unknown>, id: string) =>
+const tool = (name: string, args: JsonObject, id: string) =>
   fauxAssistantMessage(fauxToolCall(name, args, { id }), {
     stopReason: "toolUse",
   });

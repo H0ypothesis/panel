@@ -8,6 +8,8 @@ import {
 } from "../shared/types.ts";
 import { createWorkspace } from "./seed.ts";
 import { safeError, type Runtime } from "./runtime.ts";
+import { readToolImage } from "./tool-images.ts";
+import { validateToolRequests } from "./tool-requests.ts";
 import { NodeMutationConflict, Scheduler } from "./scheduler.ts";
 import { Store } from "./store.ts";
 import { listDirectories, workingDirectory } from "./directories.ts";
@@ -19,8 +21,12 @@ import {
   MAX_ATTACHMENT_REQUEST_BYTES,
   type AttachmentUpload,
 } from "../shared/attachments.ts";
-import type { SaveProviderSettings } from "../shared/provider-settings.ts";
+import type {
+  DiscoverProviderModels,
+  SaveProviderSettings,
+} from "../shared/provider-settings.ts";
 import { referenceNodeIds } from "./context-references.ts";
+import { validateLongTask } from "./run-config.ts";
 
 function approvalMode(value: unknown): ApprovalMode {
   if (value !== "ask" && value !== "auto")
@@ -83,6 +89,12 @@ function requestId(value: unknown): string {
 }
 
 function runInput(body: Record<string, unknown>, allowAttachments = false) {
+  const toolRequests = validateToolRequests(body.toolRequests);
+  if (
+    toolRequests?.length &&
+    (typeof body.prompt !== "string" || !body.prompt.trim())
+  )
+    throw new Error("请选择工具后输入具体任务。");
   if (!allowAttachments && body.attachments !== undefined)
     throw new Error("重新生成会保留原附件；如需更换附件，请创建新分支。");
   if (body.attachments !== undefined && !Array.isArray(body.attachments))
@@ -103,6 +115,7 @@ function runInput(body: Record<string, unknown>, allowAttachments = false) {
     typeof config.thinking !== "string"
   )
     throw new Error("请选择模型与思考强度。");
+  validateLongTask(config.longTask);
   return {
     prompt:
       field(body.prompt ?? "", "问题", 20000, Boolean(attachments?.length)) ||
@@ -118,6 +131,7 @@ function runInput(body: Record<string, unknown>, allowAttachments = false) {
         }
       : {}),
     referenceNodeIds: referenceNodeIds(body.referenceNodeIds),
+    toolRequests,
     config: config as RunConfig,
     requestId: requestId(body.requestId),
     contextMode: body.contextMode as "raw" | undefined,
@@ -161,13 +175,60 @@ export function createApi(
         json(response, 200, store.snapshot());
       else if (request.method === "GET" && url.pathname === "/api/models")
         json(response, 200, runtime.models());
+      else if (request.method === "GET" && url.pathname === "/api/computer-use")
+        json(
+          response,
+          200,
+          runtime.computerUseStatus?.() ?? {
+            available: false,
+            connected: false,
+            overlay: true,
+          },
+        );
       else if (
+        request.method === "POST" &&
+        url.pathname === "/api/computer-use/connect"
+      ) {
+        await readJson(request, 1024);
+        if (!runtime.connectComputerUse)
+          throw new Error("当前运行时不支持电脑控制。");
+        json(response, 200, await runtime.connectComputerUse());
+      } else if (
         request.method === "GET" &&
         url.pathname === "/api/model-providers"
       ) {
         if (!runtime.providerSettings)
           throw new Error("当前运行时不支持模型连接设置。");
         json(response, 200, runtime.providerSettings());
+      } else if (
+        request.method === "POST" &&
+        /^\/api\/model-providers\/[^/]+\/models$/.test(url.pathname)
+      ) {
+        if (!runtime.discoverProviderModels)
+          throw new Error("当前运行时不支持获取模型列表，请更新并重启服务。");
+        let body: Record<string, unknown>;
+        try {
+          body = await readJson(request, 16_384);
+        } catch {
+          throw new Error(
+            "模型列表请求格式无效，请提交不超过 16 KB 的 JSON 配置。",
+          );
+        }
+        const controller = new AbortController();
+        const cancel = () => {
+          if (!response.writableEnded) controller.abort();
+        };
+        response.on?.("close", cancel);
+        try {
+          const catalog = await runtime.discoverProviderModels(
+            decodeURIComponent(url.pathname.split("/")[3]),
+            body as unknown as DiscoverProviderModels,
+            controller.signal,
+          );
+          json(response, 200, catalog);
+        } finally {
+          response.off?.("close", cancel);
+        }
       } else if (
         request.method === "PUT" &&
         /^\/api\/model-providers\/[^/]+$/.test(url.pathname)
@@ -200,6 +261,10 @@ export function createApi(
           branchMerging: true,
           mergeContextPreparation: true,
           toolBatchApproval: true,
+          toolRequests: true,
+          longTasks: true,
+          computerUseTakeover: true,
+          computerUseTaskControl: true,
         });
       else if (request.method === "GET" && url.pathname === "/api/directories")
         json(
@@ -280,6 +345,44 @@ export function createApi(
           state: store.snapshot(),
         });
       } else {
+        const toolImage = url.pathname.match(
+          /^\/api\/workspaces\/([^/]+)\/nodes\/([^/]+)\/tool-images\/([^/]+)\/(\d+)$/,
+        );
+        if (request.method === "GET" && toolImage) {
+          const revision = url.searchParams.get("revision");
+          const workspace = store.data.workspaces.find(
+            (item) => item.id === decodeURIComponent(toolImage[1]),
+          );
+          const node = workspace?.nodes.find(
+            (item) => item.id === decodeURIComponent(toolImage[2]),
+          );
+          const numericRevision =
+            revision && /^\d+$/.test(revision) ? Number(revision) : NaN;
+          const run = Number.isSafeInteger(numericRevision)
+            ? (node?.revision ?? 0) === numericRevision
+              ? node
+              : node?.previousRuns?.find(
+                  (item) => (item.revision ?? 0) === numericRevision,
+                )
+            : undefined;
+          const result = readToolImage(
+            run?.messages,
+            decodeURIComponent(toolImage[3]),
+            Number(toolImage[4]),
+          );
+          if (!result) {
+            json(response, 404, { error: "截图不存在或已删除。" });
+            return true;
+          }
+          response.writeHead(200, {
+            "Content-Type": result.mimeType,
+            "Content-Length": result.data.length,
+            "Cache-Control": "no-store",
+            "Content-Security-Policy": "default-src 'none'; sandbox",
+          });
+          response.end(result.data);
+          return true;
+        }
         const attachmentDownload = url.pathname.match(
           /^\/api\/workspaces\/([^/]+)\/nodes\/([^/]+)\/attachments\/([^/]+)$/,
         );
@@ -382,6 +485,7 @@ export function createApi(
             typeof config.thinking !== "string"
           )
             throw new Error("请选择摘要使用的模型与思考强度。");
+          validateLongTask(config.longTask);
           const checkpoint = await scheduler.compactMergeContext(
             decodeURIComponent(mergeCompaction[1]),
             {
@@ -417,6 +521,7 @@ export function createApi(
             typeof config.thinking !== "string"
           )
             throw new Error("请选择摘要使用的模型与思考强度。");
+          validateLongTask(config.longTask);
           const checkpoint = await scheduler.compactContext(
             decodeURIComponent(compaction[1]),
             decodeURIComponent(compaction[2]),
@@ -430,6 +535,30 @@ export function createApi(
             checkpointId: checkpoint?.id,
             state: store.snapshot(),
           });
+          return true;
+        }
+        const computerUseTakeover = url.pathname.match(
+          /^\/api\/workspaces\/([^/]+)\/nodes\/([^/]+)\/computer-use-takeover$/,
+        );
+        if (request.method === "POST" && computerUseTakeover) {
+          const body = await readJson(request);
+          if (typeof body.enabled !== "boolean")
+            throw new Error("CUA 接管开关必须是布尔值。");
+          if (
+            (body.mode !== undefined &&
+              body.mode !== "observe" &&
+              body.mode !== "task") ||
+            (body.scopeId !== undefined && typeof body.scopeId !== "string")
+          )
+            throw new Error("CUA 接管模式或范围无效。");
+          await scheduler.setComputerUseTakeover(
+            decodeURIComponent(computerUseTakeover[1]),
+            decodeURIComponent(computerUseTakeover[2]),
+            body.enabled,
+            expectedRevision(body.expectedRevision),
+            { mode: body.mode, scopeId: body.scopeId },
+          );
+          json(response, 200, store.snapshot());
           return true;
         }
         const approval = url.pathname.match(
@@ -508,7 +637,7 @@ export function createApi(
                 .slice(1)
                 .map(
                   (node, i) =>
-                    `## ${i + 1}. ${node.prompt}\n\n模型：${node.config.model} · 思考强度：${node.config.thinking} · 状态：${node.status}\n\n${node.attachments?.length ? `附件：${node.attachments.map((file) => `${file.name.replace(/[\r\n]/g, " ")}（${file.size} 字节${file.truncated ? "，提取内容已截断" : ""}）`).join("、")}\n\n` : ""}${node.contextReferences?.length ? `引用卡片（保存时的内容快照）：\n\n${node.contextReferences.map((reference) => `> 卡片 ${reference.nodeId} · 版本 ${reference.revision}\n> 问题：${reference.prompt.replaceAll("\n", "\n> ")}\n> 回答：${reference.response.replaceAll("\n", "\n> ")}`).join("\n\n")}\n\n` : ""}${node.contextStale ? "> 上游已更新，此回答基于修改前的上下文，需重新生成。\n\n" : ""}${node.response || "（暂无回答）"}\n`,
+                    `## ${i + 1}. ${node.prompt}\n\n模型：${node.config.model} · 思考强度：${node.config.thinking} · 状态：${node.status}\n\n${node.toolRequests?.length ? `指定工具：${node.toolRequests.map((tool) => `@${tool}`).join("、")}\n\n` : ""}${node.attachments?.length ? `附件：${node.attachments.map((file) => `${file.name.replace(/[\r\n]/g, " ")}（${file.size} 字节${file.truncated ? "，提取内容已截断" : ""}）`).join("、")}\n\n` : ""}${node.contextReferences?.length ? `引用卡片（保存时的内容快照）：\n\n${node.contextReferences.map((reference) => `> 卡片 ${reference.nodeId} · 版本 ${reference.revision}\n> 问题：${reference.prompt.replaceAll("\n", "\n> ")}\n> 回答：${reference.response.replaceAll("\n", "\n> ")}`).join("\n\n")}\n\n` : ""}${node.contextStale ? "> 上游已更新，此回答基于修改前的上下文，需重新生成。\n\n" : ""}${node.response || "（暂无回答）"}\n`,
                 )
                 .join("\n---\n\n");
             response.writeHead(200, {

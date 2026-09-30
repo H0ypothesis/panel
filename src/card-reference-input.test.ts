@@ -6,6 +6,8 @@ import {
   cardReferenceTitle,
   filterCardReferences,
   insertCardReference,
+  filterToolRequests,
+  insertToolRequest,
 } from "./card-reference-input";
 
 const completed = (id: string, prompt: string, response = ""): TurnNode => ({
@@ -19,6 +21,64 @@ const completed = (id: string, prompt: string, response = ""): TurnNode => ({
   contextIds: [],
   config: { model: "demo/pi-demo", thinking: "off" },
   color: "sage",
+});
+
+test("tool choices remain independent from card matches and support Chinese and English queries", () => {
+  assert.deepEqual(
+    filterToolRequests("").map((item) => item.id),
+    ["web_search", "computer_use", "subagents"],
+  );
+  assert.deepEqual(
+    filterToolRequests("联网").map((item) => item.id),
+    ["web_search"],
+  );
+  assert.deepEqual(
+    filterToolRequests("WEB search").map((item) => item.id),
+    ["web_search"],
+  );
+  assert.deepEqual(
+    filterToolRequests("窗口").map((item) => item.id),
+    ["computer_use"],
+  );
+  assert.deepEqual(
+    filterToolRequests("cua").map((item) => item.id),
+    ["computer_use"],
+  );
+  assert.deepEqual(filterToolRequests("不存在"), []);
+  const namedLikeTool = completed("card-web", "联网搜索");
+  assert.deepEqual(filterCardReferences([namedLikeTool], "联网"), [
+    namedLikeTool,
+  ]);
+  assert.equal(
+    insertCardReference(
+      "@联网",
+      { start: 0, end: 3, text: "联网" },
+      namedLikeTool,
+    ).value,
+    "@「联网搜索」 ",
+  );
+});
+
+test("tool selection removes only the active query, does not create card tokens and deduplicates chips", () => {
+  const value = "请查找 @联网 并总结";
+  const query = cardReferenceQuery(value, 7)!;
+  const selected = insertToolRequest(value, query, "web_search", []);
+  assert.deepEqual(selected, {
+    value: "请查找  并总结",
+    caret: 4,
+    toolRequests: ["web_search"],
+  });
+  assert.doesNotMatch(selected.value, /@|「|」/);
+  assert.deepEqual(
+    insertToolRequest(value, query, "web_search", ["web_search"]).toolRequests,
+    ["web_search"],
+  );
+  assert.deepEqual(
+    insertToolRequest(value, query, "computer_use", ["web_search"])
+      .toolRequests,
+    ["web_search", "computer_use"],
+  );
+  assert.equal(cardReferenceQuery(selected.value, selected.caret), null);
 });
 
 test("finds a Chinese mention at the caret without consuming later draft text", () => {

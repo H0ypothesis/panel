@@ -14,17 +14,14 @@ import {
   type ApprovalMode,
   type ModelOption,
   type RunConfig,
+  type ToolRequest,
   type Workspace,
 } from "../shared/types";
 import { ApprovalModeSwitch, DirectoryField } from "./CodingControls";
-import { formatContextWindow } from "./model-context";
-
-function modelContextTitle(model: ModelOption | undefined): string {
-  const capacity = model?.contextWindow;
-  if (capacity == null || !Number.isFinite(capacity) || capacity <= 0)
-    return "上下文容量未知";
-  return `上下文容量：${capacity.toLocaleString("zh-CN", { maximumFractionDigits: 20 })} tokens`;
-}
+import { modelContextLabel, modelContextTitle } from "./model-context";
+import { ComputerUseControls } from "./ComputerUseControls";
+import { LongTaskToggle } from "./LongTaskControls";
+import { configForModel } from "./run-config";
 
 function DirectoryDialog({
   children,
@@ -264,7 +261,7 @@ const modelOptions = (items: ModelOption[]) =>
             disabled={!model.available}
             title={modelContextTitle(model)}
           >
-            {model.name} · {formatContextWindow(model.contextWindow)}
+            {model.name} · {modelContextLabel(model)}
             {model.demo ? " · 演示" : !model.available ? " · 未连接" : ""}
           </option>
         ))}
@@ -274,11 +271,13 @@ const modelOptions = (items: ModelOption[]) =>
 export function ComposerModelControls({
   models,
   config,
+  toolRequests,
   onConfigChange,
   disabled = false,
 }: {
   models: ModelOption[];
   config: RunConfig;
+  toolRequests?: ToolRequest[];
   onConfigChange: (config: RunConfig) => void;
   disabled?: boolean;
 }) {
@@ -304,14 +303,7 @@ export function ComposerModelControls({
               (model) => model.id === event.target.value,
             );
             if (!next) return;
-            onConfigChange({
-              model: next.id,
-              thinking: next.thinkingLevels.includes(config.thinking)
-                ? config.thinking
-                : next.thinkingLevels.includes("medium")
-                  ? "medium"
-                  : next.thinkingLevels[0],
-            });
+            onConfigChange(configForModel(config, next));
           }}
         >
           {!selectedModel && (
@@ -344,6 +336,12 @@ export function ComposerModelControls({
         </select>
         <ChevronDown size={11} />
       </label>
+      <LongTaskToggle
+        config={config}
+        toolRequests={toolRequests}
+        disabled={disabled}
+        onConfigChange={onConfigChange}
+      />
     </div>
   );
 }
@@ -394,7 +392,7 @@ export function WorkbenchControls({
             aria-describedby={
               safetyModelRequired ? "safety-model-required-hint" : undefined
             }
-            title={`${selectedSafetyModel?.name ?? "安全模型"} · ${modelContextTitle(selectedSafetyModel)}。独立审核每次工具调用，通过后才执行；审核产生额外模型用量。`}
+            title={`${selectedSafetyModel?.name ?? "安全模型"} · ${modelContextTitle(selectedSafetyModel)}。审核需要审批的工具操作；CUA 已授权的常规操作免逐次审核。审核产生额外模型用量。`}
             value={safetyModel}
             disabled={disabled || approvalBusy}
             onChange={(event) => onSafetyModelChange(event.target.value)}
@@ -412,6 +410,7 @@ export function WorkbenchControls({
           </select>
         </label>
       </div>
+      <ComputerUseControls disabled={disabled} />
       {safetyModelRequired && (
         <p
           className="toolbar-settings-hint"

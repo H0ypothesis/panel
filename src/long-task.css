@@ -1,0 +1,84 @@
+.model-controls {
+  flex-wrap: wrap;
+}
+.model-controls > .model-select {
+  flex-basis: calc(100% - 110px);
+}
+.long-task-setting {
+  display: flex;
+  flex-basis: 100%;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  min-height: 26px;
+  color: var(--text-muted);
+}
+.model-controls .long-task-toggle {
+  flex-shrink: 0;
+  gap: 6px;
+  border: 0;
+  padding: 2px 0;
+  background: transparent;
+  font-size: 10px;
+  cursor: pointer;
+}
+.long-task-toggle input {
+  appearance: none;
+  position: relative;
+  width: 26px;
+  height: 15px;
+  margin: 0;
+  border: 1px solid var(--line-strong);
+  border-radius: 10px;
+  background: var(--surface-disabled);
+  cursor: pointer;
+}
+.long-task-toggle input::after {
+  content: "";
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: var(--text-muted);
+}
+.long-task-toggle input:checked {
+  border-color: var(--primary-background);
+  background: var(--primary-background);
+}
+.long-task-toggle input:checked::after {
+  left: 13px;
+  background: var(--primary-foreground);
+}
+.long-task-toggle input:disabled {
+  cursor: default;
+  opacity: 0.65;
+}
+.long-task-toggle input:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 2px;
+}
+.long-task-auto,
+.long-task-hint {
+  color: var(--text-faint);
+  font-size: 9px;
+  line-height: 1.5;
+}
+.long-task-badge {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  padding: 1px 4px;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  color: var(--text-muted);
+  font-size: 8px;
+  white-space: nowrap;
+}
+.context-step .long-task-badge {
+  margin-bottom: 8px;
+}
+.answer-heading:has(.long-task-badge) {
+  flex-wrap: wrap;
+}

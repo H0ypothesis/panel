@@ -138,6 +138,7 @@ const shutdown = async () => {
   if (stopping) return;
   stopping = true;
   scheduler.shutdown();
+  await runtime.close();
   clearInterval(persistence);
   if (parentWatch) clearInterval(parentWatch);
   await waitForPiWebShutdown();
@@ -163,5 +164,8 @@ const parentWatch =
         if (process.ppid !== desktopParent) void shutdown();
       }, 1000)
     : undefined;
-process.once("SIGINT", shutdown);
-process.once("SIGTERM", shutdown);
+// SDK dependencies use signal-exit, which re-sends a signal when no other
+// handlers remain. Keep ours registered until async cleanup completes; a once
+// listener disappears before its first await and can cause premature exit.
+process.on("SIGINT", shutdown);
+process.on("SIGTERM", shutdown);

@@ -1,6 +1,10 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { fauxAssistantMessage, type Message } from "@earendil-works/pi-ai";
+import {
+  fauxAssistantMessage,
+  type JsonObject,
+  type Message,
+} from "@earendil-works/pi-ai";
 import { buildContext, contextCheckpoints } from "./context.ts";
 import { checkpointMatches, contextSourceHash } from "./compaction.ts";
 import type { ContextCheckpoint } from "../shared/types.ts";
@@ -83,6 +87,37 @@ test("imports batch approval as historical metadata without restoring execution 
   assert.equal("approvedTools" in imported.nodes[1], false);
 });
 
+test("imports CUA takeover audit without restoring the live per-run grant", () => {
+  const source = fixture();
+  Object.assign(source.workspace.nodes[1], { computerUseTakeover: true });
+  source.workspace.nodes[1].toolCalls = [
+    {
+      id: "takeover-observation",
+      name: "computer_use_call",
+      arguments: {
+        tool: "get_window_state",
+        target: { kind: "window", pid: 1, windowId: 2 },
+      },
+      status: "completed",
+      approval: "cua_takeover",
+      startedAt: 10,
+      finishedAt: 12,
+      authorization: {
+        id: "old-takeover-grant",
+        actionHash: "old-hash",
+        policyVersion: "old-policy",
+        issuedAt: 10,
+        expiresAt: 20,
+        consumedAt: 11,
+      },
+    },
+  ];
+  const imported = importWorkspace(source);
+  assert.equal(imported.nodes[1].toolCalls![0].approval, "cua_takeover");
+  assert.equal(imported.nodes[1].toolCalls![0].authorization, undefined);
+  assert.equal("computerUseTakeover" in imported.nodes[1], false);
+});
+
 test("imports content, layout and complete messages with independent workspace/node IDs", () => {
   const original = fixture();
   const before = structuredClone(original);
@@ -123,6 +158,25 @@ test("imports content, layout and complete messages with independent workspace/n
   assert.match(JSON.stringify(context.messages), /完整回答乙/);
   assert.equal(child.config.model, "unconfigured/research-model");
   assert.equal(child.config.thinking, "max");
+});
+
+test("Pi requested thinking level survives export/import and invalid levels are rejected", () => {
+  const source = fixture();
+  const message = source.workspace.nodes[1].messages![1];
+  assert.equal(message.role, "assistant");
+  if (message.role !== "assistant") return;
+  message.thinkingLevel = "high";
+  const imported = importWorkspace(source);
+  assert.deepEqual(
+    imported.nodes[1].messages,
+    source.workspace.nodes[1].messages,
+  );
+  assert.deepEqual(
+    importWorkspace({ version: 1, workspace: imported }).nodes[1].messages,
+    imported.nodes[1].messages,
+  );
+  Object.assign(message, { thinkingLevel: "unsupported-level" });
+  assert.throws(() => importWorkspace(source), /导入失败/);
 });
 
 test("repeated imports and re-export/import cycles remain independent", () => {
@@ -470,7 +524,7 @@ test("rejects malformed tool histories and excessively nested opaque message dat
   source.workspace.nodes[1].toolCalls = [{ ...call, arguments: [] as never }];
   assert.throws(() => importWorkspace(source), /参数/);
   source.workspace.nodes[1].toolCalls = [call];
-  const cycle: Record<string, unknown> = {};
+  const cycle: JsonObject = {};
   cycle.self = cycle;
   source.workspace.nodes[1].messages = [
     {
