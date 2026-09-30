@@ -123,24 +123,25 @@ release/build-info.json
 发布新版本并确认安装包已公开、可下载后，同步备用更新信息（标签替换为本次版本）：
 
 ```bash
-gh api repos/H0ypothesis/panel/releases/tags/v0.5.1 > build/published-release.json
+gh api repos/H0ypothesis/panel/releases/tags/v0.8 > build/published-release.json
 node scripts/update-release-feed.mjs build/published-release.json
 git add updates/macos.json
 git commit -m "chore: refresh public macOS update feed"
 git push origin main
 ```
 
-脚本只接受已发布的数字版本和带 GitHub SHA-256 摘要的本仓库安装包，保留最近 20 个版本；备用源的架构、版本、大小、下载地址与摘要验证和 API 来源相同。不要在安装包公开前更新此文件。v0.5 若因 API 限流无法自动升级，需要从 Release 手动下载一次 v0.5.1。
+脚本只接受已发布的数字版本和带 GitHub SHA-256 摘要的本仓库安装包，保留最近 20 个版本；备用源的架构、版本、大小、下载地址与摘要验证和 API 来源相同。不要在安装包公开前更新此文件。v0.5 若因 API 限流无法自动升级，需要从 Release 手动下载一次当前版本 v0.8。
 
 ## 验证记录与发布状态
 
-本轮实际验证使用 Apple Silicon `arm64`、独立 Node.js `24.19.0`，最低系统版本按 Node 二进制要求设为 macOS 13.5。已通过：
+v0.8 实际验证使用 Apple Silicon `arm64`、独立 Node.js `24.19.0`，最低系统版本按 Node 二进制要求设为 macOS 13.5。已通过：
 
 - `npm run check`：前后端 TypeScript 检查。
-- `npm run test:core`：161 项核心测试，包含实际 Git 快照与历史记录。
+- `node --import tsx --test --test-concurrency=4 server/*.test.ts`：769 项核心测试，包含运行中输入、原生子代理、工具审批、Git 快照与历史记录。
+- `npm run test:ui`、`npm run test:setup` 和 `npm run test:updater`：分别通过 128、12 和 16 项测试；与核心测试合计 925 项。
 - `npm run test:desktop`：独立运行时和前端资源、模型目录、Pi Demo 流式执行、幂等提交、SSE、导出接口、来源校验、持久化、端口复用与冲突回退、正常关闭、父进程退出清理，以及打包后的搜索、网页提取和 PDF 运行依赖加载。
-- 最新同步包的前端资源与 Web 版 `dist` 逐字节一致，后端与本次源码构建产物一致。另用本机模拟模型验证了打包后端的人工审批写入、真实 Git 提交与历史持久化，未调用远程模型。
-- 原生界面实测：应用启动、`⌘N` 新建探索、`⌘K` 搜索、系统目录选择器路径回传、取消目录草稿修改、原生保存面板导出有效 JSON 文件，以及 `⌘Q` 后窗口与后台服务正常退出。
+- 使用打包后的 Node 和应用资源运行 `scripts/test-native-host.mjs`：原生子代理后台执行与嵌套执行通过。
+- ZIP 完整性、所需运行时文件和深层代码签名验证通过；应用版本为 `0.8.0`，构建后源码未发生变化。
 
 `test:desktop` 默认直接使用已构建 `Panel.app` 内的运行时，在隔离临时目录中测试，不继承实际模型密钥或使用现有探索数据；它不替代原生界面的交互验收。
 
