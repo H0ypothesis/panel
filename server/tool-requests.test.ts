@@ -17,7 +17,7 @@ test("tool selection validates exact capabilities and preserves omitted versus c
     [1],
     [""],
     ["bash"],
-    ["web_fetch"],
+    ["fetch_content"],
     ["computer_use_call"],
     [" web_search "],
     ["WEB_SEARCH"],

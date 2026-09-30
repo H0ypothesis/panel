@@ -137,6 +137,9 @@ export class Store extends EventEmitter {
           }
         }
         for (const node of workspace.nodes) {
+          for (const run of [node, ...(node.previousRuns ?? [])])
+            for (const input of run.runInputs ?? [])
+              if (input.status === "queued") input.status = "cancelled";
           // Takeover is a process-local user grant, never restored from disk.
           delete node.computerUseTakeover;
           delete node.computerUseScope;
@@ -172,6 +175,26 @@ export class Store extends EventEmitter {
               child.finishedAt = Date.now();
               if (child.thinking) child.thinking.active = false;
             }
+          }
+          // Native UI callbacks are process-local; never revive their buttons
+          // after a restart or leave them looking like answerable questions.
+          const answeredQuestions = new Set(
+            (node.subagentNotices ?? [])
+              .filter((notice) => notice.kind === "ui-response")
+              .map((notice) => (notice.value as { id?: string })?.id),
+          );
+          for (const notice of [...(node.subagentNotices ?? [])]) {
+            const id = (notice.value as { id?: string })?.id;
+            if (
+              notice.kind === "ui-request" &&
+              id &&
+              !answeredQuestions.has(id)
+            )
+              node.subagentNotices!.push({
+                kind: "ui-response",
+                value: { id, cancelled: true, reason: "服务已重启" },
+                createdAt: Date.now(),
+              });
           }
           for (const call of node.toolCalls ?? []) {
             call.waitingFor = undefined;

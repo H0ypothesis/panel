@@ -99,10 +99,23 @@ export async function resolveFileOperationResource(
   toolName: string,
   args: Record<string, unknown>,
 ): Promise<FileOperationResource | undefined> {
-  if (!["read", "write", "edit", "bash"].includes(toolName)) return undefined;
+  if (
+    !["read", "write", "edit", "bash", "grep", "find", "ls"].includes(toolName)
+  )
+    return undefined;
   const workingDirectory = await realpath(cwd);
   if (!(await stat(workingDirectory)).isDirectory()) {
     throw new Error("工作目录必须是文件夹。");
+  }
+  if (["grep", "find", "ls"].includes(toolName)) {
+    await boundedCanonicalPath(
+      workingDirectory,
+      resolve(
+        workingDirectory,
+        typeof args.path === "string" ? args.path : ".",
+      ),
+    );
+    return { global: true, mode: "read", workingDirectory };
   }
   if (toolName === "bash") {
     return { global: true, mode: "write", workingDirectory };

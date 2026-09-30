@@ -18,6 +18,7 @@ import type {
   ToolCall,
   TurnNode,
   SubagentRun,
+  RunInput,
 } from "../shared/types.ts";
 import { buildContext } from "./context.ts";
 import {
@@ -96,6 +97,34 @@ function number(value: unknown, label: string, signed = false): number {
   )
     invalid(label);
   return value;
+}
+
+function runInputs(value: unknown, label: string): RunInput[] {
+  const ids = new Set<string>();
+  return array(value, label).map((item, index) => {
+    const input = object(item, `${label} ${index + 1}`);
+    const id = string(input.id, `${label} ID`, true);
+    const text = string(input.text, `${label}文字`, true);
+    if (
+      ids.has(id) ||
+      id.length > 80 ||
+      text.length > 20000 ||
+      (input.mode !== "steer" && input.mode !== "followUp") ||
+      !["queued", "delivered", "cancelled"].includes(String(input.status))
+    )
+      invalid(label);
+    ids.add(id);
+    return {
+      id,
+      text,
+      mode: input.mode,
+      status: input.status === "delivered" ? "delivered" : "cancelled",
+      createdAt: number(input.createdAt, `${label}创建时间`),
+      ...(input.deliveredAt === undefined
+        ? {}
+        : { deliveredAt: number(input.deliveredAt, `${label}接收时间`) }),
+    };
+  });
 }
 
 function integer(value: unknown, label: string): number {
@@ -431,13 +460,48 @@ function messages(value: unknown, label: string): Message[] {
   });
 }
 
+function subagentProfile(
+  value: unknown,
+  label: string,
+): NonNullable<SubagentRun["profile"]> {
+  const source = object(value, label);
+  const list = (value: unknown) =>
+    array(value, label).map((item) => string(item, label));
+  return {
+    name: string(source.name, label, true),
+    description: string(source.description, label),
+    source: string(source.source, label, true),
+    filePath: string(source.filePath, label),
+    model: optional(source.model, label, string),
+    thinking:
+      source.thinking === false
+        ? false
+        : optional(source.thinking, label, string),
+    tools: source.tools === undefined ? undefined : list(source.tools),
+    excludeTools:
+      source.excludeTools === undefined ? undefined : list(source.excludeTools),
+    skills: source.skills === undefined ? undefined : list(source.skills),
+    extensions:
+      source.extensions === undefined ? undefined : list(source.extensions),
+    systemPromptMode: enumeration(
+      source.systemPromptMode,
+      ["append", "replace"],
+      label,
+    ),
+    inheritProjectContext: boolean(source.inheritProjectContext, label),
+    inheritGlobalContext: boolean(source.inheritGlobalContext, label),
+    inheritSkills: boolean(source.inheritSkills, label),
+    diagnostics: list(source.diagnostics),
+  };
+}
+
 function subagentRuns(
   value: unknown,
   label: string,
   now: number,
 ): SubagentRun[] {
   const records = array(value, label);
-  if (records.length > 24) invalid(`${label}数量`);
+  if (records.length > 10000) invalid(`${label}数量`);
   const ids = new Set<string>();
   return records.map((item) => {
     const source = object(item, label);
@@ -452,11 +516,17 @@ function subagentRuns(
     const interrupted = status === "queued" || status === "running";
     return {
       id,
-      agent: enumeration(
-        source.agent,
-        ["scout", "worker", "reviewer"] as const,
-        label,
-      ),
+      agent: string(source.agent, `${label}角色`, true),
+      ...(source.profile === undefined
+        ? {}
+        : { profile: subagentProfile(source.profile, label) }),
+      ...(source.tools === undefined
+        ? {}
+        : {
+            tools: array(source.tools, label).map((item) =>
+              string(item, label),
+            ),
+          }),
       task: string(source.task, `${label}任务`, true),
       model: string(source.model, `${label}模型`, true),
       status: interrupted ? "cancelled" : status,
@@ -783,6 +853,9 @@ export function importWorkspace(value: unknown): StoredWorkspace {
           }),
       prompt,
       response,
+      ...(original.runInputs === undefined
+        ? {}
+        : { runInputs: runInputs(original.runInputs, `${label}追加消息`) }),
       ...(toolRequests === undefined ? {} : { toolRequests }),
       ...(original.subagentsEnabled === undefined
         ? {}

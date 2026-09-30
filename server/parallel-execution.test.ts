@@ -543,7 +543,7 @@ test("shell excludes filesystem effects but does not block web tools or other ru
     },
   );
   await until(() => Boolean(b.toolCalls?.[0].waitingFor));
-  await e.invoke(c, "web_fetch", { url: "https://example.com" }, async () => {
+  await e.invoke(c, "fetch_content", { url: "https://example.com" }, async () => {
     webEntered = true;
   });
   assert.equal(webEntered, true);
@@ -711,7 +711,7 @@ test("batch approval releases only matching pending tools and future calls on th
   const second = e.invoke(a, "web_search", { query: "two" }, effect("second"));
   const fetch = e.invoke(
     a,
-    "web_fetch",
+    "fetch_content",
     { url: "https://example.com" },
     effect("fetch"),
   );

@@ -9,11 +9,12 @@ const json = (value: unknown, status = 200) =>
     headers: { "Content-Type": "application/json" },
   });
 
-test("manual and CUA long tasks cannot be submitted to a backend that would ignore the limit override", async (t) => {
+test("manual, CUA and subagent long tasks require a backend supporting long execution", async (t) => {
   for (const path of paths) {
     for (const body of [
       { config: { model: "test", thinking: "off", longTask: true } },
       { toolRequests: ["computer_use"], config: { longTask: false } },
+      { toolRequests: ["subagents"], config: { longTask: false } },
     ]) {
       const calls: string[] = [];
       const fetch = t.mock.method(globalThis, "fetch", async (url: string) => {

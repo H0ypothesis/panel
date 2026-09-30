@@ -60,7 +60,7 @@ function fixture(contextWindow = 8000, tokenSize = { min: 2000, max: 3000 }) {
   const registry = createModels();
   registry.setProvider(faux.provider);
   const runtime = new PiRuntime(registry, {
-    async runPlugin() {
+    async runNativePlugin() {
       return {
         text: `BIG TOOL RESULT ${"source details ".repeat(2000)}`,
         sources: [],
@@ -117,7 +117,7 @@ test("runtime compacts only model input, preserves raw transcripts, and separate
       return fauxAssistantMessage(summary);
     },
     (context, options) => {
-      assert.equal(options?.maxTokens, 2000);
+      assert.equal(options?.maxTokens, 8000);
       assert.match(text(context), /SUMMARY:/);
       assert.match(text(context), /ROOT PROJECT GOAL/);
       assert.match(text(context), /CURRENT EXACT REQUEST/);
@@ -247,7 +247,7 @@ test("each tool follow-up resets generated tokens instead of adding prior respon
       [
         { type: "text", text: "I will fetch the source first. ".repeat(20) },
         fauxToolCall(
-          "web_fetch",
+          "fetch_content",
           { url: "https://example.com" },
           { id: "usage-web" },
         ),
@@ -288,7 +288,8 @@ test("each tool follow-up resets generated tokens instead of adding prior respon
 });
 
 test("runtime rechecks after a complete tool batch while retaining all original tool messages", async () => {
-  const { faux, runtime } = fixture(6000);
+  // Include the real tool schemas and subagent delivery instructions.
+  const { faux, runtime } = fixture(8000);
   const observed = callbacks([
     { nodeId: "root", revision: 0, messageCount: 1 },
   ]);
@@ -308,7 +309,7 @@ test("runtime rechecks after a complete tool batch while retaining all original 
       assert.doesNotMatch(text(context), /SUMMARY:/);
       return fauxAssistantMessage(
         fauxToolCall(
-          "web_fetch",
+          "fetch_content",
           { url: "https://example.com" },
           { id: "web-1" },
         ),
@@ -318,7 +319,7 @@ test("runtime rechecks after a complete tool batch while retaining all original 
     (context) => {
       assert.match(text(context), /BIG TOOL RESULT/);
       beforeSummaryUsageCount = observed.requestUsages.length;
-      assert.match(text(context), /web_fetch/);
+      assert.match(text(context), /fetch_content/);
       const saved = observed.snapshots.at(-1) ?? [];
       assert.deepEqual(
         saved.map((message) => message.role),
@@ -540,7 +541,7 @@ test("provider failure after tools still flushes the complete original tool tran
   faux.setResponses([
     fauxAssistantMessage(
       fauxToolCall(
-        "web_fetch",
+        "fetch_content",
         { url: "https://example.com" },
         { id: "failed-web" },
       ),

@@ -128,6 +128,32 @@ test("automatic compaction preserves root, current question and the original tra
   );
 });
 
+test("content projections keep checkpoints bound to the original transcript", async () => {
+  const raw = history();
+  const original = structuredClone(raw);
+  const run = setup(raw, {
+    projectMessages: async (messages) =>
+      messages.map((message) =>
+        message.role === "assistant"
+          ? {
+              ...message,
+              content: [
+                {
+                  type: "text",
+                  text: "Projected handoff summary with file reference",
+                },
+              ],
+            }
+          : message,
+      ),
+  });
+  await run.compactor.prepare(raw, signal(), true);
+  const checkpoint = run.checkpoints.at(-1)!;
+  assert.ok(checkpointMatches(checkpoint, raw, run.options.sources));
+  await run.compactor.prepare(raw, signal());
+  assert.deepEqual(raw, original);
+});
+
 test("a sibling below its threshold uses all raw messages despite a matching cached prefix", async () => {
   const messages = history();
   const first = setup(messages);

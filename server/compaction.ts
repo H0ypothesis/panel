@@ -17,13 +17,18 @@ export interface ContextCompactorOptions {
   model: string;
   thinking: ThinkingLevel;
   contextWindow: number;
-  /** The actual output cap used for the following assistant request. */
+  /** Headroom reserved for generation; independent of the request's maximum output. */
   maxOutputTokens: number;
   systemPrompt: string;
   tools: unknown[];
   sources: ContextSource[];
   currentPromptIndex?: number;
   autoCompact: boolean;
+  /** Content-only model projection; checkpoints still bind the original transcript. */
+  projectMessages?: (
+    messages: Message[],
+    signal: AbortSignal,
+  ) => Promise<Message[]>;
   checkpoints?: ContextCheckpoint[];
   requestedCheckpointId?: string;
   /** Explicit summaries for individual inputs of a merged branch. */
@@ -427,6 +432,8 @@ export class ContextCompactor {
   ): Promise<Message[]> {
     const raw = structuredClone(messages);
     const { options, budget } = this;
+    const project = (messages: Message[]) =>
+      options.projectMessages?.(messages, signal) ?? Promise.resolve(messages);
     const thresholdTokens = options.mergeContext
       ? budget.maxInputTokens
       : budget.thresholdTokens;
@@ -502,6 +509,7 @@ export class ContextCompactor {
         projection = projected.messages;
         branchCoverage = projected.coveredMessageCount;
       }
+      projection = await project(projection);
       const needsCompaction = calibratedTokens() > thresholdTokens;
       const shouldActivate =
         Boolean(options.requestedCheckpointId) ||
@@ -523,10 +531,8 @@ export class ContextCompactor {
             "指定的上下文摘要已过期或不属于当前路径，请重新压缩。",
           );
         if (selected) {
-          const candidate = projectContext(
-            raw,
-            selected,
-            options.currentPromptIndex,
+          const candidate = await project(
+            projectContext(raw, selected, options.currentPromptIndex),
           );
           if (estimate(candidate) < originalTokens) {
             signal.throwIfAborted();
@@ -644,7 +650,9 @@ export class ContextCompactor {
         };
         if (
           estimate(
-            projectContext(raw, provisional, options.currentPromptIndex),
+            await project(
+              projectContext(raw, provisional, options.currentPromptIndex),
+            ),
           ) +
             summaryAllowance <=
           thresholdTokens
@@ -668,7 +676,7 @@ export class ContextCompactor {
             ).messages.slice(1)
           : raw.slice(minimum, cut);
       const summarized = await options.summarize(
-        structuredClone(summaryMessages),
+        await project(structuredClone(summaryMessages)),
         previous?.summary,
         signal,
       );
@@ -693,10 +701,8 @@ export class ContextCompactor {
           : {}),
         ...(summarized.usage ? { usage: summarized.usage } : {}),
       };
-      const compacted = projectContext(
-        raw,
-        checkpoint,
-        options.currentPromptIndex,
+      const compacted = await project(
+        projectContext(raw, checkpoint, options.currentPromptIndex),
       );
       const compactedTokens = estimate(compacted);
       if (compactedTokens >= inputTokens)

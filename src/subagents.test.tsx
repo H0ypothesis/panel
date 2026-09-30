@@ -72,3 +72,69 @@ test("enabled empty state never claims a child has run", () => {
   );
   assert.match(panel, /等待主模型分配/);
 });
+
+test("custom native roles render their name and avatar without a hardcoded role enum", () => {
+  const custom = { ...runs[0], agent: "security-reviewer" };
+  assert.match(
+    renderToStaticMarkup(
+      <SubagentAvatars runs={[custom]} onSelect={() => {}} />,
+    ),
+    /security-reviewer/,
+  );
+  assert.match(
+    renderToStaticMarkup(
+      <SubagentsPanel
+        node={{ ...node, subagents: [custom] }}
+        onSelect={() => {}}
+        onDecision={async () => {}}
+        batchApprovalAvailable={false}
+      />,
+    ),
+    /security-reviewer/,
+  );
+});
+
+test("workflow orchestration is separate from agent counts and never exposes raw diagnostic data", () => {
+  const workflow: SubagentRun = {
+    ...runs[0],
+    id: "native:workflow-root",
+    agent: "workflow",
+    task: "[prompt redacted]",
+    response: '{"internalResult":"private-diagnostic"}',
+  };
+  const grouped = [workflow, ...runs.slice(0, 2)];
+  const card = renderToStaticMarkup(
+    <SubagentAvatars runs={grouped} onSelect={() => {}} />,
+  );
+  assert.match(card, /2 个子代理，1 个完成/);
+  assert.doesNotMatch(card, /workflow|prompt redacted/);
+  assert.equal((card.match(/<button/g) ?? []).length, 2);
+  const props = {
+    node: {
+      ...node,
+      subagents: grouped,
+      subagentNotices: [
+        {
+          kind: "background-debug",
+          value: { raw: "internal-notice" },
+          createdAt: 1,
+        },
+      ],
+    },
+    onSelect() {},
+    onDecision: async () => {},
+    batchApprovalAvailable: false,
+  };
+  const panel = renderToStaticMarkup(<SubagentsPanel {...props} />);
+  assert.match(panel, /任务编排/);
+  assert.match(panel, /result 0/);
+  assert.doesNotMatch(
+    panel,
+    /workflow 1|原生任务与管理|后台通知|internal-notice|private-diagnostic/,
+  );
+  const orchestration = renderToStaticMarkup(
+    <SubagentsPanel {...props} selectedId={workflow.id} />,
+  );
+  assert.doesNotMatch(orchestration, /private-diagnostic|prompt redacted/);
+  assert.match(orchestration, /编排已结束/);
+});

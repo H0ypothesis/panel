@@ -317,7 +317,7 @@ test("shell and hard-linked files require global locks and whole-workspace snaps
 });
 
 test("web tools do not require a directory or file lock", async () => {
-  for (const tool of ["web_search", "web_fetch"]) {
+  for (const tool of ["web_search", "fetch_content"]) {
     assert.equal(
       await resolveFileOperationResource("/does/not/exist", tool, {}),
       undefined,

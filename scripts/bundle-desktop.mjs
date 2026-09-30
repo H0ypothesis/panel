@@ -1,10 +1,12 @@
 import { build } from "esbuild";
+import ts from "typescript";
 import { existsSync } from "node:fs";
 import { cp, mkdir, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { dirname, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { release as cuaRelease, runtimeTarget } from "./setup-cua.mjs";
+import excludedSubagents from "../server/subagent-exclusions.json" with { type: "json" };
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const output = join(root, "build/desktop/app");
@@ -12,7 +14,13 @@ await rm(output, { recursive: true, force: true });
 await mkdir(join(output, "server"), { recursive: true });
 await build({
   absWorkingDir: root,
-  entryPoints: ["server/index.ts", "server/pi-web-worker.ts"],
+  entryPoints: [
+    "server/index.ts",
+    "server/native-web-worker.ts",
+    "server/subagent-host-worker.ts",
+    "server/subagent-host-factory.ts",
+    "server/subagent-host.ts",
+  ],
   outdir: join(output, "server"),
   outExtension: { ".js": ".mjs" },
   bundle: true,
@@ -25,6 +33,27 @@ await build({
     {
       name: "panel-pi-source",
       setup(builder) {
+        // Native discovery, theme assets and extension resolution depend on the
+        // original package location, even when their code is inlined.
+        builder.onLoad(
+          {
+            filter:
+              /node_modules\/(pi-subagents|@earendil-works\/(pi-coding-agent|pi-tui))\/.*\.js$/,
+          },
+          async ({ path }) => {
+            const source = await readFile(path, "utf8");
+            const modulePath = relative(join(root, "node_modules"), path)
+              .split(sep)
+              .join("/");
+            return {
+              contents: source.replaceAll(
+                "import.meta.url",
+                `new URL(${JSON.stringify("../node_modules/" + modulePath)}, import.meta.url).href`,
+              ),
+              loader: "js",
+            };
+          },
+        );
         // Pi declares side effects for published .js paths; the desktop build
         // resolves the equivalent source .ts file and must retain registration.
         builder.onResolve(
@@ -66,7 +95,8 @@ await build({
   banner: {
     js: 'import { createRequire as __panelCreateRequire } from "node:module"; const require = __panelCreateRequire(import.meta.url);',
   },
-  external: ["vite"],
+  // Jiti lazily requires its sibling Babel transform; preserve that layout.
+  external: ["vite", "jiti"],
   logLevel: "info",
 });
 
@@ -119,6 +149,48 @@ async function copyPackage(name, from, optional = false) {
 }
 await copyPackage("pi-web-access", root);
 await copyPackage("tsx", root);
+await copyPackage("pi-subagents", root);
+for (const name of excludedSubagents) {
+  await rm(join(output, "node_modules/pi-subagents/agents", `${name}.md`), {
+    force: true,
+  });
+}
+await copyPackage("@earendil-works/pi-coding-agent", root);
+await copyPackage("@earendil-works/pi-tui", root);
+// The workspace links Pi source packages. Ship compiled equivalents as well,
+// because user extensions resolve these packages outside the server bundle.
+for (const name of ["pi-agent-core", "pi-ai", "pi-telemetry", "chord"]) {
+  await copyPackage(`@earendil-works/${name}`, root);
+  const packageDir = join(output, "node_modules/@earendil-works", name);
+  const { readdir } = await import("node:fs/promises");
+  async function compileSource(directory) {
+    for (const entry of await readdir(directory, { withFileTypes: true })) {
+      const path = join(directory, entry.name);
+      if (entry.isDirectory()) await compileSource(path);
+      else if (
+        entry.name.endsWith(".ts") &&
+        !/\.(test|d)\.ts$/.test(entry.name)
+      ) {
+        const destination = join(
+          packageDir,
+          "dist",
+          relative(join(packageDir, "src"), path),
+        ).replace(/\.ts$/, ".js");
+        const result = ts.transpileModule(await readFile(path, "utf8"), {
+          fileName: path,
+          compilerOptions: {
+            target: ts.ScriptTarget.ES2023,
+            module: ts.ModuleKind.ESNext,
+            rewriteRelativeImportExtensions: true,
+          },
+        });
+        await mkdir(dirname(destination), { recursive: true });
+        await writeFile(destination, result.outputText);
+      }
+    }
+  }
+  await compileSource(join(packageDir, "src"));
+}
 await build({
   absWorkingDir: root,
   entryPoints: ["desktop/macos/updater.mjs"],

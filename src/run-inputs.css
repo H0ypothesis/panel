@@ -1,0 +1,73 @@
+.run-input-composer textarea {
+  display: block;
+  width: 100%;
+  min-height: 66px;
+  max-height: 180px;
+  padding: 12px 13px 4px;
+  resize: vertical;
+  border: 0;
+  outline: none;
+  background: transparent;
+  color: var(--text-body);
+  font: inherit;
+  font-size: 13px;
+  line-height: 1.6;
+}
+.run-input-composer textarea:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: -2px;
+  border-radius: 8px;
+}
+.run-input-composer select {
+  min-width: 0;
+  max-width: 75%;
+  padding: 4px 6px;
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  background: var(--surface);
+  color: var(--text-secondary);
+  font: inherit;
+  font-size: 12px;
+}
+.run-input-hint {
+  margin: 7px 0 0;
+  color: var(--text-muted);
+  font-size: 11px;
+  line-height: 1.6;
+}
+.run-input-history {
+  margin: 0 0 14px;
+  font-size: 12px;
+}
+.run-input-history > b {
+  color: var(--text-secondary);
+  font-weight: 500;
+}
+.run-input-history ol {
+  list-style: none;
+  margin: 6px 0 0;
+  padding: 0;
+}
+.run-input-history li {
+  margin-top: 6px;
+  padding: 9px 11px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: var(--surface);
+}
+.run-input-history li > div {
+  display: flex;
+  gap: 8px;
+  justify-content: space-between;
+  color: var(--text-muted);
+  font-size: 11px;
+}
+.run-input-history p {
+  margin: 5px 0 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  line-height: 1.6;
+}
+.run-input-status.is-delivered {
+  color: var(--text-accent-strong);
+}

@@ -21,7 +21,19 @@ export interface GenerationActivity {
  * these IDs avoids a second transition when usage's preparation timestamp is
  * replaced with the provider's message timestamp for the same answer.
  */
-export function getGenerationActivity(node: TurnNode): GenerationActivity {
+export function getGenerationActivity(
+  node: Pick<
+    TurnNode,
+    | "id"
+    | "revision"
+    | "requestId"
+    | "startedAt"
+    | "createdAt"
+    | "status"
+    | "toolCalls"
+    | "lastRequestUsage"
+  >,
+): GenerationActivity {
   const run = [
     node.id,
     node.revision ?? 0,

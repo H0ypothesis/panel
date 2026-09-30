@@ -38,7 +38,7 @@ export function paperbypassProvider() {
         input: id === "z-ai/glm-5.3-flash" ? ["text", "image"] : ["text"],
         // Atria's documented context window; other gateway models use a conservative budget.
         contextWindow: id === "Atria-Dawn-Preview" ? 256000 : 128000,
-        maxTokens: 8192,
+        maxTokens: id === "Atria-Dawn-Preview" ? 256000 : 128000,
         cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
       }),
     ),

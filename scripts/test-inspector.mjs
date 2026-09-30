@@ -152,6 +152,15 @@ async function mount(t) {
     unobserve() {}
     disconnect() {}
   };
+  // Navigation uses a viewport animation; jsdom's zero-sized viewport would
+  // produce invalid coordinates before the inspector can receive approval focus.
+  Object.defineProperties(window.HTMLElement.prototype, {
+    clientWidth: { get: () => 1024 },
+    clientHeight: { get: () => 768 },
+  });
+  window.CSS = {
+    escape: (value) => value.replace(/[^a-zA-Z0-9_-]/g, (c) => `\\${c}`),
+  };
   window.HTMLElement.prototype.scrollTo = function () {};
   window.HTMLElement.prototype.scrollIntoView = function () {};
   window.localStorage.setItem("panel:workspace", "cua");
@@ -169,10 +178,64 @@ async function mount(t) {
   const requests = [];
   window.fetch = async (url, options = {}) => {
     requests.push({ url, ...options });
+    const inputPath = url.match(
+      /^\/api\/workspaces\/([^/]+)\/nodes\/([^/]+)\/inputs$/,
+    );
+    if (options.method === "POST" && inputPath) {
+      const workspace = state.workspaces.find(
+        (item) => item.id === inputPath[1],
+      );
+      const node = workspace?.nodes.find((item) => item.id === inputPath[2]);
+      const body = JSON.parse(options.body);
+      assert.ok(node, "Input must target its owning card");
+      if (node.status !== "running" || body.expectedRevision !== node.revision)
+        return {
+          ok: false,
+          status: 409,
+          json: async () => ({ error: "当前任务已结束，消息未发送" }),
+        };
+      const input = {
+        id: body.requestId,
+        text: body.text,
+        mode: body.mode,
+        status: "queued",
+        createdAt: 2,
+      };
+      (node.runInputs ??= []).push(input);
+      state.revision++;
+      return {
+        ok: true,
+        json: async () => ({ input, state: JSON.parse(JSON.stringify(state)) }),
+      };
+    }
+    const approval = url.match(
+      /^\/api\/workspaces\/([^/]+)\/nodes\/([^/]+)\/approvals\/([^/]+)$/,
+    );
+    if (options.method === "POST" && approval) {
+      const owner = state.workspaces.find((item) => item.id === approval[1]);
+      const node = owner?.nodes.find((item) => item.id === approval[2]);
+      const call = node?.toolCalls.find(
+        (item) => item.id === decodeURIComponent(approval[3]),
+      );
+      const body = JSON.parse(options.body);
+      assert.ok(call, "Approval must target its owning card");
+      if (
+        body.expectedRevision !== node.revision ||
+        call.status !== "awaiting_approval"
+      )
+        return {
+          ok: false,
+          status: 409,
+          json: async () => ({ error: "这次审批已失效" }),
+        };
+      call.status = body.decision === "deny" ? "denied" : "running";
+      state.revision++;
+      return { ok: true, json: async () => JSON.parse(JSON.stringify(state)) };
+    }
     assert.equal(
       options.method ?? "GET",
       "GET",
-      "Fixture must not execute tools",
+      "Fixture must not perform other mutations",
     );
     const values = {
       "/api/state": state,
@@ -188,7 +251,7 @@ async function mount(t) {
           contextWindow: 128000,
         },
       ],
-      "/api/capabilities": { toolBatchApproval: true },
+      "/api/capabilities": { toolBatchApproval: true, runInputs: true },
     };
     assert.ok(Object.hasOwn(values, url), `Unexpected request: ${url}`);
     return {
@@ -258,8 +321,118 @@ async function mount(t) {
     select,
     publish,
     assertTools,
+    flushFrame: () =>
+      act(() => new Promise((resolve) => window.setTimeout(resolve, 40))),
+    change: async (element, value) => {
+      assert.ok(element, "Expected editable element");
+      const prototype =
+        element.tagName === "TEXTAREA"
+          ? window.HTMLTextAreaElement.prototype
+          : window.HTMLSelectElement.prototype;
+      Object.getOwnPropertyDescriptor(prototype, "value").set.call(
+        element,
+        value,
+      );
+      await act(() => {
+        element.dispatchEvent(new window.Event("input", { bubbles: true }));
+        element.dispatchEvent(new window.Event("change", { bubbles: true }));
+      });
+    },
   };
 }
+
+test("running input sends to the selected card, preserves per-card drafts and renders delivery state", async (t) => {
+  const ui = await mount(t);
+  await ui.publish();
+  const textarea = () =>
+    ui.inspector().querySelector('[aria-label="追加任务消息"]');
+  await ui.change(textarea(), "adjust A");
+  await ui.select("sibling");
+  assert.equal(textarea().value, "");
+  await ui.change(textarea(), "finish B afterwards");
+  await ui.change(
+    ui.inspector().querySelector('[aria-label="追加消息发送方式"]'),
+    "followUp",
+  );
+  await ui.click(ui.inspector().querySelector('[aria-label="发送追加消息"]'));
+  const sent = ui.requests.filter((request) => request.url.endsWith("/inputs"));
+  assert.equal(sent.length, 1);
+  assert.equal(sent[0].url, "/api/workspaces/cua/nodes/sibling/inputs");
+  assert.equal(JSON.parse(sent[0].body).mode, "followUp");
+  assert.equal(textarea().value, "");
+  assert.match(
+    ui.inspector().querySelector(".run-input-history").textContent,
+    /finish B afterwards.*等待接收|等待接收.*finish B afterwards/,
+  );
+  const sibling = ui.state.workspaces[0].nodes.find(
+    (node) => node.id === "sibling",
+  );
+  sibling.runInputs[0].status = "delivered";
+  await ui.publish();
+  assert.match(
+    ui.inspector().querySelector(".run-input-history").textContent,
+    /已接收/,
+  );
+  await ui.select("cua-node");
+  assert.equal(textarea().value, "adjust A");
+  assert.equal(ui.inspector().querySelector(".run-input-history"), null);
+  await ui.click(ui.inspector().querySelector('[aria-label="发送追加消息"]'));
+  assert.equal(
+    JSON.parse(
+      ui.requests.filter((request) => request.url.endsWith("/inputs"))[1].body,
+    ).mode,
+    "steer",
+  );
+  assert.deepEqual(ui.diagnostics, []);
+});
+
+test("completion during submission preserves the unsent draft for a new branch", async (t) => {
+  const ui = await mount(t);
+  await ui.publish();
+  const textarea = ui.inspector().querySelector('[aria-label="追加任务消息"]');
+  await ui.change(textarea, "unsent guidance");
+  // The server has finished; the client still displays its last running snapshot.
+  const node = ui.state.workspaces[0].nodes[1];
+  node.status = "completed";
+  await ui.click(ui.inspector().querySelector('[aria-label="发送追加消息"]'));
+  assert.equal(
+    ui.requests.filter((request) => request.url.endsWith("/inputs")).length,
+    1,
+  );
+  assert.equal(textarea.value, "unsent guidance");
+  assert.equal(node.runInputs, undefined);
+  await ui.publish();
+  assert.equal(
+    ui.inspector().querySelector('[aria-label="新分支问题"]').value,
+    "unsent guidance",
+  );
+  assert.deepEqual(ui.diagnostics, []);
+});
+
+test("queued cards allow drafts but cannot submit input before the run starts", async (t) => {
+  const ui = await mount(t);
+  ui.state.workspaces[0].nodes[1].status = "queued";
+  await ui.publish();
+  await ui.change(
+    ui.inspector().querySelector('[aria-label="追加任务消息"]'),
+    "draft while queued",
+  );
+  assert.equal(
+    ui.inspector().querySelector('[aria-label="发送追加消息"]').disabled,
+    true,
+  );
+  ui.state.workspaces[0].nodes[1].status = "running";
+  await ui.publish();
+  assert.equal(
+    ui.inspector().querySelector('[aria-label="发送追加消息"]').disabled,
+    false,
+  );
+  assert.equal(
+    ui.inspector().querySelector('[aria-label="追加任务消息"]').value,
+    "draft while queued",
+  );
+  assert.deepEqual(ui.diagnostics, []);
+});
 
 test("running cards and workspaces never retain another card's tools", async (t) => {
   const ui = await mount(t);
@@ -345,6 +518,34 @@ test("subagent avatars open the matching inspector child and live updates preser
   }));
   card.toolCalls[0].subagentId = "child-1";
   await ui.publish();
+  ui.assertTools([]);
+  card.toolCalls.push(
+    {
+      id: "main-delegation",
+      name: "subagent",
+      arguments: { agent: "worker", task: "independent task 1" },
+      status: "completed",
+      startedAt: 1,
+    },
+    {
+      id: "other-child-tool",
+      subagentId: "child-0",
+      name: "web_search",
+      arguments: { query: "child research" },
+      status: "failed",
+      startedAt: 1,
+    },
+  );
+  await ui.publish();
+  ui.assertTools(["main-delegation"]);
+  assert.equal(
+    ui.inspector().querySelector(".tool-activity-count").textContent,
+    "1 次操作",
+  );
+  assert.doesNotMatch(
+    ui.inspector().querySelector(".tool-activity-heading").textContent,
+    /失败|待批准/,
+  );
   const avatars = ui.document.querySelectorAll(
     '.react-flow__node[data-id="cua-node"] .card-subagents button',
   );
@@ -375,15 +576,145 @@ test("subagent avatars open the matching inspector child and live updates preser
     /independent task 2/,
   );
   assert.equal(
-    ui.inspector().querySelectorAll(".subagents-panel [data-tool-call-id]")
+    ui.inspector().querySelectorAll(".subagent-detail [data-tool-call-id]")
       .length,
     0,
+  );
+  await ui.click(
+    [...ui.inspector().querySelectorAll(".inspector-tabs button")].find(
+      (button) => button.textContent.includes("对话详情"),
+    ),
+  );
+  ui.assertTools(["main-delegation"]);
+  await ui.click(
+    [...ui.document.querySelectorAll(".pending-approval-trigger")].find(
+      (button) => button.title.includes(card.prompt),
+    ),
+  );
+  assert.match(
+    ui.document.querySelector(".pending-approval-panel").textContent,
+    /子代理 · 执行 2/,
+  );
+  await ui.click(ui.document.querySelector(".pending-approval-locate"));
+  await ui.flushFrame();
+  assert.match(
+    ui.inspector().querySelector(".inspector-tabs .active").textContent,
+    /Subagents/,
+  );
+  assert.match(
+    ui.inspector().querySelector(".subagent-task").textContent,
+    /independent task 1/,
+  );
+  assert.ok(
+    ui
+      .inspector()
+      .querySelector(
+        '.subagent-detail [data-tool-call-id="cua-node-tool"] .tool-approval-actions',
+      ),
+  );
+  assert.equal(
+    ui.inspector().querySelector(".subagent-detail .tool-activity-disclosure")
+      .open,
+    true,
   );
   await ui.select("sibling");
   assert.equal(ui.inspector().querySelector(".subagents-panel"), null);
   assert.doesNotMatch(
     ui.inspector().querySelector(".inspector-tabs").textContent,
     /Subagents/,
+  );
+  assert.deepEqual(ui.diagnostics, []);
+});
+
+test("global child approvals target their own workspace and card without changing the open conversation", async (t) => {
+  const ui = await mount(t);
+  const owner = ui.state.workspaces[1];
+  const card = owner.nodes[1];
+  card.revision = 4;
+  card.subagents = [
+    {
+      id: "research-child",
+      agent: "researcher",
+      task: "Research docs",
+      model: "demo/pi-demo",
+      status: "running",
+      response: "",
+      createdAt: 1,
+    },
+  ];
+  const call = card.toolCalls[0];
+  call.subagentId = "research-child";
+  call.safetyReview = {
+    model: "review/model",
+    decision: "deny",
+    reason: "需要用户确认具体查询范围",
+    startedAt: 1,
+    finishedAt: 2,
+  };
+  await ui.publish();
+  await ui.select("sibling");
+  const open = () =>
+    ui.click(
+      [...ui.document.querySelectorAll(".pending-approval-trigger")].find(
+        (button) => button.title.includes(card.prompt),
+      ),
+    );
+  await open();
+  const panel = () => ui.document.querySelector(".pending-approval-panel");
+  assert.match(panel().textContent, /子代理 · 研究 1/);
+  assert.match(panel().textContent, /glm context length/);
+  assert.match(panel().textContent, /需要用户确认具体查询范围/);
+  assert.match(panel().textContent, /拒绝仅跳过这次调用/);
+  await ui.click(panel().querySelector(".tool-deny"));
+  assert.equal(call.status, "denied");
+  assert.equal(card.subagents[0].status, "running");
+  assert.equal(panel(), null);
+  assert.equal(
+    ui.inspector().querySelector(".node-question").textContent,
+    "sibling question",
+  );
+  const request = ui.requests.find((request) => request.method === "POST");
+  assert.equal(
+    request.url,
+    "/api/workspaces/glm/nodes/glm-node/approvals/glm-node-tool",
+  );
+  assert.deepEqual(JSON.parse(request.body), {
+    decision: "deny",
+    expectedRevision: 4,
+  });
+  assert.equal(
+    ui.state.workspaces[0].nodes[2].toolCalls[0].status,
+    "awaiting_approval",
+  );
+  call.id = "research-child:next";
+  call.status = "awaiting_approval";
+  await ui.publish();
+  await open();
+  await ui.click(panel().querySelector(".tool-approve"));
+  assert.equal(call.status, "running");
+  assert.equal(
+    ui.requests.at(-1).url,
+    "/api/workspaces/glm/nodes/glm-node/approvals/research-child%3Anext",
+  );
+  assert.deepEqual(ui.diagnostics, []);
+});
+
+test("expired global approval reports the conflict and never approves a replacement run", async (t) => {
+  const ui = await mount(t);
+  const card = ui.state.workspaces[0].nodes[1];
+  await ui.click(
+    [...ui.document.querySelectorAll(".pending-approval-trigger")].find(
+      (button) => button.title.includes(card.prompt),
+    ),
+  );
+  card.revision++;
+  await ui.click(
+    ui.document.querySelector(".pending-approval-panel .tool-approve"),
+  );
+  assert.equal(card.toolCalls[0].status, "awaiting_approval");
+  assert.match(
+    ui.document.querySelector(".pending-approval-panel").textContent,
+    /这次审批已失效/,
   );
   assert.deepEqual(ui.diagnostics, []);
 });

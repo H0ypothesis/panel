@@ -50,7 +50,7 @@ test("PiRuntime streams native thinking across tool rounds without mixing it int
   const registry = createModels();
   registry.setProvider(faux.provider);
   const runtime = new PiRuntime(registry, {
-    async runPlugin() {
+    async runNativePlugin() {
       return { text: "Search result", sources: [] };
     },
   });

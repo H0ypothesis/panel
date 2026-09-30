@@ -61,7 +61,7 @@ const authorization: NonNullable<ToolCall["authorization"]> = {
 test("long task switch is off by default, editable manually, and states the reply limit precisely", () => {
   const off = inputMarkup();
   assert.match(off, /role="switch"/);
-  assert.match(off, /允许超过40次模型回复；使用电脑控制时自动开启/);
+  assert.match(off, /允许超过40次模型回复；使用电脑控制或子代理时自动开启/);
   assert.doesNotMatch(off, /checked=""|disabled=""|审批绕过/);
   assert.match(
     inputMarkup({ config: { ...config, longTask: true } }),
@@ -100,6 +100,66 @@ test("computer selection shows automatic state without changing the manual prefe
   assert.match(
     inputMarkup({ config: { ...config, longTask: true }, toolRequests: [] }),
     /checked=""/,
+  );
+});
+
+test("subagent selection shows automatic long mode and resets when deselected", () => {
+  const off = { ...config, longTask: false };
+  const automatic = inputMarkup({ config: off, toolRequests: ["subagents"] });
+  assert.match(automatic, /checked=""/);
+  assert.match(automatic, /disabled=""/);
+  assert.match(automatic, /子代理已自动开启/);
+  assert.match(automatic, /长程任务，子代理自动开启/);
+  assert.match(
+    inputMarkup({ config: off, toolRequests: ["subagents", "computer_use"] }),
+    /电脑控制和子代理已自动开启/,
+  );
+  assert.equal(off.longTask, false);
+  assert.doesNotMatch(
+    inputMarkup({ config: off, toolRequests: [] }),
+    /checked=""/,
+  );
+});
+
+test("dispatched subagents and same-card wakeups display automatic long mode", () => {
+  for (const name of ["subagent", "subagents_enable"]) {
+    assert.equal(automaticLongTask(undefined, [call({ name })]), false);
+    assert.equal(
+      automaticLongTask(undefined, [call({ name, authorization })]),
+      true,
+    );
+    assert.match(
+      renderToStaticMarkup(
+        <LongTaskBadge
+          config={config}
+          status="running"
+          toolCalls={[call({ name, authorization })]}
+        />,
+      ),
+      /长程任务 · 自动/,
+    );
+  }
+  assert.match(
+    renderToStaticMarkup(
+      <LongTaskBadge
+        config={config}
+        status="queued"
+        toolRequests={["subagents"]}
+      />,
+    ),
+    /长程任务 · 自动/,
+  );
+  assert.match(
+    renderToStaticMarkup(
+      <LongTaskBadge config={config} status="running" subagentsEnabled />,
+    ),
+    /长程任务 · 自动/,
+  );
+  assert.equal(
+    renderToStaticMarkup(
+      <LongTaskBadge config={config} status="completed" subagentsEnabled />,
+    ),
+    "",
   );
 });
 

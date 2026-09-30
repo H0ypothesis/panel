@@ -1,3 +1,4 @@
+import { subagentCatalog } from "./subagent-profiles.ts";
 import { contextParentInput } from "./context-parents.ts";
 import { StateEvents } from "./state-events.ts";
 import type { IncomingMessage, ServerResponse } from "node:http";
@@ -195,6 +196,40 @@ export function createApi(
         json(response, 200, await runtime.connectComputerUse());
       } else if (
         request.method === "GET" &&
+        url.pathname === "/api/subagent-settings"
+      ) {
+        if (!runtime.subagentSettings)
+          throw new Error("当前运行时不支持子代理设置，请更新并重启服务。");
+        json(response, 200, runtime.subagentSettings());
+      } else if (
+        request.method === "GET" &&
+        url.pathname === "/api/subagent-profiles"
+      ) {
+        const workspaceId = url.searchParams.get("workspaceId");
+        const workspace = workspaceId
+          ? store.data.workspaces.find((item) => item.id === workspaceId)
+          : undefined;
+        if (workspaceId && !workspace) throw new Error("探索空间不存在。");
+        json(
+          response,
+          200,
+          await (runtime.subagentCatalog?.(
+            workspace?.workingDirectory ?? process.cwd(),
+          ) ?? subagentCatalog(workspace?.workingDirectory ?? process.cwd())),
+        );
+      } else if (
+        request.method === "PUT" &&
+        url.pathname === "/api/subagent-settings"
+      ) {
+        if (!runtime.saveSubagentSettings)
+          throw new Error("当前运行时不支持子代理设置，请更新并重启服务。");
+        json(
+          response,
+          200,
+          await runtime.saveSubagentSettings(await readJson(request, 16384)),
+        );
+      } else if (
+        request.method === "GET" &&
         url.pathname === "/api/model-providers"
       ) {
         if (!runtime.providerSettings)
@@ -265,6 +300,7 @@ export function createApi(
           longTasks: true,
           computerUseTakeover: true,
           computerUseTaskControl: true,
+          runInputs: true,
         });
       else if (request.method === "GET" && url.pathname === "/api/directories")
         json(
@@ -561,6 +597,44 @@ export function createApi(
           json(response, 200, store.snapshot());
           return true;
         }
+        const subagentCommand = url.pathname.match(
+          /^\/api\/workspaces\/([^/]+)\/nodes\/([^/]+)\/subagents$/,
+        );
+        const subagentAnswer = url.pathname.match(
+          /^\/api\/workspaces\/([^/]+)\/nodes\/([^/]+)\/subagents\/answers\/([^/]+)$/,
+        );
+        if (request.method === "POST" && subagentAnswer) {
+          const body = await readJson(request);
+          scheduler.answerSubagentQuestion(
+            decodeURIComponent(subagentAnswer[1]),
+            decodeURIComponent(subagentAnswer[2]),
+            expectedRevision(body.expectedRevision),
+            decodeURIComponent(subagentAnswer[3]),
+            body.answer,
+          );
+          json(response, 200, store.snapshot());
+          return true;
+        }
+        if (request.method === "POST" && subagentCommand) {
+          const body = await readJson(request);
+          if (
+            !body.input ||
+            typeof body.input !== "object" ||
+            Array.isArray(body.input)
+          )
+            throw new Error("子代理参数必须是对象。");
+          const result = await scheduler.subagentCommand(
+            decodeURIComponent(subagentCommand[1]),
+            decodeURIComponent(subagentCommand[2]),
+            expectedRevision(body.expectedRevision),
+            body.input as Record<string, unknown>,
+            body.tool === undefined
+              ? undefined
+              : field(body.tool, "工具名", 100),
+          );
+          json(response, 200, { result, state: store.snapshot() });
+          return true;
+        }
         const approval = url.pathname.match(
           /^\/api\/workspaces\/([^/]+)\/nodes\/([^/]+)\/approvals\/([^/]+)$/,
         );
@@ -617,7 +691,7 @@ export function createApi(
           return true;
         }
         const match = url.pathname.match(
-          /^\/api\/workspaces\/([^/]+)\/(nodes|layout|export)(?:\/([^/]+))?(?:\/(cancel))?$/,
+          /^\/api\/workspaces\/([^/]+)\/(nodes|layout|export)(?:\/([^/]+))?(?:\/(cancel|inputs))?$/,
         );
         if (!match) {
           json(response, 404, { error: "接口不存在。" });
@@ -700,6 +774,22 @@ export function createApi(
             expectedNodeIds,
           });
           json(response, 200, store.snapshot());
+        } else if (
+          request.method === "POST" &&
+          action === "nodes" &&
+          nodeId &&
+          suffix === "inputs"
+        ) {
+          const body = await readJson(request);
+          if (body.mode !== "steer" && body.mode !== "followUp")
+            throw new Error("请选择引导当前任务或完成后继续。");
+          const input = await scheduler.sendRunInput(workspaceId, nodeId, {
+            text: field(body.text, "追加消息", 20000),
+            mode: body.mode,
+            requestId: field(body.requestId, "请求 ID", 80),
+            expectedRevision: expectedRevision(body.expectedRevision),
+          });
+          json(response, 200, { input, state: store.snapshot() });
         } else if (
           request.method === "POST" &&
           action === "nodes" &&

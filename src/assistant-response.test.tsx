@@ -63,3 +63,15 @@ test("raw tool text is collapsed, inert, and never rendered as answer Markdown o
   assert.match(html, /&lt;tool_call&gt;/);
   assert.doesNotMatch(html, /<script>|同意|拒绝|<details[^>]* open/);
 });
+
+test("subagents can keep active thinking collapsed without changing the conversation default", () => {
+  const html = renderToStaticMarkup(
+    <AssistantResponse
+      response="<think>Working"
+      status="running"
+      defaultThinkingExpanded={false}
+    />,
+  );
+  assert.match(html, /aria-expanded="false"/);
+  assert.match(html, /思考中/);
+});

@@ -3,18 +3,23 @@ import { ChevronDown, Code, LoaderCircle, Sparkles } from "lucide-react";
 import { responseParts } from "../shared/response-parts";
 import type { TurnNode } from "../shared/types";
 import { Markdown } from "./Markdown";
+import type { Components } from "react-markdown";
 
 function ThinkingBox({
   text,
   active,
   interrupted,
+  defaultExpanded,
 }: {
   text: string;
   active: boolean;
   interrupted: boolean;
+  defaultExpanded?: boolean;
 }) {
   const id = useId();
-  const [expanded, setExpanded] = useState<boolean | null>(null);
+  const [expanded, setExpanded] = useState<boolean | null>(
+    defaultExpanded ?? null,
+  );
   const open = expanded ?? active;
   const content = useRef<HTMLDivElement>(null);
   const follow = useRef(true);
@@ -84,7 +89,12 @@ export function AssistantResponse({
   response,
   thinking,
   status,
-}: Pick<TurnNode, "response" | "thinking" | "status">) {
+  defaultThinkingExpanded,
+  markdownComponents,
+}: Pick<TurnNode, "response" | "thinking" | "status"> & {
+  defaultThinkingExpanded?: boolean;
+  markdownComponents?: Components;
+}) {
   const running = status === "running";
   const parts = useMemo(
     () => responseParts(response, running),
@@ -108,6 +118,7 @@ export function AssistantResponse({
       {(thoughts || tagged.length > 0) && (
         <ThinkingBox
           text={thoughts}
+          defaultExpanded={defaultThinkingExpanded}
           active={running && incomplete}
           interrupted={
             !running &&
@@ -116,7 +127,9 @@ export function AssistantResponse({
           }
         />
       )}
-      {answer.trim() && <Markdown text={answer} />}
+      {answer.trim() && (
+        <Markdown text={answer} components={markdownComponents} />
+      )}
       {toolText.length > 0 && (
         <details className="response-tool-text">
           <summary>

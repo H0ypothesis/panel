@@ -181,9 +181,9 @@ function fixture(
   const runtime = new PiRuntime(
     registry,
     {
-      runPlugin: async (job) => {
-        assert.equal(job.kind, "search");
-        if (job.kind === "search") searches.push(job.query);
+      runNativePlugin: async (job) => {
+        assert.equal(job.name, "web_search");
+        if (job.name === "web_search") searches.push(String(job.args.query));
         assert.equal(dispatched.at(-1), "web_search");
         return {
           text: "Explicitly requested search result",

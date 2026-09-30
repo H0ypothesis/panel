@@ -143,7 +143,10 @@ for (const modelId of modelIds) {
       assert.deepEqual(request.thinking, {
         type: thinking === "off" ? "disabled" : "enabled",
       });
-      assert.equal(request.max_completion_tokens, 16384);
+      assert.ok(
+        Number(request.max_completion_tokens) > model.contextWindow * 0.8,
+      );
+      assert.ok(Number(request.max_completion_tokens) < model.contextWindow);
       assert.equal(result.response, "Hello MiMo");
       assert.deepEqual(
         result.thinking,

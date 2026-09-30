@@ -258,14 +258,23 @@ test("PiRuntime advertises CUA wrappers alongside web tools only when the driver
             installed
               ? [
                   "web_search",
-                  "web_fetch",
+                  "fetch_content",
+                  "get_search_content",
+                  "source_check",
                   "subagents_enable",
                   "subagent",
                   "computer_use_tools",
                   "computer_use_call",
                   "computer_use_release",
                 ]
-              : ["web_search", "web_fetch", "subagents_enable", "subagent"],
+              : [
+                  "web_search",
+                  "fetch_content",
+                  "get_search_content",
+                  "source_check",
+                  "subagents_enable",
+                  "subagent",
+                ],
           );
           inspected = true;
           return fauxAssistantMessage("Tools are available.");

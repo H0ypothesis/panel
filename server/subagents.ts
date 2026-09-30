@@ -1,27 +1,35 @@
 import { randomUUID } from "node:crypto";
-import type {
-  AgentEvent,
-  AgentMessage,
-  AgentTool,
-} from "@earendil-works/pi-agent-core";
+import { resolveFileOperationResource } from "./file-operation-locks.ts";
+import { dirname, join } from "node:path";
+import type { AgentEvent, AgentTool } from "@earendil-works/pi-agent-core";
 import { Type } from "typebox";
 import type { SubagentRun, ThinkingContent } from "../shared/types.ts";
-import type { AgentConfig, ChildSessionFactory } from "./nicobailon-engine.ts";
+import type {
+  ChildSession,
+  ChildSessionLaunch,
+  ChildSessionFactory,
+} from "./nicobailon-engine.ts";
 import { loadNicobailon } from "./nicobailon-loader.ts";
+import { SUBAGENT_DELIVERY_PROMPT } from "./subagent-handoff.ts";
+import {
+  discoverSubagentProfiles,
+  presentProfile,
+  profileDiagnostics,
+} from "./subagent-profiles.ts";
+import {
+  DEFAULT_SUBAGENT_CONCURRENCY,
+  MAX_SUBAGENT_BATCH_SIZE,
+  validSubagentConcurrency,
+} from "../shared/subagent-settings.ts";
 
 export const SUBAGENT_PROMPT = `
-你可以根据任务需要自主调用 subagent，让多个子代理分别调查、实现或审查独立子任务。简单任务直接处理；存在独立工作时可一次传入 tasks 并行委派。每个子代理使用独立上下文，明确提供目标、相关文件和必要背景，不要让多个代理同时修改同一文件。工具会等待这批代理结束并返回结果；你应检查结果并综合回答。子代理共享本卡片的工作目录和审批规则。用户选择 @subagents 时，本轮必须开启并按任务调用子代理；历史中的选择不要求重复委派。`;
+Panel 允许你根据当前用户任务自主调用 subagent 分配独立子任务。先用 action=list,capabilities=true 读取原生角色；执行时省略 action。agent/task 委派一个子代理；workflowScript 使用 runs.run/runs.all 串联或并行；tasks 是保留的批量简写。async:true 后台运行，async:false 等待结果。需要父上下文时显式 context:fork；独立审查通常用 fresh。可通过 status、steer（mode:steer/follow_up）、interrupt、stop、resume 管理精确 run id；需要时用 action:guide 阅读原生参数。隔离并发写入用 worktree:true。后台完成与监督者消息显示在右侧 Subagents；主任务已结束后可在右侧控制或恢复，不要声称后台结果已经完成。子代理工具遵守角色配置并通过 Panel 审批。外部 CLI 与远端调用按整个委派审批，由各自运行环境执行工具。用户选择 @subagents 时本轮必须开启并按任务调用；历史选择不要求重复委派。\n${SUBAGENT_DELIVERY_PROMPT}`;
 
-const roles = ["scout", "worker", "reviewer"] as const;
-const rolePrompts = {
-  scout:
-    "调查给定问题、阅读相关文件或网页，返回可核实的发现与来源。不要修改文件。",
-  worker: "完成明确委派的实现或分析任务，保留现有改动，检查结果并简洁报告。",
-  reviewer:
-    "独立审查给定内容，检查正确性、遗漏和风险，提供具体证据。不要修改文件。",
-};
 const taskSchema = Type.Object({
-  agent: Type.Union(roles.map((role) => Type.Literal(role))),
+  agent: Type.String({
+    minLength: 1,
+    description: "插件角色名或别名；先用 action=list 查看可用角色。",
+  }),
   task: Type.String({
     minLength: 1,
     maxLength: 20000,
@@ -29,25 +37,31 @@ const taskSchema = Type.Object({
   }),
 });
 
-export interface ChildRunInput {
-  id: string;
-  systemPrompt: string;
-  task: string;
-  allowedTools: string[];
-  signal: AbortSignal;
-  onEvent: (event: AgentEvent) => void;
-  onText: (text: string) => void;
-  onThinking: (thinking: ThinkingContent) => void;
-}
-
 interface SubagentOptions {
+  maxConcurrentSubagents?: number;
   cwd: string;
   model: string;
+  availableModels?: {
+    provider: string;
+    id: string;
+    fullId: string;
+    contextWindow: number;
+  }[];
   signal: AbortSignal;
   thinking: string;
   onEnabled?: () => void;
   onUpdate?: (run: SubagentRun) => void;
-  runChild: (input: ChildRunInput) => Promise<{ usage?: SubagentRun["usage"] }>;
+  persistOutput: (
+    id: string,
+    path: string,
+    content: string,
+    signal: AbortSignal,
+  ) => Promise<void>;
+  createChildSession: (
+    id: string,
+    launch: ChildSessionLaunch,
+    skillPaths: string[],
+  ) => Promise<ChildSession>;
 }
 
 /** One card owns the queue, cancellation and child identities. No global factory. */
@@ -56,8 +70,13 @@ export class Subagents {
   private readonly active = new Set<Promise<void>>();
   private readonly controller = new AbortController();
   private readonly signal: AbortSignal;
+  private readonly concurrency: number;
 
   constructor(private readonly options: SubagentOptions) {
+    this.concurrency =
+      options.maxConcurrentSubagents ?? DEFAULT_SUBAGENT_CONCURRENCY;
+    if (!validSubagentConcurrency(this.concurrency))
+      throw new Error("子代理并发设置无效。");
     this.signal = AbortSignal.any([options.signal, this.controller.signal]);
   }
 
@@ -75,14 +94,24 @@ export class Subagents {
         parameters: Type.Object({}),
         execute: async () => {
           this.signal.throwIfAborted();
-          await loadNicobailon();
+          const found = await discoverSubagentProfiles(
+            this.options.cwd,
+            this.options.model.split("/")[0],
+          );
           this.signal.throwIfAborted();
           this.options.onEnabled?.();
           return {
             content: [
               {
                 type: "text",
-                text: "Subagents 已开启。请调用 subagent，传入单个 agent/task 或 tasks 列表，按任务需要委派工作。",
+                text:
+                  "Subagents 已开启。原生角色配置：\n" +
+                  JSON.stringify({
+                    profiles: found.agents.map((agent) =>
+                      presentProfile(agent),
+                    ),
+                    diagnostics: found.agentDiagnostics,
+                  }),
               },
             ],
             details: {},
@@ -92,17 +121,23 @@ export class Subagents {
       {
         name: "subagent",
         label: "子代理协作",
-        description:
-          "由 nicobailon/pi-subagents 执行独立子代理任务。scout 调查、worker 实现、reviewer 审查。传 agent/task 启动一个，或 tasks 并行启动多个（最多 8 个，最多 3 个同时执行）。调用等待所有结果；不要把同一工作重复交给主代理和子代理。子代理继承本轮模型和审批，不能继续创建子代理。",
+        description: `使用 nicobailon/pi-subagents 原生角色和独立 Pi 会话。先用 action=list 发现内置、用户和项目角色。角色决定提示词、工具、模型和技能；未配置模型时继承当前模型。用 agent/task 或 tasks 委派，每批最多 ${MAX_SUBAGENT_BATCH_SIZE} 个，最多 ${this.concurrency} 个同时执行。调用等待所有结果；共享工作目录及 Panel 审批。`,
         parameters: Type.Object({
+          action: Type.Optional(
+            Type.Union([Type.Literal("list"), Type.Literal("run")]),
+          ),
           agent: Type.Optional(taskSchema.properties.agent),
           task: Type.Optional(taskSchema.properties.task),
           tasks: Type.Optional(
-            Type.Array(taskSchema, { minItems: 1, maxItems: 8 }),
+            Type.Array(taskSchema, {
+              minItems: 1,
+              maxItems: MAX_SUBAGENT_BATCH_SIZE,
+            }),
           ),
         }),
         execute: async (_id, rawInput, toolSignal, onUpdate) => {
           const input = rawInput as {
+            action?: "list" | "run";
             agent?: SubagentRun["agent"];
             task?: string;
             tasks?: { agent: SubagentRun["agent"]; task: string }[];
@@ -111,6 +146,26 @@ export class Subagents {
             ? AbortSignal.any([this.signal, toolSignal])
             : this.signal;
           signal.throwIfAborted();
+          const engine = await loadNicobailon();
+          const found = await discoverSubagentProfiles(
+            this.options.cwd,
+            this.options.model.split("/")[0],
+          );
+          if (input.action === "list")
+            return {
+              content: [
+                {
+                  type: "text",
+                  text: JSON.stringify({
+                    profiles: found.agents.map((agent) =>
+                      presentProfile(agent),
+                    ),
+                    diagnostics: found.agentDiagnostics,
+                  }),
+                },
+              ],
+              details: {},
+            };
           if (
             input.tasks &&
             (input.agent !== undefined || input.task !== undefined)
@@ -123,17 +178,42 @@ export class Subagents {
               : []);
           if (!tasks.length || tasks.some((task) => !task.task.trim()))
             throw new Error("请提供明确的子代理任务。");
+          if (tasks.length > MAX_SUBAGENT_BATCH_SIZE)
+            throw new Error(
+              `每批最多启动 ${MAX_SUBAGENT_BATCH_SIZE} 个子代理。`,
+            );
           if (this.records.length + tasks.length > 24)
             throw new Error("本轮最多启动 24 个子代理，请汇总已有结果。");
-          const engine = await loadNicobailon();
+          const profiles = tasks.map(({ agent: name }) => {
+            const { agent, error } = engine.resolveAgentName(
+              name,
+              found.agents,
+            );
+            const diagnostic = engine.findBlockingAgentDiagnostic(
+              name,
+              agent,
+              found.agentDiagnostics,
+            );
+            if (diagnostic)
+              throw new Error(
+                `${name}: ${diagnostic.error} (${diagnostic.filePath})`,
+              );
+            if (!agent)
+              throw new Error(
+                error ?? `未知角色 ${name}，请先调用 action=list。`,
+              );
+            if (agent.disabled) throw new Error(`角色 ${name} 已禁用。`);
+            return agent;
+          });
           signal.throwIfAborted();
           this.options.onEnabled?.();
           const runs = tasks.map(
-            ({ agent, task }): SubagentRun => ({
+            ({ task }, index): SubagentRun => ({
               id: randomUUID(),
-              agent,
+              agent: profiles[index].name,
+              profile: presentProfile(profiles[index]),
               task,
-              model: this.options.model,
+              model: profiles[index].model ?? this.options.model,
               status: "queued",
               response: "",
               createdAt: Date.now(),
@@ -159,7 +239,9 @@ export class Subagents {
           let next = 0;
           const worker = async () => {
             while (next < runs.length) {
-              const run = runs[next++];
+              const index = next++;
+              const run = runs[index];
+              const profile = profiles[index];
               if (signal.aborted) {
                 Object.assign(run, {
                   status: "cancelled",
@@ -172,132 +254,145 @@ export class Subagents {
               run.startedAt = Date.now();
               this.publish(run);
               progress();
-              const allowedTools =
-                run.agent === "worker"
-                  ? ["read", "write", "edit", "bash", "web_search", "web_fetch"]
-                  : ["read", "web_search", "web_fetch"];
               const factory: ChildSessionFactory = {
                 create: async (launch) => {
-                  const messages: AgentMessage[] = [];
-                  const listeners = new Set<
-                    (event: { type: string; [key: string]: unknown }) => void
-                  >();
-                  const abort = new AbortController();
-                  let running: Promise<void> | undefined;
-                  return {
-                    sessionId: run.id,
-                    sessionFile: undefined,
-                    modelId: this.options.model.split("/").slice(1).join("/"),
-                    messages,
-                    subscribe(listener) {
-                      listeners.add(listener);
-                      return () => listeners.delete(listener);
-                    },
-                    prompt: async (task) => {
-                      running = (async () => {
-                        const result = await this.options.runChild({
-                          id: run.id,
-                          systemPrompt:
-                            launch.systemPrompt ?? rolePrompts[run.agent],
-                          task,
-                          allowedTools,
-                          signal: AbortSignal.any([signal, abort.signal]),
-                          onEvent: (event) => {
-                            if (event.type === "message_end")
-                              messages.push(event.message);
-                            if (
-                              event.type === "message_end" &&
-                              event.message.role === "assistant"
-                            ) {
-                              const usage = event.message.usage;
-                              const previous = run.usage;
-                              run.usage = {
-                                input:
-                                  (previous?.input ?? 0) +
-                                  usage.input +
-                                  usage.cacheRead +
-                                  usage.cacheWrite,
-                                output: (previous?.output ?? 0) + usage.output,
-                                total:
-                                  (previous?.total ?? 0) + usage.totalTokens,
-                                ...(/^(paperbypass|atria|xiaomi-token-plan-cn)\//.test(
-                                  this.options.model,
-                                )
-                                  ? {}
-                                  : {
-                                      cost:
-                                        (previous?.cost ?? 0) +
-                                        usage.cost.total,
-                                    }),
-                              };
-                            }
-                            for (const listener of listeners) listener(event);
-                          },
-                          onText: (text) => {
-                            run.response = text.slice(-200000);
-                            this.publish(run);
-                          },
-                          onThinking: (thinking) => {
-                            run.thinking = {
-                              ...thinking,
-                              text: thinking.text.slice(-100000),
-                            };
-                            this.publish(run);
-                          },
-                        });
-                        run.usage = result.usage;
-                        for (const listener of listeners)
-                          listener({ type: "agent_settled" });
-                      })();
-                      return running;
-                    },
-                    steer: async () => {
-                      throw new Error("本轮子代理不支持追加指令。");
-                    },
-                    followUp: async () => {
-                      throw new Error("本轮子代理不支持追加指令。");
-                    },
-                    abort: async () => {
-                      abort.abort();
-                    },
-                    dispose: async () => {
-                      abort.abort();
-                      await running?.catch(() => {});
-                    },
-                  };
+                  run.model = launch.model ?? run.model;
+                  run.tools = launch.tools;
+                  this.publish(run);
+                  const skills = engine.resolveSkillsWithFallback(
+                    profile.skills ?? [],
+                    this.options.cwd,
+                    this.options.cwd,
+                    profile.skillPath,
+                    dirname(profile.filePath),
+                  );
+                  if (skills.missing.length)
+                    throw new Error(
+                      `Skills not found: ${skills.missing.join(", ")}`,
+                    );
+                  const session = await this.options.createChildSession(
+                    run.id,
+                    launch,
+                    skills.resolved.map((skill) => skill.path),
+                  );
+                  session.subscribe((raw) => {
+                    const event = raw as unknown as AgentEvent;
+                    if (event.type === "message_update") {
+                      const update = event.assistantMessageEvent;
+                      if (update.type === "text_delta") {
+                        run.response += update.delta;
+                        this.publish(run);
+                      } else if (update.type === "thinking_delta") {
+                        run.thinking = {
+                          text: (
+                            (run.thinking?.text ?? "") + update.delta
+                          ).slice(-100000),
+                          active: true,
+                        };
+                        this.publish(run);
+                      }
+                    }
+                    if (
+                      event.type === "message_end" &&
+                      event.message.role === "assistant"
+                    ) {
+                      const usage = event.message.usage;
+                      const previous = run.usage;
+                      run.usage = {
+                        input:
+                          (previous?.input ?? 0) +
+                          usage.input +
+                          usage.cacheRead +
+                          usage.cacheWrite,
+                        output: (previous?.output ?? 0) + usage.output,
+                        total: (previous?.total ?? 0) + usage.totalTokens,
+                        ...(/^(paperbypass|atria|xiaomi-token-plan-cn)\//.test(
+                          run.model,
+                        )
+                          ? {}
+                          : { cost: (previous?.cost ?? 0) + usage.cost.total }),
+                      };
+                      this.publish(run);
+                    }
+                  });
+                  return session;
                 },
                 dispose: async () => {},
               };
-              const profile: AgentConfig = {
-                name: run.agent,
-                description: rolePrompts[run.agent],
-                systemPrompt: rolePrompts[run.agent],
-                source: "runtime",
-                filePath: "",
-                systemPromptMode: "replace",
-                inheritProjectContext: false,
-                inheritGlobalContext: false,
-                inheritSkills: false,
-                allowNestedSubagents: false,
-                extensions: [],
-                skills: [],
-                tools: allowedTools,
-              };
               try {
+                const issues = profileDiagnostics(profile);
+                if (issues.length) throw new Error(issues.join("\n"));
+                const plan = engine.planChildLaunch({
+                  agentConfig: profile,
+                  stepOverrides: {},
+                  task: run.task,
+                  runnerCwd: this.options.cwd,
+                  runtimeCwd: this.options.cwd,
+                  outputBaseDir: join(
+                    this.options.cwd,
+                    ".pi",
+                    "subagents",
+                    run.id,
+                  ),
+                });
+                if (plan.outputPath)
+                  await resolveFileOperationResource(
+                    this.options.cwd,
+                    "write",
+                    { path: plan.outputPath },
+                  );
+                const outputSnapshot = engine.captureSingleOutputSnapshot(
+                  plan.outputPath,
+                );
+                const reads = Array.isArray(plan.behavior.reads)
+                  ? engine.resolveExistingReadPaths(
+                      plan.behavior.reads,
+                      plan.stepCwd,
+                    )
+                  : [];
+                const task = engine.injectSingleOutputInstruction(
+                  (reads.length ? `[Read from: ${reads.join(", ")}]\n\n` : "") +
+                    run.task,
+                  plan.outputPath,
+                  profile,
+                );
+                const structuredOutput = profile.outputSchema
+                  ? engine.createStructuredOutputRuntime(profile.outputSchema)
+                  : undefined;
+                const toolBudget = engine.validateToolBudgetConfig(
+                  profile.toolBudget,
+                  "agent.toolBudget",
+                );
+                if (toolBudget.error) throw new Error(toolBudget.error);
                 const result = await engine.runSync(
                   this.options.cwd,
-                  [profile],
+                  found.agents,
                   run.agent,
-                  run.task,
+                  task,
                   {
                     runId: run.id,
                     parentSessionId: run.id,
                     cwd: this.options.cwd,
                     signal,
                     childSessionFactory: factory,
-                    modelOverride: this.options.model,
-                    modelOverrideFromParent: true,
-                    thinkingOverride: this.options.thinking,
+                    availableModels: this.options.availableModels,
+                    toolBudget: toolBudget.budget,
+                    modelOverride: profile.model
+                      ? undefined
+                      : this.options.model,
+                    modelOverrideFromParent: !profile.model,
+                    thinkingOverride:
+                      profile.thinking === undefined
+                        ? this.options.thinking
+                        : undefined,
+                    thinkingCeiling: found.maxThinking,
+                    modelScope: found.modelScope,
+                    preferredModelProvider: this.options.model.split("/")[0],
+                    // Upstream's automatic output fallback writes directly to
+                    // disk. Persist through Panel's audited write boundary below.
+                    outputMode: "inline",
+                    structuredOutput,
+                    skills: plan.skillNames,
                     context: "fresh",
                     artifactConfig: {
                       enabled: false,
@@ -307,22 +402,38 @@ export class Subagents {
                       includeMetadata: false,
                       cleanupDays: 0,
                     },
-                    acceptance: {
-                      level: "none",
-                      reason: "Panel parent reviews the returned child result.",
-                    },
-                    timeoutMs: 30 * 60 * 1000,
+                    acceptance: profile.defaultAcceptance,
+                    timeoutMs: profile.defaultTimeoutMs ?? 30 * 60 * 1000,
                     maxSubagentDepth: 0,
                   },
                 );
+                run.response = result.finalOutput || run.response;
+                if (
+                  !signal.aborted &&
+                  result.exitCode === 0 &&
+                  plan.outputPath
+                ) {
+                  if (
+                    !engine.hasSingleOutputChangedSinceSnapshot(
+                      plan.outputPath,
+                      outputSnapshot,
+                    )
+                  )
+                    await this.options.persistOutput(
+                      run.id,
+                      plan.outputPath,
+                      result.finalOutput ?? "",
+                      signal,
+                    );
+                  if (plan.behavior.outputMode === "file-only")
+                    result.finalOutput = `Output saved: ${plan.outputPath}`;
+                }
                 run.status = signal.aborted
                   ? "cancelled"
                   : result.exitCode === 0
                     ? "completed"
                     : "failed";
-                run.response = (result.finalOutput || run.response).slice(
-                  -200000,
-                );
+                run.response = result.finalOutput || run.response;
                 run.error = result.error;
               } catch (error) {
                 run.status = signal.aborted ? "cancelled" : "failed";
@@ -337,7 +448,10 @@ export class Subagents {
             }
           };
           const completion = Promise.all(
-            Array.from({ length: Math.min(3, runs.length) }, worker),
+            Array.from(
+              { length: Math.min(this.concurrency, runs.length) },
+              worker,
+            ),
           ).then(() => {});
           this.active.add(completion);
           try {
@@ -353,7 +467,7 @@ export class Subagents {
                 text: runs
                   .map(
                     (run) =>
-                      `子代理 ${run.agent} (${run.id})\n任务：${run.task}\n状态：${run.status}\n${run.error ? `错误：${run.error}\n` : ""}${run.response.slice(-30000) || "未产生回答"}`,
+                      `子代理 ${run.agent} (${run.id})\n任务：${run.task}\n状态：${run.status}\n${run.error ? `错误：${run.error}\n` : ""}${run.response || "未产生回答"}`,
                   )
                   .join("\n\n---\n\n"),
               },

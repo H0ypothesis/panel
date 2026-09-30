@@ -6,7 +6,7 @@ import type {
 } from "../shared/types";
 import { automaticLongTask } from "./run-config";
 
-const longTaskHint = "允许超过40次模型回复；使用电脑控制时自动开启";
+const longTaskHint = "允许超过40次模型回复；使用电脑控制或子代理时自动开启";
 
 export function LongTaskToggle({
   config,
@@ -20,13 +20,18 @@ export function LongTaskToggle({
   onConfigChange: (config: RunConfig) => void;
 }) {
   const automatic = automaticLongTask(toolRequests);
+  const source = toolRequests?.includes("subagents")
+    ? toolRequests.includes("computer_use")
+      ? "电脑控制和子代理"
+      : "子代理"
+    : "电脑控制";
   return (
     <div className="long-task-setting" title={longTaskHint}>
       <label className="long-task-toggle">
         <input
           type="checkbox"
           role="switch"
-          aria-label={automatic ? "长程任务，电脑控制自动开启" : "长程任务"}
+          aria-label={automatic ? `长程任务，${source}自动开启` : "长程任务"}
           checked={automatic || config.longTask === true}
           disabled={disabled || automatic}
           onChange={(event) =>
@@ -37,7 +42,7 @@ export function LongTaskToggle({
         {automatic && <span className="long-task-auto">自动</span>}
       </label>
       <span className="long-task-hint">
-        {automatic ? "电脑控制已自动开启" : "允许超过40次模型回复"}
+        {automatic ? `${source}已自动开启` : "允许超过40次模型回复"}
       </span>
     </div>
   );
@@ -48,19 +53,21 @@ export function LongTaskBadge({
   status,
   toolRequests,
   toolCalls,
+  subagentsEnabled,
   compact = false,
 }: {
   config: RunConfig;
   status: TurnNode["status"];
   toolRequests?: ToolRequest[];
   toolCalls?: ToolCall[];
+  subagentsEnabled?: boolean;
   compact?: boolean;
 }) {
-  // Historic computer calls do not prove that that run used the current limit
+  // Historic calls do not prove that that run used the current limit
   // policy. Only persisted manual settings remain visible after completion.
   const automatic =
     (status === "queued" || status === "running") &&
-    automaticLongTask(toolRequests, toolCalls);
+    automaticLongTask(toolRequests, toolCalls, subagentsEnabled);
   if (!config.longTask && !automatic) return null;
   const label = `长程任务${automatic && !config.longTask ? " · 自动" : ""}`;
   return (

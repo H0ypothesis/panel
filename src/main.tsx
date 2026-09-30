@@ -8,6 +8,7 @@ import "./desktop.css";
 import "./computer-use.css";
 import "./long-task.css";
 import "./subagents.css";
+import "./generation-indicator.css";
 import { App } from "./App";
 
 ReactDOM.createRoot(document.getElementById("root")!).render(

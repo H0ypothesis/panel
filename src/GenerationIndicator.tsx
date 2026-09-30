@@ -1,11 +1,8 @@
 import { memo, useEffect, useRef, useState, type CSSProperties } from "react";
-import spinnerVerbs from "./spinner-verbs.txt?raw";
-import "./generation-indicator.css";
+import { spinnerVerbs as phrases } from "./spinner-verbs";
+import { MathCurveLoader } from "./MathCurveLoader";
+import type { SubagentCurve } from "./math-curve-loaders";
 
-const phrases = spinnerVerbs
-  .split(/\r?\n/)
-  .map((line) => line.trim())
-  .filter(Boolean);
 const TAU = Math.PI * 2;
 
 // Lissajous Drift, with the reference's 3:4 curve, 6s loop and 5.4s breath:
@@ -117,11 +114,13 @@ export function GenerationIndicator({
   active,
   activityKey,
   message,
+  curve,
 }: {
   hasResponse: boolean;
   active: boolean;
   activityKey: string;
   message?: string;
+  curve?: SubagentCurve;
 }) {
   const [selection, setSelection] = useState(() => ({
     activityKey,
@@ -150,7 +149,11 @@ export function GenerationIndicator({
     <div
       className={`waiting-response generation-indicator${hasResponse ? " response-generating" : ""}`}
     >
-      <LissajousDrift active={active} />
+      {curve ? (
+        <MathCurveLoader curve={curve} active={active} />
+      ) : (
+        <LissajousDrift active={active} />
+      )}
       <span className="generation-copy" aria-hidden="true">
         <span
           key={selection.activityKey}

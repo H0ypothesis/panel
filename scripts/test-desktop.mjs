@@ -1,7 +1,14 @@
 import assert from "node:assert/strict";
-import { spawn, execFileSync } from "node:child_process";
+import { spawn, fork, execFileSync } from "node:child_process";
 import { once } from "node:events";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import {
+  mkdir,
+  mkdtemp,
+  readFile,
+  readdir,
+  rm,
+  writeFile,
+} from "node:fs/promises";
 import { createServer } from "node:net";
 import { createServer as createHttpServer } from "node:http";
 import { tmpdir } from "node:os";
@@ -87,7 +94,42 @@ try {
   await start();
   const initialUrl = url;
   assert.match(await (await fetch(url)).text(), /<div id="root">/);
+  const nativeCatalog = await api("/api/subagent-profiles");
+  assert.ok(
+    nativeCatalog.profiles.some(
+      (profile) =>
+        profile.name === "scout" &&
+        profile.source === "builtin" &&
+        profile.tools.includes("grep"),
+    ),
+    JSON.stringify(nativeCatalog),
+  );
   const models = await api("/api/models");
+  const roles = await api("/api/subagent-profiles");
+  assert.deepEqual(
+    roles.profiles
+      .filter((profile) => profile.source === "builtin")
+      .map((profile) => profile.name)
+      .sort(),
+    [
+      "delegate",
+      "evidence-auditor",
+      "oracle",
+      "researcher",
+      "reviewer",
+      "scout",
+      "worker",
+    ],
+  );
+  const roleFiles = await readdir(
+    join(app, "node_modules/pi-subagents/agents"),
+  );
+  assert.ok(
+    roleFiles.every(
+      (file) =>
+        !/^(claude-code|codex-exec|cursor-agent)(-writer)?\.md$/.test(file),
+    ),
+  );
   const capabilities = await api("/api/capabilities");
   assert.equal(capabilities.toolRequests, true);
   assert.equal(capabilities.longTasks, true);
@@ -208,9 +250,12 @@ try {
     ),
   );
   assert.ok(!JSON.stringify(configured).includes(testKey));
+  const project = join(directory, "project");
+  await mkdir(project);
   const created = await api("/api/workspaces", {
     title: "Mac 客户端验收",
     description: "独立运行时测试",
+    workingDirectory: project,
   });
   const workspace = created.state.workspaces.find(
     (item) => item.id === created.workspaceId,
@@ -261,6 +306,37 @@ try {
   // Exercise the bundled upstream engine with a local model fixture. This
   // catches SDK asset/import assumptions that source-runtime tests cannot.
   let childRequests = 0;
+  let extensionRequests = 0;
+  await mkdir(join(project, ".pi/agents"), { recursive: true });
+  const nativeExtension = join(project, "native-probe.ts");
+  await writeFile(
+    nativeExtension,
+    `import { Type } from "typebox";
+import { truncateHead } from "@earendil-works/pi-coding-agent";
+export default function(pi) {
+  pi.registerTool({ name: "native_desktop_probe", label: "Probe", description: truncateHead("Desktop native extension").content,
+    parameters: Type.Object({}), async execute() { return { content: [{ type: "text", text: "probe" }], details: {} }; } });
+}`,
+  );
+  await writeFile(
+    join(project, ".pi/agents/desktop-probe.md"),
+    `---
+name: desktop-probe
+description: Packaged extension test
+tools: native_desktop_probe
+extensions: ${nativeExtension}
+---
+Return a short answer.`,
+  );
+  const projectCatalog = await api(
+    `/api/subagent-profiles?workspaceId=${workspace.id}`,
+  );
+  assert.ok(
+    projectCatalog.profiles.some(
+      (profile) =>
+        profile.name === "desktop-probe" && profile.source === "project",
+    ),
+  );
   modelService = createHttpServer(async (request, response) => {
     assert.equal(request.url, "/v1/chat/completions");
     const chunks = [];
@@ -272,6 +348,10 @@ try {
     const delegate =
       isParent && !body.messages.some((message) => message.role === "tool");
     if (!isParent) childRequests++;
+    if (
+      body.tools?.some((tool) => tool.function.name === "native_desktop_probe")
+    )
+      extensionRequests++;
     const delta = delegate
       ? {
           role: "assistant",
@@ -284,8 +364,8 @@ try {
                 name: "subagent",
                 arguments: JSON.stringify({
                   tasks: [
-                    { agent: "scout", task: "local fixture one" },
-                    { agent: "reviewer", task: "local fixture two" },
+                    { agent: "oracle", task: "local fixture one" },
+                    { agent: "desktop-probe", task: "local fixture two" },
                   ],
                 }),
               },
@@ -336,10 +416,26 @@ try {
       .nodes.at(-1);
     if (subagentTurn.status === "failed") throw new Error(subagentTurn.error);
     if (subagentTurn.status === "completed") break;
+    // The native orchestration boundary can create artifacts and worktrees,
+    // so the desktop fixture must approve it just like the real UI.
+    for (const call of subagentTurn.toolCalls ?? [])
+      if (call.status === "awaiting_approval")
+        await api(
+          `/api/workspaces/${workspace.id}/nodes/${subagentTurn.id}/approvals/${call.id}`,
+          {
+            decision: "approve",
+            expectedRevision: subagentTurn.revision ?? 0,
+          },
+        );
     await delay(100);
   }
   assert.equal(subagentTurn.status, "completed", JSON.stringify(subagentTurn));
-  assert.equal(childRequests, 2);
+  assert.equal(childRequests, 2, JSON.stringify(subagentTurn.subagents));
+  assert.equal(
+    extensionRequests,
+    1,
+    "project extension must load with the bundled SDK and Pi dependencies",
+  );
   assert.equal(subagentTurn.subagentsEnabled, true);
   assert.equal(subagentTurn.subagents.length, 2);
   assert.ok(
@@ -436,6 +532,64 @@ try {
   );
   console.log(
     "PASS: bundled TS loader, web search/extraction engines, PDF runtime load without source checkout",
+  );
+  const researchDirectory = join(directory, "research-worker");
+  await mkdir(researchDirectory);
+  await writeFile(
+    join(researchDirectory, "web-search.json"),
+    JSON.stringify({
+      workflow: "none",
+      provider: "exa",
+      webSearch: { allowedProviders: ["exa"] },
+      toolActivation: "eager",
+      autoOpenBrowser: false,
+      allowBrowserCookies: false,
+      fetch: { defaultMode: "readable", allowedModes: ["readable", "raw"] },
+    }),
+  );
+  const researchWorker = fork(join(app, "server/native-web-worker.mjs"), [], {
+    execPath: node,
+    execArgv: ["--import", loader],
+    cwd: researchDirectory,
+    env: {
+      PATH: process.env.PATH,
+      HOME: researchDirectory,
+      TMPDIR: researchDirectory,
+      PI_CODING_AGENT_DIR: researchDirectory,
+    },
+    stdio: ["ignore", "pipe", "pipe", "ipc"],
+  });
+  let researchOutput = "";
+  researchWorker.stderr.on("data", (data) => (researchOutput += data));
+  const researchClosed = once(researchWorker, "close");
+  const researchTimeout = setTimeout(
+    () => researchWorker.kill("SIGKILL"),
+    20_000,
+  );
+  try {
+    const reply = await new Promise((resolve, reject) => {
+      researchWorker.once("message", resolve);
+      researchWorker.once("error", reject);
+      researchWorker.once("close", () =>
+        reject(new Error(`Research worker exited: ${researchOutput}`)),
+      );
+      researchWorker.send({
+        id: "native-cache-smoke",
+        request: {
+          name: "get_search_content",
+          args: { responseId: "missing-id" },
+        },
+      });
+    });
+    assert.equal(reply.id, "native-cache-smoke");
+    assert.equal(reply.error, "Not found", JSON.stringify(reply));
+  } finally {
+    clearTimeout(researchTimeout);
+    researchWorker.kill("SIGKILL");
+    await researchClosed;
+  }
+  console.log(
+    "PASS: bundled native research worker initializes all web tools and its isolated cache",
   );
   await start({ PANEL_DESKTOP_PARENT_PID: "2147483646" });
   const exited = once(child, "close");

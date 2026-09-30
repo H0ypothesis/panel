@@ -73,7 +73,8 @@ import { applyStatePatch, reconcileAppState } from "./state-sync";
 import type { AppStatePatch } from "../shared/state-events";
 import { ResizableWorkspace } from "./ResizableWorkspace";
 import { ToolActivity } from "./CodingControls";
-import { hasSubagents, SubagentsPanel } from "./Subagents";
+import { PendingApprovals, type PendingApproval } from "./PendingApprovals";
+import { agentRuns, hasSubagents, SubagentsPanel } from "./Subagents";
 import { GenerationIndicator } from "./GenerationIndicator";
 import { AssistantResponse } from "./AssistantResponse";
 import "./assistant-response.css";
@@ -118,6 +119,9 @@ import { BrandHint } from "./BrandHint";
 import { DeleteWorkspaceDialog } from "./DeleteWorkspaceDialog";
 import { NewWorkspace } from "./NewWorkspace";
 import { ProviderSettingsDialog } from "./ProviderSettingsDialog";
+import { SubagentSettings } from "./SubagentSettings";
+import { RunInputComposer, RunInputHistory } from "./RunInputs";
+import type { RunInput, RunInputMode } from "../shared/types";
 import { getDesktopBridge, onDesktopAction } from "./desktop";
 import { DesktopUpdate } from "./DesktopUpdate";
 import {
@@ -219,6 +223,7 @@ export function App() {
         config?: RunConfig;
         requestId: string;
         contextMode?: "raw";
+        runInputMode?: RunInputMode;
       }
     >
   >({});
@@ -489,6 +494,8 @@ export function App() {
   const parent =
     selected && workspace?.nodes.find((node) => node.id === selected.parentId);
   const canBranch = canBranchFrom(selected);
+  const liveInput =
+    selected?.status === "running" || selected?.status === "queued";
   const canRetry =
     selected?.status === "failed" || selected?.status === "cancelled";
   const retryDisabledReason = !online
@@ -579,7 +586,7 @@ export function App() {
     ) ?? [];
   const composer = useCollapsibleComposer(
     `${draftKey}:${selected?.revision ?? 0}`,
-    Boolean(canBranch),
+    Boolean(canBranch || liveInput),
     inputRef,
   );
   const model = models.find((item) => item.id === config.model);
@@ -637,6 +644,9 @@ export function App() {
   const selectedSafetyReview = selected?.toolCalls?.some(
     (call) => call.status === "reviewing",
   );
+  const selectedMainToolCalls = (selected?.toolCalls ?? []).filter(
+    (call) => !call.subagentId,
+  );
 
   useEffect(() => {
     if (!selected) return;
@@ -688,14 +698,15 @@ export function App() {
     if (
       !approvalFocus ||
       selected?.id !== approvalFocus.nodeId ||
-      tab !== "conversation"
+      (tab !== "conversation" && tab !== "subagents")
     )
       return;
     const frame = requestAnimationFrame(() => {
-      const container = detailRef.current;
-      const call = container?.querySelector<HTMLElement>(
+      const call = detailRef.current?.querySelector<HTMLElement>(
         `[data-tool-call-id="${CSS.escape(approvalFocus.toolId)}"]`,
       );
+      const container =
+        call?.closest<HTMLElement>(".subagents-scroll") ?? detailRef.current;
       if (!container || !call) return;
       const activity = call.closest<HTMLDetailsElement>(
         ".tool-activity-disclosure",
@@ -1313,6 +1324,56 @@ export function App() {
 
   const send = async (event?: FormEvent) => {
     event?.preventDefault();
+    if (liveInput) {
+      if (
+        !workspace ||
+        !selected ||
+        selected.status !== "running" ||
+        !draft.trim() ||
+        submitting ||
+        submissionLock.current ||
+        !online
+      )
+        return;
+      const key = draftKey;
+      const requestId = drafts[key]?.requestId ?? crypto.randomUUID();
+      submissionLock.current = true;
+      setSubmitting(true);
+      try {
+        const result = await api<{ input: RunInput; state: AppState }>(
+          `/workspaces/${workspace.id}/nodes/${selected.id}/inputs`,
+          {
+            text: draft,
+            mode: drafts[key]?.runInputMode ?? "steer",
+            requestId,
+            expectedRevision: selected.revision ?? 0,
+          },
+        );
+        apply(result.state);
+        if (result.input.status === "cancelled")
+          throw new Error(
+            "本轮已结束，消息未送达。草稿已保留，可在新分支继续。",
+          );
+        setDrafts((current) =>
+          current[key]?.requestId === requestId
+            ? {
+                ...current,
+                [key]: {
+                  ...current[key],
+                  text: "",
+                  requestId: crypto.randomUUID(),
+                },
+              }
+            : current,
+        );
+      } catch (reason) {
+        fail(reason);
+      } finally {
+        submissionLock.current = false;
+        setSubmitting(false);
+      }
+      return;
+    }
     if (
       !workspace ||
       !selected ||
@@ -1682,17 +1743,24 @@ export function App() {
     }
   };
 
+  const decidePendingApproval = async (
+    { workspace: owner, node, call }: PendingApproval,
+    decision: ToolApprovalDecision,
+  ) => {
+    apply(
+      await api<AppState>(
+        `/workspaces/${owner.id}/nodes/${node.id}/approvals/${encodeURIComponent(call.id)}`,
+        { decision, expectedRevision: node.revision ?? 0 },
+      ),
+    );
+  };
   const decideApproval = async (
     toolId: string,
     decision: ToolApprovalDecision,
   ) => {
-    if (!workspace || !selected) return;
-    apply(
-      await api<AppState>(
-        `/workspaces/${workspace.id}/nodes/${selected.id}/approvals/${encodeURIComponent(toolId)}`,
-        { decision, expectedRevision: selected.revision ?? 0 },
-      ),
-    );
+    const call = selected?.toolCalls?.find((item) => item.id === toolId);
+    if (!workspace || !selected || !call) return;
+    await decidePendingApproval({ workspace, node: selected, call }, decision);
   };
 
   const updatePositions = useCallback(
@@ -1782,6 +1850,7 @@ export function App() {
           />
         ) : modal === "settings" ? (
           <Settings
+            workspaceId={workspace?.id}
             models={models}
             webCapabilities={webCapabilities}
             onModelsChange={setModels}
@@ -1967,7 +2036,10 @@ export function App() {
         </div>
         <div className="powered">
           <span className="pi-mark">π</span> Powered by Pi
-          <span className="app-version">v{appVersion.replace(/\.0$/, "")}<DesktopUpdate /></span>
+          <span className="app-version">
+            v{appVersion.replace(/\.0$/, "")}
+            <DesktopUpdate />
+          </span>
         </div>
       </aside>
 
@@ -2167,38 +2239,24 @@ export function App() {
             safetyModelRequired={safetyModelRequired}
           />
         </div>
-        {pendingApprovals.length > 0 && (
-          <div className="pending-approvals" aria-label="待审批操作">
-            <span>
-              <ShieldQuestion size={14} />
-              {pendingApprovals.length} 项操作等待批准
-            </span>
-            <div>
-              {pendingApprovals.map(({ workspace: item, node, call }) => (
-                <button
-                  type="button"
-                  key={`${node.id}:${call.id}`}
-                  title={`${item.title} · ${node.prompt}`}
-                  onClick={() => {
-                    setWorkspaceId(item.id);
-                    locate(node.id);
-                    setApprovalFocus((current) => ({
-                      nodeId: node.id,
-                      toolId: call.id,
-                      version: (current?.version ?? 0) + 1,
-                    }));
-                  }}
-                >
-                  <span>
-                    {item.id !== workspace.id ? `${item.title} · ` : ""}
-                    {node.prompt}
-                  </span>
-                  <ArrowUpRight size={12} />
-                </button>
-              ))}
-            </div>
-          </div>
-        )}
+        <PendingApprovals
+          items={pendingApprovals}
+          batchApprovalAvailable={webCapabilities?.toolBatchApproval === true}
+          onDecision={decidePendingApproval}
+          onLocate={({ workspace: item, node, call }) => {
+            setWorkspaceId(item.id);
+            locate(node.id);
+            if (call.subagentId) {
+              setSelectedSubagentId(call.subagentId);
+              setTab("subagents");
+            }
+            setApprovalFocus((current) => ({
+              nodeId: node.id,
+              toolId: call.id,
+              version: (current?.version ?? 0) + 1,
+            }));
+          }}
+        />
         <ResizableWorkspace>
           <section className="canvas-section" aria-label="非线性对话画布">
             <Graph
@@ -2348,17 +2406,17 @@ export function App() {
                   onClick={() => setTab("subagents")}
                 >
                   <Network size={13} />
-                  Subagents<span>{selected.subagents?.length ?? 0}</span>
+                  Subagents<span>{agentRuns(selected.subagents).length}</span>
                 </button>
               )}
             </div>
             <div
               key={contextScope}
-              className="inspector-content"
+              className={`inspector-content${tab === "subagents" ? " has-subagents-panel" : ""}`}
               ref={detailRef}
               tabIndex={0}
               aria-label="对话输出与上下文"
-              {...composer.readingHandlers}
+              {...(tab === "subagents" ? {} : composer.readingHandlers)}
             >
               <div hidden={tab !== "conversation"}>
                 <div className="question-label">
@@ -2465,11 +2523,12 @@ export function App() {
                         status={selected.status}
                         toolRequests={selected.toolRequests}
                         toolCalls={selected.toolCalls}
+                        subagentsEnabled={selected.subagentsEnabled}
                       />
                     </div>
-                    {!!selected.toolCalls?.length && (
+                    {selectedMainToolCalls.length > 0 && (
                       <ToolActivity
-                        calls={selected.toolCalls}
+                        calls={selectedMainToolCalls}
                         workingDirectory={selected.execution?.workingDirectory}
                         onDecision={decideApproval}
                         batchApprovalAvailable={
@@ -2477,6 +2536,7 @@ export function App() {
                         }
                       />
                     )}
+                    <RunInputHistory inputs={selected.runInputs} />
                     <AssistantResponse
                       response={selected.response}
                       thinking={selected.thinking}
@@ -2590,10 +2650,32 @@ export function App() {
               </div>
               {tab === "subagents" && (
                 <SubagentsPanel
+                  key={contextScope}
                   node={selected}
                   selectedId={selectedSubagentId}
                   onSelect={setSelectedSubagentId}
                   onDecision={decideApproval}
+                  onCommand={async (input) => {
+                    const { tool, ...args } = input;
+                    const data = await api<{
+                      result: unknown;
+                      state: AppState;
+                    }>(
+                      `/workspaces/${workspace.id}/nodes/${selected.id}/subagents`,
+                      {
+                        expectedRevision: selected.revision ?? 0,
+                        input: args,
+                        tool,
+                      },
+                    );
+                    return data.result;
+                  }}
+                  onAnswer={(id, answer) =>
+                    api(
+                      `/workspaces/${workspace.id}/nodes/${selected.id}/subagents/answers/${encodeURIComponent(id)}`,
+                      { expectedRevision: selected.revision ?? 0, answer },
+                    )
+                  }
                   batchApprovalAvailable={
                     webCapabilities?.toolBatchApproval === true
                   }
@@ -2659,11 +2741,13 @@ export function App() {
                           onLocate={locate}
                         />
                         <ToolRequestList requests={node.toolRequests} />
+                        <RunInputHistory inputs={node.runInputs} />
                         <LongTaskBadge
                           config={node.config}
                           status={node.status}
                           toolRequests={node.toolRequests}
                           toolCalls={node.toolCalls}
+                          subagentsEnabled={node.subagentsEnabled}
                         />
                         {node.status === "root" ? (
                           <Markdown text={node.response || "没有额外背景。"} />
@@ -2688,11 +2772,12 @@ export function App() {
 
             <form
               ref={composer.composerRef}
+              hidden={tab === "subagents"}
               className={`composer${composer.collapsed ? " is-collapsed" : ""}`}
               onSubmit={send}
             >
               <div className="branch-from">
-                {canBranch ? (
+                {canBranch || liveInput ? (
                   <button
                     ref={composer.toggleRef}
                     type="button"
@@ -2700,7 +2785,13 @@ export function App() {
                     aria-expanded={!composer.collapsed}
                     aria-controls="composer-content"
                     aria-label={
-                      composer.collapsed ? "展开分支输入框" : "收起分支输入框"
+                      liveInput
+                        ? composer.collapsed
+                          ? "展开任务输入框"
+                          : "收起任务输入框"
+                        : composer.collapsed
+                          ? "展开分支输入框"
+                          : "收起分支输入框"
                     }
                     title={
                       composer.collapsed
@@ -2716,8 +2807,12 @@ export function App() {
                       {composer.collapsed
                         ? draft
                           ? "继续输入 · 草稿已保留"
-                          : "点击输入，探索新分支"
-                        : "从这里，探索新分支"}
+                          : liveInput
+                            ? "点击输入，补充任务要求"
+                            : "点击输入，探索新分支"
+                        : liveInput
+                          ? "继续引导当前任务"
+                          : "从这里，探索新分支"}
                     </span>
                     <ChevronDown
                       size={13}
@@ -2757,7 +2852,29 @@ export function App() {
                 onTransitionEnd={composer.onTransitionEnd}
               >
                 <div className="composer-content-inner">
-                  {canBranch ? (
+                  {liveInput ? (
+                    <RunInputComposer
+                      value={draft}
+                      mode={drafts[draftKey]?.runInputMode ?? "steer"}
+                      inputRef={inputRef}
+                      onChange={setDraft}
+                      onModeChange={(mode) =>
+                        setDrafts((current) => ({
+                          ...current,
+                          [draftKey]: {
+                            ...current[draftKey],
+                            text: current[draftKey]?.text ?? "",
+                            runInputMode: mode,
+                            requestId: crypto.randomUUID(),
+                          },
+                        }))
+                      }
+                      onSend={() => void send()}
+                      pending={submitting}
+                      disabled={!online}
+                      queued={selected.status === "queued"}
+                    />
+                  ) : canBranch ? (
                     <>
                       {canRetry && (
                         <p className="composer-continuation-note">
@@ -3139,10 +3256,12 @@ export function App() {
 }
 
 function Settings({
+  workspaceId,
   models,
   webCapabilities,
   onModelsChange,
 }: {
+  workspaceId?: string;
   models: ModelOption[];
   webCapabilities: WebCapabilities | null;
   onModelsChange: (models: ModelOption[]) => void;
@@ -3163,7 +3282,7 @@ function Settings({
       <div className="modal-illustration">
         <Settings2 size={25} />
       </div>
-      <h2>模型与联网工具</h2>
+      <h2>模型、工具与子代理</h2>
       <p className="modal-intro">
         由 Pi 统一驱动。每一轮对话，都可以有自己的模型。
       </p>
@@ -3237,6 +3356,7 @@ function Settings({
         <p>密钥只由本地服务读取，不会保存到浏览器或随探索导出。</p>
         {desktop && <DesktopSettingsActions />}
       </div>
+      <SubagentSettings workspaceId={workspaceId} />
       <section className="web-settings" aria-label="联网工具连接状态">
         <h3>联网工具</h3>
         <p>真实模型可使用，无需选择本地项目。</p>
@@ -3321,8 +3441,8 @@ function Settings({
         </div>
       </section>
       <div className="settings-note">
-        <span className="tiny-green-dot" /> 当前工作台运行在本机 · 同时支持 3
-        个运行任务
+        <span className="tiny-green-dot" /> 当前工作台运行在本机 ·
+        多张卡片可独立运行
       </div>
       {editingProvider && (
         <ProviderSettingsDialog

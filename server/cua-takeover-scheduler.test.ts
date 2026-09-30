@@ -211,6 +211,37 @@ test("disabled takeover and noneligible operations retain ordinary model reviews
   );
 });
 
+test("tool reviews include delivered user guidance but never grant pending input", async (t) => {
+  const f = await fixture(t);
+  const run = await f.start(false);
+  run.node.runInputs = [
+    {
+      id: "delivered",
+      text: "用户已接收的调整",
+      mode: "steer",
+      status: "delivered",
+      createdAt: 1,
+      deliveredAt: 2,
+    },
+    {
+      id: "pending",
+      text: "尚未送达的要求",
+      mode: "followUp",
+      status: "queued",
+      createdAt: 3,
+    },
+  ];
+  let userRequest = "";
+  f.setReview(async (request) => {
+    userRequest = request.userRequest;
+    return { decision: "approve", reason: "fixture" };
+  });
+  await run.execution.beforeToolCall(call());
+  assert.match(userRequest, /Inspect this application/);
+  assert.match(userRequest, /用户已接收的调整/);
+  assert.doesNotMatch(userRequest, /尚未送达的要求/);
+});
+
 test("takeover is isolated between simultaneous cards", async (t) => {
   const f = await fixture(t);
   const first = await f.start();

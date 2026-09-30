@@ -1,0 +1,114 @@
+.subagent-settings form {
+  font-size: 11px;
+  color: var(--text-muted);
+}
+.subagent-settings label {
+  display: block;
+  margin-bottom: 8px;
+  color: var(--text-heading);
+}
+.subagent-settings-controls {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.subagent-settings input {
+  width: 72px;
+  padding: 7px 9px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: var(--surface);
+  color: var(--text-heading);
+  font: inherit;
+}
+.subagent-settings button {
+  padding: 7px 10px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: transparent;
+  color: var(--text-heading);
+  font: inherit;
+  cursor: pointer;
+}
+.subagent-settings button:hover:not(:disabled) {
+  background: var(--surface-hover);
+}
+.subagent-settings :is(input, select, button):disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+.subagent-settings-hint {
+  line-height: 1.7;
+}
+.subagent-settings [role="alert"] {
+  color: var(--red, #b44949);
+}
+.subagent-catalog {
+  margin-top: 20px;
+  border-top: 1px solid var(--line);
+  padding-top: 12px;
+  font-size: 11px;
+  line-height: 1.7;
+  color: var(--text-muted);
+}
+.subagent-catalog-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+.subagent-catalog h4 {
+  margin: 0;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text-heading);
+}
+.subagent-catalog p {
+  margin: 6px 0 12px;
+  font-size: 10px;
+  overflow-wrap: anywhere;
+}
+.subagent-catalog details {
+  border-top: 1px solid var(--line);
+  padding: 10px 0;
+}
+.subagent-catalog summary {
+  display: flex;
+  justify-content: space-between;
+  cursor: pointer;
+  gap: 12px;
+}
+.subagent-catalog summary span {
+  color: var(--text-muted);
+  font-size: 10px;
+}
+.subagent-catalog dl {
+  display: grid;
+  grid-template-columns: 85px minmax(0, 1fr);
+  gap: 6px 10px;
+  font-size: 11px;
+}
+.subagent-catalog dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+  color: var(--text-body);
+}
+.subagent-profile {
+  padding: 12px 0;
+  overflow-wrap: anywhere;
+  font-size: 12px;
+}
+.subagent-catalog summary::before {
+  content: "›";
+  width: 10px;
+  flex: 0 0 10px;
+}
+.subagent-catalog details[open] > summary::before {
+  transform: rotate(90deg);
+}
+.subagent-catalog summary strong {
+  flex: 1;
+  font-weight: 500;
+  color: var(--text-heading);
+}

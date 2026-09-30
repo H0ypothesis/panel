@@ -25,16 +25,23 @@ export function configForModel(
   };
 }
 
-/** Only a current, dispatched computer tool can establish the automatic state. */
+/** Explicit selection or authorized capability dispatch enables long execution. */
 export function automaticLongTask(
   requests?: ToolRequest[],
   calls?: ToolCall[],
+  subagentsEnabled = false,
 ): boolean {
   return Boolean(
-    requests?.includes("computer_use") ||
+    subagentsEnabled ||
+      requests?.some((tool) => ["computer_use", "subagents"].includes(tool)) ||
       calls?.some(
         (call) =>
-          ["computer_use_tools", "computer_use_call"].includes(call.name) &&
+          [
+            "computer_use_tools",
+            "computer_use_call",
+            "subagents_enable",
+            "subagent",
+          ].includes(call.name) &&
           typeof call.authorization?.consumedAt === "number",
       ),
   );

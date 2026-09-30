@@ -3333,6 +3333,8 @@ button {
   color: var(--warning);
 }
 .pending-approvals {
+  position: relative;
+  z-index: 20;
   display: flex;
   flex-shrink: 0;
   align-items: center;
@@ -3349,27 +3351,77 @@ button {
   gap: 6px;
   flex-shrink: 0;
 }
-.pending-approvals > div {
+.pending-approval-list {
   display: flex;
   align-items: center;
   gap: 6px;
   overflow: auto;
   min-width: 0;
 }
-.pending-approvals button {
+.pending-approval-trigger {
   display: flex;
   align-items: center;
   flex-shrink: 0;
   gap: 5px;
-  max-width: 220px;
+  max-width: 340px;
   padding: 5px 7px;
   border-radius: 4px;
   background: var(--warning-hover);
 }
-.pending-approvals button > span {
+.pending-approval-trigger > b {
+  flex-shrink: 0;
+  font-weight: 500;
+}
+.pending-approval-trigger > span {
   overflow: hidden;
   white-space: nowrap;
   text-overflow: ellipsis;
+}
+.pending-approval-panel {
+  position: fixed;
+  right: 20px;
+  width: min(520px, calc(100vw - 40px));
+  overflow: auto;
+  overscroll-behavior: contain;
+  padding: 16px;
+  border: 1px solid var(--line-strong);
+  border-radius: 10px;
+  background: var(--surface);
+  color: var(--text-body);
+  box-shadow: 0 12px 40px #0002;
+}
+.pending-approval-panel:focus-visible {
+  outline: 2px solid var(--warning-border);
+  outline-offset: 2px;
+}
+.pending-approval-heading {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  font-size: 12px;
+}
+.pending-approval-heading button {
+  display: grid;
+  place-items: center;
+  padding: 5px;
+  border-radius: 4px;
+}
+.pending-approval-context,
+.pending-approval-directory {
+  color: var(--text-muted);
+  line-height: 1.6;
+  overflow-wrap: anywhere;
+  margin: 8px 0 12px;
+  max-height: 64px;
+  overflow: auto;
+}
+.pending-approval-locate {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  margin-top: 12px;
+  color: var(--text-muted);
 }
 .coding-options {
   margin-top: 19px;
@@ -3940,7 +3992,8 @@ select optgroup {
 .tool-approve:hover {
   background: var(--primary-hover);
 }
-.pending-approvals button:hover {
+.pending-approval-trigger:hover,
+.pending-approval-trigger[aria-expanded="true"] {
   background: var(--warning-hover);
   box-shadow: inset 0 0 0 1px var(--warning-border);
 }

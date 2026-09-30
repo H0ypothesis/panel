@@ -3,7 +3,8 @@
   min-height: 24px;
 }
 
-.lissajous-drift {
+.lissajous-drift,
+.math-curve-loader {
   display: block;
   width: 24px;
   height: 24px;

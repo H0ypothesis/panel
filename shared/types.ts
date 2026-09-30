@@ -47,12 +47,18 @@ export interface SafetyReviewRequest {
   userRequest: string;
   ancestry: { prompt: string; response: string }[];
   recentTools?: {
+    subagentId?: string;
     name: string;
     arguments: Record<string, unknown>;
     status: string;
     output?: string;
   }[];
   tool: Pick<ToolCall, "id" | "name" | "arguments">;
+  /** Model-authored delegation context; never an additional user authorization. */
+  subagent?: Pick<
+    SubagentRun,
+    "id" | "agent" | "task" | "parentRunId" | "depth"
+  >;
   computerUseContext?: { scope?: ComputerUseScope; reason: string };
 }
 
@@ -73,6 +79,8 @@ export interface ToolCall {
   id: string;
   /** Child run that owns this tool; authorization still belongs to the card. */
   subagentId?: string;
+  /** Host-verified child cwd, including managed worktrees. */
+  workingDirectory?: string;
   name: string;
   arguments: Record<string, unknown>;
   status:
@@ -218,9 +226,31 @@ export interface ContextParent {
 /** Explicit capabilities selected for this turn through the @ menu. */
 export type ToolRequest = "web_search" | "computer_use" | "subagents";
 
+export type RunInputMode = "steer" | "followUp";
+
+/** A user message submitted to this card's current run. */
+export interface RunInput {
+  id: string;
+  text: string;
+  mode: RunInputMode;
+  status: "queued" | "delivered" | "cancelled";
+  createdAt: number;
+  deliveredAt?: number;
+}
+
 export interface SubagentRun {
   id: string;
-  agent: "scout" | "worker" | "reviewer";
+  nativeRunId?: string;
+  parentRunId?: string;
+  childIndex?: number;
+  depth?: number;
+  background?: boolean;
+  workingDirectory?: string;
+  sessionFile?: string;
+  asyncDirectory?: string;
+  agent: string;
+  profile?: import("./subagent-profiles.ts").SubagentProfile;
+  tools?: string[];
   task: string;
   model: string;
   status: "queued" | "running" | "completed" | "failed" | "cancelled";
@@ -243,10 +273,14 @@ export interface TurnNode {
   contextParents?: ContextParent[];
   prompt: string;
   attachments?: Attachment[];
+  runInputs?: RunInput[];
   contextReferences?: ContextReference[];
   toolRequests?: ToolRequest[];
   subagentsEnabled?: boolean;
+  subagentsNative?: boolean;
+  subagentSchedules?: boolean;
   subagents?: SubagentRun[];
+  subagentNotices?: { kind: string; value: unknown; createdAt: number }[];
   /** User-enabled computer-use takeover for this live run; never inherited. */
   computerUseTakeover?: boolean;
   /** Current live observation and user-selected task grant; cleared on restart. */
@@ -357,6 +391,7 @@ export interface ModelOption {
 }
 
 export interface WebCapabilities {
+  runInputs?: boolean;
   computerUseTaskControl?: boolean;
   /** Live per-card takeover for conservative computer-use operations. */
   computerUseTakeover?: boolean;

@@ -6,7 +6,7 @@ import { createApi } from "./api.ts";
 import { PiRuntime } from "./runtime.ts";
 import { Scheduler } from "./scheduler.ts";
 import { Store } from "./store.ts";
-import { waitForPiWebShutdown } from "./pi-web-access.ts";
+import { closeNativeWebSessions } from "./native-web-session.ts";
 
 try {
   loadEnvFile(process.env.PANEL_ENV_FILE);
@@ -29,10 +29,14 @@ if (readyFile && port === 0) {
 const store = new Store(resolve(process.env.PANEL_DATA_DIR ?? ".panel"));
 await store.init();
 const runtime = new PiRuntime();
+await runtime.initSubagentSettings(
+  resolve(process.env.PANEL_DATA_DIR ?? ".panel"),
+);
 await runtime.initProviderSettings(
   resolve(process.env.PANEL_DATA_DIR ?? ".panel"),
 );
 const scheduler = new Scheduler(store, runtime);
+await scheduler.restoreSubagentSchedules();
 const api = createApi(store, runtime, scheduler);
 const vite =
   process.env.NODE_ENV === "production"
@@ -141,7 +145,7 @@ const shutdown = async () => {
   await runtime.close();
   clearInterval(persistence);
   if (parentWatch) clearInterval(parentWatch);
-  await waitForPiWebShutdown();
+  await closeNativeWebSessions();
   await store.save().catch(() => {});
   await vite?.close();
   server.closeAllConnections();

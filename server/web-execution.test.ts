@@ -27,7 +27,7 @@ import type { PiWebResult } from "./pi-web-access.ts";
 const config: RunConfig = { model: "openai/web-test", thinking: "off" };
 const source = "https://example.com/article";
 const fetchCall = fauxAssistantMessage(
-  fauxToolCall("web_fetch", { url: source }, { id: "fetch-1" }),
+  fauxToolCall("fetch_content", { url: source }, { id: "fetch-1" }),
   { stopReason: "toolUse" },
 );
 async function until(check: () => boolean) {
@@ -84,7 +84,7 @@ async function fixture(
   faux.setResponses(responses);
   registry.setProvider(faux.provider);
   const options: WebToolOptions = {
-    async runPlugin(job, signal) {
+    async runNativePlugin(job, signal) {
       // This replaces only the Pi Web engine. Real tools, Pi hooks and
       // scheduler authorization/persistence still run in their normal order.
       signal?.throwIfAborted();
@@ -93,17 +93,18 @@ async function fixture(
         call?.authorization?.consumedAt,
         "no plugin execution before durable authorization",
       );
-      assert.equal(
-        call.name,
-        job.kind === "search" ? "web_search" : "web_fetch",
-      );
+      assert.equal(call.name, job.name);
       // Track logical requests without calling the external plugin or network.
       requests.push(
-        new URL(job.kind === "search" ? "https://mcp.exa.ai/mcp" : job.url),
+        new URL(
+          job.name === "web_search"
+            ? "https://mcp.exa.ai/mcp"
+            : String(job.args.url),
+        ),
       );
-      if (job.kind === "search") {
-        assert.equal(job.query, call.arguments.query);
-        assert.equal(job.count, call.arguments.count ?? 5);
+      if (job.name === "web_search") {
+        assert.equal(job.args.query, call.arguments.query);
+        assert.deepEqual(job.args, call.arguments);
         return (
           pluginResult ?? {
             text: "Example article\nSearch snippet",
@@ -111,11 +112,11 @@ async function fixture(
           }
         );
       }
-      assert.equal(job.url, call.arguments.url);
+      assert.equal(job.args.url, call.arguments.url);
       return (
         pluginResult ?? {
           text: "Verified webpage body",
-          sources: [{ title: "example.com", url: job.url }],
+          sources: [{ title: "example.com", url: String(job.args.url) }],
         }
       );
     },
@@ -214,7 +215,7 @@ test("automatic web search and fetch each require independent safety review in t
   assert.equal(node.status, "completed", node.error);
   assert.deepEqual(
     env.runtime.reviews.map((request) => request.tool.name),
-    ["web_search", "web_fetch"],
+    ["web_search", "fetch_content"],
   );
   assert.ok(
     env.runtime.reviews.every(
@@ -275,7 +276,7 @@ test("batch approval after a review timeout permits later searches but still ask
   assert.equal(env.requests.length, 2);
   assert.deepEqual(
     env.runtime.reviews.map((request) => request.tool.name),
-    ["web_search", "web_fetch"],
+    ["web_search", "fetch_content"],
   );
   await env.scheduler.approve(env.workspace.id, node.id, "fetch-1", "deny");
   await until(() => node.status === "completed" || node.status === "failed");
@@ -384,7 +385,9 @@ test("the temporary directory exposes local tools alongside web tools without a 
         tools.map((tool) => tool.name),
         [
           "web_search",
-          "web_fetch",
+          "fetch_content",
+          "get_search_content",
+          "source_check",
           "subagents_enable",
           "subagent",
           "read",

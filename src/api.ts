@@ -150,6 +150,25 @@ export async function api<T>(
   body?: unknown,
   method = "POST",
 ): Promise<T> {
+  if (
+    method === "POST" &&
+    /^\/workspaces\/[^/]+\/nodes\/[^/]+\/inputs$/.test(path)
+  ) {
+    let capabilities: { runInputs?: boolean };
+    try {
+      const response = await fetch("/api/capabilities", { cache: "no-store" });
+      if (!response.ok) throw new Error("Capability request failed");
+      capabilities = await response.json();
+    } catch {
+      throw new Error(
+        "无法确认当前后端支持运行中引导，请检查连接后重试。消息尚未发送。",
+      );
+    }
+    if (capabilities?.runInputs !== true)
+      throw new Error(
+        "当前后端尚不支持运行中引导，请更新并重启 Panel 服务或桌面应用后重试。消息尚未发送。",
+      );
+  }
   const usesMergedCheckpoint = !!(
     body &&
     typeof body === "object" &&
@@ -193,7 +212,9 @@ export async function api<T>(
       body.config.longTask === true) ||
       ("toolRequests" in body &&
         Array.isArray(body.toolRequests) &&
-        body.toolRequests.includes("computer_use")))
+        body.toolRequests.some((tool) =>
+          ["computer_use", "subagents"].includes(tool),
+        )))
   )
     await requireLongTasks();
   if (

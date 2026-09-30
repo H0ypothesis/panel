@@ -92,7 +92,10 @@ function fixture(t: TestContext, responses: FauxResponseStep[]) {
   const runtime = new PiRuntime(
     registry,
     {
-      runPlugin: async () => ({ text: "fixture web result", sources: [] }),
+      runNativePlugin: async () => ({
+        text: "fixture web result",
+        sources: [],
+      }),
     },
     new ComputerUse(driver),
   );
@@ -152,6 +155,7 @@ function fixture(t: TestContext, responses: FauxResponseStep[]) {
     run: (
       options: {
         longTask?: boolean;
+        subagentsEnabled?: boolean;
         requests?: ToolRequest[];
         history?: Message[];
         prompt?: string;
@@ -168,7 +172,7 @@ function fixture(t: TestContext, responses: FauxResponseStep[]) {
         options.prompt ?? "Complete the fixture steps",
         controller.signal,
         () => {},
-        environment,
+        { ...environment, subagentsEnabled: options.subagentsEnabled },
         {
           autoCompact: false,
           toolRequests: options.requests,
@@ -219,6 +223,75 @@ test("explicit current computer-use selection automatically enables long executi
     "computer_use_call",
   ]);
   assert.ok(f.driver.calls.includes("list_apps"));
+});
+
+test("explicit @subagents automatically continues beyond reply 40", async (t) => {
+  const f = fixture(t, [...webReplies(41), finished()]);
+  const result = await f.run({ longTask: false, requests: ["subagents"] });
+  assert.equal(f.faux.state.callCount, 42);
+  assert.equal(result.response, "finished all steps");
+  assert.equal(f.executed[0], "subagents_enable");
+  assert.equal(f.approvals.length, f.executed.length);
+});
+
+test("model-triggered subagents on reply 40 lift the limit before the stop check", async (t) => {
+  const f = fixture(t, [
+    ...webReplies(39),
+    toolReply("subagents_enable", {}),
+    ...webReplies(1),
+    finished(),
+  ]);
+  const result = await f.run({ longTask: false });
+  assert.equal(f.faux.state.callCount, 42);
+  assert.equal(result.response, "finished all steps");
+  assert.equal(f.executed[39], "subagents_enable");
+});
+
+test("same-card subagent continuation retains long mode without repeating delegation", async (t) => {
+  const f = fixture(t, [...webReplies(41), finished()]);
+  const result = await f.run({ subagentsEnabled: true });
+  assert.equal(f.faux.state.callCount, 42);
+  assert.equal(result.response, "finished all steps");
+  assert.ok(f.executed.every((name) => name === "web_search"));
+});
+
+for (const kind of ["denied", "malformed", "unregistered"] as const)
+  test(`${kind} automatic subagent calls do not lift the reply limit`, async (t) => {
+    const attempt =
+      kind === "malformed"
+        ? toolReply("subagent", { agent: "", task: "" })
+        : kind === "unregistered"
+          ? toolReply("subagent_unknown", {})
+          : toolReply("subagent", { action: "list" });
+    const f = fixture(t, [...webReplies(39), attempt, finished()]);
+    if (kind === "denied") f.deny("subagent");
+    await assert.rejects(f.run(), /40 次模型回复/);
+    assert.equal(f.faux.state.callCount, 40);
+    assert.equal(f.executed.length, 39);
+  });
+
+test("mentions and inherited subagent history do not enable a different card", async (t) => {
+  const f = fixture(t, [...webReplies(41), finished()]);
+  await assert.rejects(
+    f.run({
+      prompt: "Only mentioning subagents; do not delegate this task",
+      history: [
+        { role: "user", content: "old request", timestamp: 1 },
+        toolReply("subagent", { action: "list" }, "old-subagent-call"),
+        {
+          role: "toolResult",
+          toolCallId: "old-subagent-call",
+          toolName: "subagent",
+          content: [{ type: "text", text: "old delegation" }],
+          isError: false,
+          timestamp: 2,
+        },
+        finished(),
+      ],
+    }),
+    /40 次模型回复/,
+  );
+  assert.equal(f.faux.state.callCount, 40);
 });
 
 test("model-triggered CUA discovery on reply 40 lifts the limit before the stop check", async (t) => {
@@ -360,22 +433,19 @@ test("long tasks retain provider errors after reply 40", async (t) => {
   assert.equal(f.faux.state.callCount, 42);
 });
 
-for (const reason of ["error", "aborted", "length"] as const)
+for (const reason of ["error", "aborted"] as const)
   test(`reply 40 preserves ${reason} instead of reporting the turn limit`, async (t) => {
     const f = fixture(t, [
       ...webReplies(39),
       fauxAssistantMessage("partial reply", {
         stopReason: reason,
-        ...(reason === "length" ? {} : { errorMessage: `fixture ${reason}` }),
+        errorMessage: `fixture ${reason}`,
       }),
       finished(),
     ]);
     await assert.rejects(f.run(), (error: unknown) => {
       assert.ok(error instanceof Error);
-      assert.match(
-        error.message,
-        reason === "length" ? /输出限制/ : new RegExp(`fixture ${reason}`),
-      );
+      assert.match(error.message, new RegExp(`fixture ${reason}`));
       assert.doesNotMatch(error.message, /40 次模型回复/);
       return true;
     });

@@ -302,7 +302,9 @@ const toolLabels: Record<string, string> = {
   find: "查找文件",
   ls: "列出文件",
   web_search: "搜索网页",
-  web_fetch: "读取网页 / PDF",
+  fetch_content: "获取网页原文",
+  get_search_content: "读取研究缓存",
+  source_check: "收集来源证据",
 };
 const toolStatusLabels: Record<ToolCall["status"], string> = {
   reviewing: "安全审核中",
@@ -343,7 +345,33 @@ function sourceUrl(value: string) {
   }
 }
 
-function ToolCallCard({
+export function toolCallLabel(call: ToolCall) {
+  return isComputerUseCall(call)
+    ? computerUseLabel(call)
+    : (toolLabels[call.name] ?? call.name);
+}
+
+export function toolCallTarget(call: ToolCall) {
+  if (isComputerUseCall(call)) return computerUseTargetLabel(call);
+  const target =
+    call.arguments.path ??
+    call.arguments.command ??
+    call.arguments.query ??
+    call.arguments.url ??
+    call.arguments.claim ??
+    (Array.isArray(call.arguments.queries)
+      ? call.arguments.queries.join("；")
+      : undefined) ??
+    (Array.isArray(call.arguments.urls)
+      ? call.arguments.urls.join("；")
+      : undefined) ??
+    call.arguments.responseId ??
+    call.arguments.task ??
+    call.arguments.action;
+  return typeof target === "string" ? target : undefined;
+}
+
+export function ToolCallCard({
   call,
   onDecision,
   batchApprovalAvailable,
@@ -357,9 +385,7 @@ function ToolCallCard({
   const pending = call.status === "awaiting_approval";
   const reviewing = call.status === "reviewing";
   const computerUse = isComputerUseCall(call);
-  const label = computerUse
-    ? computerUseLabel(call)
-    : (toolLabels[call.name] ?? call.name);
+  const label = toolCallLabel(call);
   const allowsBatch = call.name !== "computer_use_call";
   const waitingFor = call.status === "running" ? call.waitingFor : undefined;
   const decide = async (decision: ToolApprovalDecision) => {
@@ -373,11 +399,7 @@ function ToolCallCard({
       setBusy(false);
     }
   };
-  const target =
-    call.arguments.path ??
-    call.arguments.command ??
-    call.arguments.query ??
-    call.arguments.url;
+  const target = computerUse ? undefined : toolCallTarget(call);
   const sources = (call.sources ?? []).flatMap((source) => {
     const url = sourceUrl(source.url);
     return url ? [{ title: source.title, url }] : [];
@@ -397,9 +419,9 @@ function ToolCallCard({
             <MousePointer2 size={14} />
           ) : call.name === "bash" ? (
             <Terminal size={14} />
-          ) : call.name === "web_search" ? (
+          ) : ["web_search", "source_check"].includes(call.name) ? (
             <Search size={14} />
-          ) : call.name === "web_fetch" ? (
+          ) : ["fetch_content", "get_search_content"].includes(call.name) ? (
             <Globe size={14} />
           ) : (
             <FileCode2 size={14} />
@@ -494,18 +516,27 @@ function ToolCallCard({
               ? `批准后将对${computerUseTargetLabel(call) ? `「${computerUseTargetLabel(call)}」` : "指定目标"}执行以上电脑操作，截图和界面内容会交给对话模型。`
               : call.name === "bash"
                 ? "批准后将在本机运行以上命令。"
-                : call.name === "web_search"
-                  ? "批准后将以上查询发送给 Exa，搜索结果会交给对话模型。"
-                  : call.name === "web_fetch"
-                    ? "批准后将访问以上公开网址，提取的网页或 PDF 文本会交给对话模型。"
-                    : call.name === "read"
-                      ? "批准后将读取以上文件并交给对话模型。"
-                      : "批准后将修改工作目录中的文件。"}
+                : call.name === "source_check"
+                  ? "批准后将以上论断和查询发送给 Exa，按参数获取来源原文并整理证据，结果交给对话模型核验。"
+                  : call.name === "get_search_content"
+                    ? "批准后将读取当前代理本轮已保存的联网内容，不发起新的网络请求。"
+                    : call.name === "web_search"
+                      ? "批准后将以上查询发送给 Exa，搜索结果会交给对话模型。"
+                      : call.name === "fetch_content"
+                        ? "批准后将访问以上公开网址，提取的网页或 PDF 文本会交给对话模型。"
+                        : call.name === "read"
+                          ? "批准后将读取以上文件并交给对话模型。"
+                          : "批准后将修改工作目录中的文件。"}
           </p>
           {allowsBatch && (
             <p className="tool-batch-hint">
-              批量同意后，此卡片本轮的「{label}
-              」将直接执行，其他工具仍按原规则审批。
+              批量同意后，此卡片本轮同一工作目录的「{label}
+              」将直接执行，包含主代理和子代理；其他工具仍按原规则审批。
+            </p>
+          )}
+          {call.subagentId && (
+            <p className="tool-batch-hint">
+              拒绝仅跳过这次调用，子代理会收到拒绝结果并继续处理任务。
             </p>
           )}
           <div>
@@ -516,7 +547,7 @@ function ToolCallCard({
               onClick={() => void decide("deny")}
             >
               <X size={13} />
-              拒绝
+              拒绝这次操作
             </button>
             <button
               type="button"

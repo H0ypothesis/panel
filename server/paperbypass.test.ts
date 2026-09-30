@@ -176,7 +176,14 @@ for (const { modelId, reply, contextWindow } of [
     assert.equal(request.headers["x-api-key"], undefined);
     assert.equal(request.body.model, modelId);
     assert.equal(request.body.stream, true);
-    assert.equal(request.body.max_tokens, 8192);
+    const window = runtime
+      .models()
+      .find((model) => model.id === configId)!.contextWindow;
+    assert.ok(Number(request.body.max_tokens) > window * 0.8);
+    assert.ok(
+      Number(request.body.max_tokens) < window,
+      "Pi reserves actual input and context safety headroom",
+    );
     assert.equal(request.body.thinking, undefined);
     assert.equal(request.body.reasoning_effort, undefined);
     assert.equal(JSON.stringify(request.body).includes(dummyKey), false);

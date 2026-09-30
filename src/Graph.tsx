@@ -365,6 +365,7 @@ const TurnCard = memo(function TurnCard({ data }: NodeProps<TurnGraphNode>) {
               status={turn.status}
               toolRequests={turn.toolRequests}
               toolCalls={turn.toolCalls}
+              subagentsEnabled={turn.subagentsEnabled}
               compact
             />
           </span>

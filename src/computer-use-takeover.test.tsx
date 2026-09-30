@@ -70,7 +70,7 @@ test("model-invoked CUA exposes takeover even without an explicit mention", () =
     assert.equal((html.match(/电脑控制/g) ?? []).length, 1);
     assert.match(html, /role="switch"/);
   }
-  for (const name of ["read", "web_fetch", "computer_use_unknown"]) {
+  for (const name of ["read", "fetch_content", "computer_use_unknown"]) {
     assert.equal(controls(node({ toolCalls: [call({ name })] })), "");
   }
   assert.equal(controls(node()), "");

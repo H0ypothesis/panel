@@ -1,7 +1,9 @@
 import assert from "node:assert/strict";
 import type { AgentToolResult } from "@earendil-works/pi-agent-core";
 import test from "node:test";
-import type { PiWebJob, PiWebResult, PiWebRunner } from "./pi-web-access.ts";
+import type { PiWebResult } from "./pi-web-access.ts";
+import type { NativeWebRunner } from "./native-web-session.ts";
+import type { NativeWebRequest } from "./native-web-contract.ts";
 import { createWebTools, webCapabilities } from "./web-tools.ts";
 
 const page: PiWebResult = {
@@ -9,15 +11,15 @@ const page: PiWebResult = {
   sources: [{ title: "Example article", url: "https://example.com/article" }],
 };
 
-function fixture(result: PiWebResult = page, run?: PiWebRunner) {
-  const jobs: PiWebJob[] = [];
+function fixture(result: PiWebResult = page, run?: NativeWebRunner) {
+  const jobs: NativeWebRequest[] = [];
   const tools = createWebTools({
-    async runPlugin(job, signal) {
+    async runNativePlugin(job, signal) {
       jobs.push(structuredClone(job));
       return run ? run(job, signal) : result;
     },
   });
-  const tool = (name = "web_fetch") => {
+  const tool = (name = "fetch_content") => {
     const found = tools.find((entry) => entry.name === name);
     assert.ok(found);
     return found;
@@ -40,7 +42,7 @@ test("Pi Web search and fetch remain available without provider credentials", ()
   try {
     assert.deepEqual(
       fixture().tools.map((tool) => tool.name),
-      ["web_search", "web_fetch"],
+      ["web_search", "fetch_content", "get_search_content", "source_check"],
     );
     const capabilities = webCapabilities();
     assert.equal(capabilities.webSearch, true);
@@ -64,16 +66,19 @@ test("search and PDF fetch forward the approved inputs to the correct plugin job
   });
   await tool("web_search").execute("filtered-search", {
     query: "recent papers",
-    count: 10,
-    freshness: "pw",
+    numResults: 10,
+    recencyFilter: "week",
   });
   const result = await tool().execute("pdf", {
     url: "https://example.com/paper.pdf",
   });
   assert.deepEqual(jobs, [
-    { kind: "search", query: "agentic papers", count: 5 },
-    { kind: "search", query: "recent papers", count: 10, freshness: "pw" },
-    { kind: "fetch", url: "https://example.com/paper.pdf" },
+    { name: "web_search", args: { query: "agentic papers" } },
+    {
+      name: "web_search",
+      args: { query: "recent papers", numResults: 10, recencyFilter: "week" },
+    },
+    { name: "fetch_content", args: { url: "https://example.com/paper.pdf" } },
   ]);
   assert.match(text(result), /外部来源/);
   assert.match(text(result), /不可信指令/);
@@ -91,13 +96,15 @@ test("invalid search inputs fail before entering the plugin", async () => {
     { query: "" },
     { query: "   " },
     { query: "q".repeat(2001) },
-    { query: "test", count: 0 },
-    { query: "test", count: 11 },
-    { query: "test", count: 1.5 },
-    { query: "test", count: NaN },
-    { query: "test", count: "5" },
-    { query: "test", freshness: "" },
-    { query: "test", freshness: "today" },
+    { query: "test", numResults: 0 },
+    { query: "test", numResults: 21 },
+    { query: "test", numResults: 1.5 },
+    { query: "test", numResults: NaN },
+    { query: "test", numResults: "5" },
+    { query: "test", recencyFilter: "" },
+    { query: "test", recencyFilter: "today" },
+    { query: "test", count: 5 },
+    { query: "test", freshness: "pw" },
   ])
     await assert.rejects(tool("web_search").execute("search", args));
   assert.equal(jobs.length, 0);
@@ -144,7 +151,7 @@ test("source metadata filters unsafe links and preserves complete valid URLs", a
   ]);
 });
 
-for (const name of ["web_search", "web_fetch"])
+for (const name of ["web_search", "fetch_content"])
   test(`${name} preserves full plugin output and sources without Panel truncation`, async () => {
     const body = `BEGIN_RESULT\n${"完整内容🙂".repeat(15_000)}\nEND_RESULT`;
     const { tool } = fixture({
