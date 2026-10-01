@@ -3,6 +3,21 @@
   "repository": "H0ypothesis/panel",
   "releases": [
     {
+      "tag_name": "v0.9",
+      "draft": false,
+      "prerelease": true,
+      "published_at": "2026-10-01T17:19:12Z",
+      "assets": [
+        {
+          "name": "Panel-mac-arm64.zip",
+          "state": "uploaded",
+          "size": 357818170,
+          "digest": "sha256:3fdd07aa7dc5aa2e5bf30f2b7425a04c1fda479f24f4f4edd34751308ef79c94",
+          "browser_download_url": "https://github.com/H0ypothesis/panel/releases/download/v0.9/Panel-mac-arm64.zip"
+        }
+      ]
+    },
+    {
       "tag_name": "v0.8",
       "draft": false,
       "prerelease": true,

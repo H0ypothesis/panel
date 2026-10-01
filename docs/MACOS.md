@@ -6,6 +6,8 @@ Panel 现在提供可本地运行的 macOS 应用。原生外壳使用 Swift、A
 
 客户端从与 Web 版相同的 `src/`、`server/` 和 `shared/` 构建，包含画布分支输入卡片、模型上下文容量和路径占用显示，以及文件更新的 Git 记录。Git 快照沿用 Web 版的本机 Git 依赖；应用内置 Node，不内置 Git。
 
+v0.9 包含系统编码沙盒、按目标授权的命令联网、沙盒初始化恢复、模型断线重连，以及子代理等待和超时状态改进。主代理和 Pi 子代理共用编码执行器；具体执行范围见 [编码沙盒](SANDBOX.md)。
+
 ## 首次使用
 
 1. 解压对应架构的 `Panel-mac-arm64.zip` 或 `Panel-mac-x64.zip`，打开其中的 `Panel.app`；也可先将应用移入「应用程序」文件夹。
@@ -123,25 +125,25 @@ release/build-info.json
 发布新版本并确认安装包已公开、可下载后，同步备用更新信息（标签替换为本次版本）：
 
 ```bash
-gh api repos/H0ypothesis/panel/releases/tags/v0.8 > build/published-release.json
+gh api repos/H0ypothesis/panel/releases/tags/v0.9 > build/published-release.json
 node scripts/update-release-feed.mjs build/published-release.json
 git add updates/macos.json
 git commit -m "chore: refresh public macOS update feed"
 git push origin main
 ```
 
-脚本只接受已发布的数字版本和带 GitHub SHA-256 摘要的本仓库安装包，保留最近 20 个版本；备用源的架构、版本、大小、下载地址与摘要验证和 API 来源相同。不要在安装包公开前更新此文件。v0.5 若因 API 限流无法自动升级，需要从 Release 手动下载一次当前版本 v0.8。
+脚本只接受已发布的数字版本和带 GitHub SHA-256 摘要的本仓库安装包，保留最近 20 个版本；备用源的架构、版本、大小、下载地址与摘要验证和 API 来源相同。不要在安装包公开前更新此文件。v0.5 若因 API 限流无法自动升级，需要从 Release 手动下载一次当前版本 v0.9。
 
 ## 验证记录与发布状态
 
-v0.8 实际验证使用 Apple Silicon `arm64`、独立 Node.js `24.19.0`，最低系统版本按 Node 二进制要求设为 macOS 13.5。已通过：
+v0.9 实际验证使用 Apple Silicon `arm64`、独立 Node.js `24.19.0`，最低系统版本按 Node 二进制要求设为 macOS 13.5。已通过：
 
 - `npm run check`：前后端 TypeScript 检查。
-- `node --import tsx --test --test-concurrency=4 server/*.test.ts`：769 项核心测试，包含运行中输入、原生子代理、工具审批、Git 快照与历史记录。
-- `npm run test:ui`、`npm run test:setup` 和 `npm run test:updater`：分别通过 128、12 和 16 项测试；与核心测试合计 925 项。
-- `npm run test:desktop`：独立运行时和前端资源、模型目录、Pi Demo 流式执行、幂等提交、SSE、导出接口、来源校验、持久化、端口复用与冲突回退、正常关闭、父进程退出清理，以及打包后的搜索、网页提取和 PDF 运行依赖加载。
+- `node --import tsx --test --test-concurrency=4 server/*.test.ts`：827 项核心测试，包含系统沙盒、初始化恢复、联网授权、连接重试、原生子代理、工具审批、Git 快照与历史记录。
+- `npm run test:ui`、`npm run test:setup` 和 `npm run test:updater`：分别通过 138、12 和 16 项测试；与核心测试合计 993 项。
+- `npm run test:desktop`：独立运行时和前端资源、模型目录、Pi Demo 流式执行、幂等提交、SSE、导出接口、来源校验、持久化、端口复用与冲突回退、正常关闭、父进程退出清理，以及打包后的搜索、网页提取、PDF 运行依赖加载、系统沙盒文件保护和初始化失败后的人工恢复。
 - 使用打包后的 Node 和应用资源运行 `scripts/test-native-host.mjs`：原生子代理后台执行与嵌套执行通过。
-- ZIP 完整性、所需运行时文件和深层代码签名验证通过；应用版本为 `0.8.0`，构建后源码未发生变化。
+- ZIP 完整性、所需运行时文件和深层代码签名验证通过；应用版本为 `0.9.0`，构建源码与发布提交一致，具体提交记录在 `build-info.json`。
 
 `test:desktop` 默认直接使用已构建 `Panel.app` 内的运行时，在隔离临时目录中测试，不继承实际模型密钥或使用现有探索数据；它不替代原生界面的交互验收。
 

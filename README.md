@@ -9,8 +9,8 @@
 
 <!-- 发布新版时同步更新安装包链接。 -->
 <p align="center">
-  <a href="https://github.com/H0ypothesis/panel/releases/download/v0.8/Panel-mac-arm64.zip">
-    <img src="docs/assets/download-macos.svg" width="304" height="80" alt="一键下载 Panel v0.8 · Apple Silicon · macOS 13.5 及以上">
+  <a href="https://github.com/H0ypothesis/panel/releases/download/v0.9/Panel-mac-arm64.zip">
+    <img src="docs/assets/download-macos.svg" width="304" height="80" alt="一键下载 Panel v0.9 · Apple Silicon · macOS 13.5 及以上">
   </a>
 </p>
 
@@ -52,13 +52,15 @@
 3. 使用真实模型时，打开左下角 **「模型连接」→「未配置」**，填写 **API URL、API Key、Model** 并保存，配置立即生效。
 4. 新建探索，写下主题与背景；点击卡片右侧的 **`+`** 开始提问，或选中历史节点继续分支。
 
-当前公开下载版本为 **v0.8**，安装包面向 **Apple Silicon（arm64），macOS 13.5 及以上**。这是采用本地 ad-hoc 签名的预览版，尚未完成 Apple 公证；Intel 版本暂未提供下载。安装与快捷键说明见 [macOS 客户端文档](docs/MACOS.md)。
+当前公开下载版本为 **v0.9**，安装包面向 **Apple Silicon（arm64），macOS 13.5 及以上**。这是采用本地 ad-hoc 签名的预览版，尚未完成 Apple 公证；Intel 版本暂未提供下载。安装与快捷键说明见 [macOS 客户端文档](docs/MACOS.md)。
 
 按住顶部空白区域可拖动窗口，双击可放大到可用桌面区域，再次双击恢复原尺寸。模型配置也可通过 `⌘,` 打开。
 
 **v0.5 起支持 App 内更新**：每天自动检查 GitHub Release，发现新版后在左下角版本号旁显示「有更新」。点击即可下载、校验、替换并重启，探索和 API 配置会保留；有运行任务时需先等待完成。也可使用「Panel → 检查更新…」手动检查。
 
-v0.8 支持在运行中的卡片追加消息，选择引导当前任务或完成后继续；完善原生子代理的角色、后台与嵌套执行、审批和完成后汇总。子代理设置页保留并发数和角色列表，隐藏后台与预算等高级选项。使用电脑控制或子代理时会自动开启长程模式。
+v0.9 新增系统编码沙盒，主代理和 Pi 子代理的命令写入限于当前项目及私有临时目录，联网目标单独审批；初始化异常可重试或人工批准单次宿主执行。模型临时断线最多自动重连 5 次，保留已完成工具结果，并改进子代理等待、超时、运行记录与审批界面。规则和边界见 [编码沙盒](docs/SANDBOX.md)。
+
+同时保留运行中追加消息、原生子代理后台与嵌套执行、审批和完成后汇总；使用电脑控制或子代理时会自动开启长程模式。
 
 ## 从源码运行
 
@@ -105,6 +107,7 @@ Panel 面向本地单用户使用，服务仅监听本机地址。探索记录�
 | [使用指南](docs/USAGE.md)            | 探索画布、分支融合、卡片引用、附件、上下文压缩与导入导出 |
 | [模型配置](docs/CONFIGURATION.md)    | API URL、密钥、模型与思考设置                            |
 | [工具与审批](docs/TOOLS.md)          | 本地编码、联网工具、审批与 Git 文件快照                  |
+| [编码沙盒](docs/SANDBOX.md)          | 文件保护、联网目标授权与初始化恢复                       |
 | [macOS 客户端](docs/MACOS.md)        | 安装、快捷键、数据目录与 App 打包                        |
 | [开发与运行](docs/DEVELOPMENT.md)    | 依赖安装、项目结构、构建与验证                           |
 | [产品需求](docs/PRD.md)              | 产品设计与功能边界                                       |
