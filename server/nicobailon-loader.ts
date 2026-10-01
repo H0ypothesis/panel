@@ -1,5 +1,6 @@
 import { registerHooks } from "node:module";
 import { existsSync } from "node:fs";
+import { adaptNicobailonSource } from "./nicobailon-source.mjs";
 
 let engine: Promise<typeof import("./nicobailon-engine.ts")> | undefined;
 
@@ -16,6 +17,23 @@ export function loadNicobailon() {
         ["@earendil-works/chord", "chord"],
       ]);
       registerHooks({
+        load(url, context, nextLoad) {
+          const result = nextLoad(url, context);
+          if (
+            url.endsWith("pi-subagents/src/runs/shared/single-output.js") &&
+            result.source
+          )
+            return {
+              ...result,
+              source: adaptNicobailonSource(
+                url,
+                typeof result.source === "string"
+                  ? result.source
+                  : new TextDecoder().decode(result.source),
+              ),
+            };
+          return result;
+        },
         resolve(specifier, context, nextResolve) {
           for (const [name, directory] of roots) {
             if (specifier !== name && !specifier.startsWith(`${name}/`))

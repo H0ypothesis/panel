@@ -18,7 +18,11 @@ export type RunStatus =
   | "cancelled";
 export type BranchColor = "sage" | "violet" | "blue" | "amber";
 export type ApprovalMode = "ask" | "auto";
-export type ToolApprovalDecision = "approve" | "approve_tool" | "deny";
+export type ToolApprovalDecision =
+  | "approve"
+  | "approve_tool"
+  | "deny"
+  | "retry_sandbox";
 
 export interface ComputerUseScope {
   /** Minted by the live adapter; never accepted from model arguments. */
@@ -45,14 +49,30 @@ export interface SafetyReviewRequest {
   workspaceTitle: string;
   workspaceDescription: string;
   userRequest: string;
-  ancestry: { prompt: string; response: string }[];
+  ancestry: {
+    prompt: string;
+    response: string;
+    toolDecisions?: SafetyReviewRequest["recentTools"];
+  }[];
   recentTools?: {
+    id?: string;
     subagentId?: string;
+    workingDirectory?: string;
     name: string;
     arguments: Record<string, unknown>;
     status: string;
     output?: string;
+    error?: string;
+    approval?: ToolCall["approval"];
+    safetyReview?: SafetyReview;
+    actionHash?: string;
+    startedAt?: number;
+    nodeId?: string;
+    revision?: number;
+    fromAncestor?: boolean;
   }[];
+  /** Earlier execution identities in this child's verified recovery chain. */
+  relatedSubagentIds?: string[];
   tool: Pick<ToolCall, "id" | "name" | "arguments">;
   /** Model-authored delegation context; never an additional user authorization. */
   subagent?: Pick<
@@ -77,6 +97,11 @@ export interface SafetyReview {
 
 export interface ToolCall {
   id: string;
+  /** Host-selected execution boundary, never accepted from model arguments. */
+  sandbox?: { policyVersion: string; workingDirectory: string };
+  /** Actual host execution is only set by the explicit recovery gate. */
+  executionMode?: "host";
+  stopReason?: "timeout";
   /** Child run that owns this tool; authorization still belongs to the card. */
   subagentId?: string;
   /** Host-verified child cwd, including managed worktrees. */
@@ -116,6 +141,7 @@ export interface ToolCall {
   approval?:
     | "auto"
     | "policy"
+    | "sandbox"
     | "safety_model"
     | "cua_takeover"
     | "approved"
@@ -136,6 +162,8 @@ export interface ToolCall {
     invalidationReason?: string;
   };
   startedAt: number;
+  /** Actual dispatch time; approval and resource-lock waits are excluded. */
+  executionStartedAt?: number;
   finishedAt?: number;
 }
 
@@ -215,6 +243,11 @@ export interface ThinkingContent {
   active: boolean;
 }
 
+export interface ConnectionRetry {
+  attempt: number;
+  maxAttempts: number;
+}
+
 /** One frozen branch input. Order is significant; the first input is parentId. */
 export interface ContextParent {
   nodeId: string;
@@ -240,6 +273,9 @@ export interface RunInput {
 
 export interface SubagentRun {
   id: string;
+  /** Previous execution, verified against the same persisted session file. */
+  resumedFrom?: string;
+  stopReason?: "timeout" | "user" | "interrupted" | "error";
   nativeRunId?: string;
   parentRunId?: string;
   childIndex?: number;
@@ -247,6 +283,7 @@ export interface SubagentRun {
   background?: boolean;
   workingDirectory?: string;
   sessionFile?: string;
+  outputPath?: string;
   asyncDirectory?: string;
   agent: string;
   profile?: import("./subagent-profiles.ts").SubagentProfile;
@@ -289,6 +326,8 @@ export interface TurnNode {
   response: string;
   thinking?: ThinkingContent;
   status: RunStatus;
+  /** Current automatic model reconnection; the card remains running. */
+  connectionRetry?: ConnectionRetry;
   config: RunConfig;
   color: BranchColor;
   position: { x: number; y: number };

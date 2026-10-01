@@ -8,7 +8,10 @@ import {
   type AssistantMessageEvent,
 } from "@earendil-works/pi-ai";
 import { createPanelChildSession } from "./subagent-session.ts";
-import { createPanelTools } from "./coding-tools.ts";
+import {
+  createPanelTools,
+  codingExecutionStartedNotice,
+} from "./coding-tools.ts";
 import { createWebTools } from "./web-tools.ts";
 import {
   callSubagentBridge,
@@ -189,6 +192,22 @@ export default function panelHostChildFactory(): ChildSessionFactory & {
         return task;
       };
       let session: Awaited<ReturnType<typeof createPanelChildSession>>;
+      const codingTools = createPanelTools(launch.cwd);
+      for (const tool of codingTools) {
+        tool.execute = (toolId, args, signal, onUpdate) =>
+          callSubagentBridge(
+            config.address,
+            "coding.execute",
+            { childId: id, callId: `${id}:${toolId}`, name: tool.name, args },
+            signal,
+            (event) =>
+              onUpdate?.(
+                (event as { type?: string }).type === "coding_execution_started"
+                  ? codingExecutionStartedNotice()
+                  : (event as Awaited<ReturnType<typeof tool.execute>>),
+              ),
+          );
+      }
       try {
         session = launch.machine
           ? await (await loadNicobailon()).createHerdrPiSession(launch)
@@ -196,7 +215,7 @@ export default function panelHostChildFactory(): ChildSessionFactory & {
               id,
               providers: bridgeProviders(config.address, bootstrap.models, id),
               tools: [
-                ...createPanelTools(launch.cwd),
+                ...codingTools,
                 ...web.map((tool) => ({
                   ...tool,
                   execute: (
@@ -271,6 +290,12 @@ export default function panelHostChildFactory(): ChildSessionFactory & {
               resultSources: (result) =>
                 (result as { details?: { sources?: ToolCall["sources"] } })
                   ?.details?.sources,
+              resolveResumeOutput: (runId, index) =>
+                callSubagentBridge<string | undefined>(
+                  config.address,
+                  "run.output",
+                  { runId, index },
+                ),
             });
       } catch (error) {
         await web.close();

@@ -19,9 +19,238 @@ import {
   fauxProvider,
   fauxToolCall,
   getCurrentTools,
+  getCurrentSystemPrompt,
 } from "@earendil-works/pi-ai";
 import { NativeSubagentHost } from "./subagent-host.ts";
 import type { SubagentRun } from "../shared/types.ts";
+import { subagentThreads } from "../shared/subagent-runs.ts";
+
+test(
+  "native tool deadlines exclude approval waits and recovery retains its workspace output",
+  { timeout: 60000 },
+  async () => {
+    const directory = await realpath(
+      await mkdtemp(join(tmpdir(), "panel-native-approval-time-")),
+    );
+    const cwd = join(directory, "project");
+    await mkdir(join(cwd, ".pi", "agents"), { recursive: true });
+    await writeFile(
+      join(cwd, ".pi", "agents", "reporter.md"),
+      "---\nname: reporter\ndescription: fixture\ntools: write\n---\nWrite the report.",
+    );
+    const registry = createModels();
+    const provider = fauxProvider({
+      provider: "deadline-test",
+      models: [{ id: "test" }],
+      tokensPerSecond: 1000000,
+    });
+    const paths: string[] = [];
+    const report = (context: any) => {
+      const text = context.messages
+        .filter((message: any) => message.role === "user")
+        .map((message: any) =>
+          typeof message.content === "string"
+            ? message.content
+            : message.content
+                .filter((part: any) => part.type === "text")
+                .map((part: any) => part.text)
+                .join("\n"),
+        )
+        .join("\n");
+      const path = [
+        ...text.matchAll(/Write your findings to exactly this path: ([^\n]+)/g),
+      ].at(-1)?.[1];
+      assert.ok(path, text);
+      paths.push(path);
+      return fauxAssistantMessage(
+        fauxToolCall(
+          "write",
+          { path, content: `report-${paths.length}` },
+          { id: `report-${paths.length}` },
+        ),
+        { stopReason: "toolUse" },
+      );
+    };
+    provider.setResponses([
+      report,
+      fauxAssistantMessage("first-finished"),
+      report,
+      fauxAssistantMessage("resumed-finished"),
+    ]);
+    registry.setProvider(provider.provider);
+    const records = new Map<string, SubagentRun>();
+    let waiting = false;
+    const host = new NativeSubagentHost({
+      directory,
+      owner: "deadline:0",
+      cwd,
+      model: "deadline-test/test",
+      thinking: "off",
+      concurrency: 2,
+      registry,
+      environment: {
+        workingDirectory: cwd,
+        beforeToolCall: async () => {
+          waiting = true;
+          await new Promise((resolve) => setTimeout(resolve, 180));
+          waiting = false;
+          return true;
+        },
+        executeTool: async (_call, execute) => {
+          assert.equal(waiting, false);
+          return execute();
+        },
+        onToolUpdate() {},
+        onSubagentUpdate: (run) => records.set(run.id, run),
+      },
+    });
+    try {
+      const result = await host.execute("subagent", {
+        agent: "reporter",
+        task: "Write a report",
+        output: "report.md",
+        async: false,
+        toolTimeoutMs: 80,
+      });
+      assert.equal(result.isError ?? false, false, JSON.stringify(result));
+      assert.ok(
+        paths[0].startsWith(join(cwd, ".pi", "subagents", "artifacts")),
+        paths[0],
+      );
+      assert.equal(await readFile(paths[0], "utf8"), "report-1");
+      const original = [...records.values()].find(
+        (run) => run.agent === "reporter",
+      )!;
+      assert.equal(original.status, "completed", JSON.stringify(original));
+      const revived = await host.execute("subagent", {
+        action: "resume",
+        id: original.nativeRunId,
+        message: "Continue and update the same report",
+        toolTimeoutMs: 80,
+      });
+      assert.equal(revived.isError ?? false, false, JSON.stringify(revived));
+      for (
+        let i = 0;
+        i < 200 &&
+        ![...records.values()].some(
+          (run) =>
+            run.resumedFrom === original.id && run.status === "completed",
+        );
+        i++
+      )
+        await new Promise((resolve) => setTimeout(resolve, 50));
+      const recovered = [...records.values()].find(
+        (run) => run.resumedFrom === original.id,
+      )!;
+      assert.ok(recovered, JSON.stringify([...records.values()]));
+      assert.equal(recovered.status, "completed", JSON.stringify(recovered));
+      assert.equal(recovered.sessionFile, original.sessionFile);
+      assert.equal(paths[1], paths[0]);
+      assert.equal(await readFile(paths[0], "utf8"), "report-2");
+      assert.equal(
+        subagentThreads(
+          [...records.values()].filter((run) => run.agent === "reporter"),
+        ).length,
+        1,
+      );
+    } finally {
+      await host.close();
+      await rm(directory, { recursive: true, force: true });
+    }
+  },
+);
+
+test(
+  "a granted native tool still times out and is shown as a failure rather than a user stop",
+  { timeout: 60000 },
+  async () => {
+    const directory = await realpath(
+      await mkdtemp(join(tmpdir(), "panel-native-execution-time-")),
+    );
+    const cwd = join(directory, "project");
+    await mkdir(join(cwd, ".pi", "agents"), { recursive: true });
+    const extension = join(cwd, "slow.js");
+    await writeFile(
+      extension,
+      `export default function(pi) { pi.registerTool({ name: "slow_probe", label: "Slow", description: "Slow fixture", parameters: {type:"object", properties:{}}, async execute() { await new Promise(resolve => setTimeout(resolve, 300)); return {content:[{type:"text",text:"settled"}],details:{}}; } }); }`,
+    );
+    await writeFile(
+      join(cwd, ".pi", "agents", "slow.md"),
+      `---\nname: slow\ndescription: fixture\ntools: slow_probe\nextensions: ${extension}\n---\nCall slow_probe.`,
+    );
+    const registry = createModels();
+    const provider = fauxProvider({
+      provider: "timeout-test",
+      models: [{ id: "test" }],
+      tokensPerSecond: 1000000,
+    });
+    provider.setResponses([
+      fauxAssistantMessage(fauxToolCall("slow_probe", {}), {
+        stopReason: "toolUse",
+      }),
+      fauxAssistantMessage("unexpected"),
+    ]);
+    registry.setProvider(provider.provider);
+    const records = new Map<string, SubagentRun>(),
+      updates: any[] = [],
+      toolUpdates: { id: string; update: any }[] = [];
+    const host = new NativeSubagentHost({
+      directory,
+      owner: "timeout:0",
+      cwd,
+      model: "timeout-test/test",
+      thinking: "off",
+      concurrency: 1,
+      registry,
+      environment: {
+        workingDirectory: cwd,
+        beforeToolCall: async () => {
+          await new Promise((resolve) => setTimeout(resolve, 180));
+          return true;
+        },
+        executeTool: async (_call, execute) => execute(),
+        onToolUpdate: (id, update) => toolUpdates.push({ id, update }),
+        onSubagentUpdate: (run) => records.set(run.id, run),
+      },
+    });
+    try {
+      let failure = "";
+      try {
+        const result = await host.execute(
+          "subagent",
+          {
+            agent: "slow",
+            task: "Call slow_probe",
+            output: false,
+            toolTimeoutMs: 80,
+            async: false,
+          },
+          undefined,
+          (update) => updates.push(update),
+        );
+        failure = JSON.stringify(result);
+      } catch (error) {
+        failure = String(error);
+      }
+      assert.match(failure, /exceeded its timeout/);
+      const child = [...host.records.values()].find(
+        (run) => run.agent === "slow",
+      )!;
+      assert.equal(child.status, "failed", JSON.stringify(child));
+      assert.equal(child.stopReason, "timeout", JSON.stringify(child));
+      assert.ok(
+        toolUpdates.some(
+          ({ update }) =>
+            update.status === "failed" && update.stopReason === "timeout",
+        ),
+        JSON.stringify(toolUpdates),
+      );
+    } finally {
+      await host.close();
+      await rm(directory, { recursive: true, force: true });
+    }
+  },
+);
 
 test(
   "native worktree children use their own directory for tools and approvals",
@@ -59,10 +288,27 @@ test(
       tokensPerSecond: 1000000,
     });
     provider.setResponses([
-      fauxAssistantMessage(
-        fauxToolCall("write", { path: "result.txt", content: "worktree-only" }),
-        { stopReason: "toolUse" },
-      ),
+      (context) => {
+        const output = getCurrentSystemPrompt(context.messages)?.match(
+          /Write your findings to exactly this path: ([^\n]+)/,
+        )?.[1];
+        assert.ok(output);
+        return fauxAssistantMessage(
+          [
+            fauxToolCall(
+              "write",
+              { path: "result.txt", content: "worktree-only" },
+              { id: "worktree-file" },
+            ),
+            fauxToolCall(
+              "write",
+              { path: output, content: "worktree-report" },
+              { id: "worktree-output" },
+            ),
+          ],
+          { stopReason: "toolUse" },
+        );
+      },
       fauxAssistantMessage("worktree-done"),
     ]);
     registry.setProvider(provider.provider);
@@ -86,7 +332,7 @@ test(
         },
         executeTool: async (call, execute) => {
           const result = await execute();
-          if (call.name === "write")
+          if (call.name === "write" && call.arguments.path === "result.txt")
             writtenContent = await readFile(
               join(call.workingDirectory!, "result.txt"),
               "utf8",
@@ -105,14 +351,20 @@ test(
         task: "Write result.txt",
         isolation: "worktree",
         async: false,
-        output: false,
+        output: "report.md",
       });
-      assert.match(JSON.stringify(result), /worktree-done/);
+      assert.match(JSON.stringify(result), /worktree-report/);
       const run = [...records.values()].find(
         (run) => run.agent === "write-test",
       )!;
       assert.ok(run.workingDirectory && run.workingDirectory !== cwd);
       assert.equal(approved[0].workingDirectory, run.workingDirectory);
+      assert.ok(
+        run.outputPath?.startsWith(
+          join(run.workingDirectory!, ".pi", "subagents", "artifacts"),
+        ),
+        run.outputPath,
+      );
       assert.ok(
         updates.some((update) => update.status === "completed"),
         JSON.stringify(updates),
@@ -123,6 +375,81 @@ test(
       await assert.rejects(readFile(join(cwd, "result.txt")), {
         code: "ENOENT",
       });
+    } finally {
+      await host.close();
+      await rm(directory, { recursive: true, force: true });
+    }
+  },
+);
+
+test(
+  "native child bash executes through the parent sandbox and blocks writes outside its workspace",
+  { timeout: 60000 },
+  async () => {
+    const directory = await realpath(
+      await mkdtemp(join(tmpdir(), "panel-child-sandbox-")),
+    );
+    const cwd = join(directory, "project");
+    await mkdir(join(cwd, ".pi/agents"), { recursive: true });
+    await writeFile(
+      join(cwd, ".pi/agents/sandbox-child.md"),
+      "---\nname: sandbox-child\ndescription: fixture\ntools: bash\n---\nRun the command.",
+    );
+    const outside = join(directory, "outside.txt");
+    await writeFile(outside, "original");
+    const quote = (value: string) => `'${value.replaceAll("'", "'\\''")}'`;
+    const registry = createModels();
+    const provider = fauxProvider({
+      provider: "child-sandbox",
+      models: [{ id: "test" }],
+      tokensPerSecond: 1000000,
+    });
+    provider.setResponses([
+      fauxAssistantMessage(
+        fauxToolCall("bash", {
+          command: `printf inside > result.txt; if printf escaped > ${quote(outside)}; then exit 99; fi`,
+        }),
+        { stopReason: "toolUse" },
+      ),
+      fauxAssistantMessage("sandbox-child-done"),
+    ]);
+    registry.setProvider(provider.provider);
+    const calls: Array<{
+      name: string;
+      sandbox?: { workingDirectory: string };
+    }> = [];
+    const host = new NativeSubagentHost({
+      directory,
+      owner: "sandbox-child:0",
+      cwd,
+      model: "child-sandbox/test",
+      thinking: "off",
+      concurrency: 1,
+      registry,
+      environment: {
+        workingDirectory: cwd,
+        beforeToolCall: async (call) => {
+          calls.push(call);
+          return true;
+        },
+        executeTool: async (_call, execute) => execute(),
+        onToolUpdate() {},
+      },
+    });
+    try {
+      const result = await host.execute("subagent", {
+        agent: "sandbox-child",
+        task: "Run fixture",
+        async: false,
+        output: false,
+      });
+      assert.match(JSON.stringify(result), /sandbox-child-done/);
+      assert.equal(await readFile(join(cwd, "result.txt"), "utf8"), "inside");
+      assert.equal(await readFile(outside, "utf8"), "original");
+      assert.equal(
+        calls.find((call) => call.name === "bash")?.sandbox?.workingDirectory,
+        cwd,
+      );
     } finally {
       await host.close();
       await rm(directory, { recursive: true, force: true });

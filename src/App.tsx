@@ -647,6 +647,9 @@ export function App() {
   const selectedMainToolCalls = (selected?.toolCalls ?? []).filter(
     (call) => !call.subagentId,
   );
+  const selectedGenerationActivity = selected
+    ? getGenerationActivity(selected)
+    : undefined;
 
   useEffect(() => {
     if (!selected) return;
@@ -2547,7 +2550,8 @@ export function App() {
                       <GenerationIndicator
                         hasResponse={Boolean(selected.response)}
                         active={tab === "conversation"}
-                        activityKey={getGenerationActivity(selected).key}
+                        activityKey={selectedGenerationActivity!.key}
+                        phraseGroup={selectedGenerationActivity!.phraseGroup}
                         message={
                           selectedPendingApproval
                             ? "工具操作等待你的批准…"
@@ -2555,7 +2559,9 @@ export function App() {
                               ? "安全模型正在审核工具操作…"
                               : selected.status === "queued"
                                 ? "已进入队列，稍后开始…"
-                                : undefined
+                                : selected.connectionRetry
+                                  ? `连接中断，正在自动重连 ${selected.connectionRetry.attempt}/${selected.connectionRetry.maxAttempts}…`
+                                  : undefined
                         }
                       />
                     ) : !selected.response && !selected.thinking?.text ? (
@@ -2977,7 +2983,7 @@ export function App() {
                             {workspace.workingDirectory
                               ? "本地项目"
                               : "临时目录"}{" "}
-                            · 本机执行 · 分支共享文件
+                            · 本机沙盒 · 分支共享文件
                           </span>
                         )}
                         <span>
@@ -3574,16 +3580,16 @@ function Help() {
               和完整路径，也可选择本地项目或恢复临时目录；切换目录不会迁移或删除文件。
             </p>
             <p>
-              执行模型与思考深度在输入框下方选择，审批方式与安全模型在顶部调整。请求批准模式下，文件读取由只读策略放行，修改文件、执行命令和联网请求需要你批准。
+              执行模型与思考深度在输入框下方选择，审批方式与安全模型在顶部调整。受限编码工具在沙盒范围内直接执行；命令访问新的域名和端口时单独请求授权，同轮同目录的相同目标可以复用。
             </p>
             <p>
-              自动审批需独立选择安全模型，每次工具调用都先交给它审核；明确批准后才执行。拒绝、审核异常或配置不可用时会请求你批准，工具活动中保留审核模型与理由。安全审核也会产生模型用量。
+              自动审批需独立选择安全模型，审核新增联网目标和沙盒外能力。拒绝、审核异常或配置不可用时会请求你批准，工具活动中保留审核模型与理由；受限编码操作无需逐次安全审核。
             </p>
             <p>
               审核期间可以停止节点。更改审批方式或安全模型后，当前审核转为人工审批，新设置用于后续操作；待批准操作不会自动放行。
             </p>
             <p>
-              命令在本机执行，非沙箱。同一目录的编码任务依次运行，所有分支共享当前文件，切换分支不会回滚修改。演示模型不执行工具。
+              命令写入限于项目和私有临时目录，凭证和工具配置受保护；沙盒初始化失败后可以重试，或由你单次批准原命令在宿主执行。共享目录可以并行运行，文件冲突按操作协调。切换分支不会回滚修改，演示模型不执行工具。
             </p>
           </section>
         </div>

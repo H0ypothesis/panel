@@ -7,6 +7,7 @@ import { dirname, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { release as cuaRelease, runtimeTarget } from "./setup-cua.mjs";
 import excludedSubagents from "../server/subagent-exclusions.json" with { type: "json" };
+import { adaptNicobailonSource } from "../server/nicobailon-source.mjs";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const output = join(root, "build/desktop/app");
@@ -20,6 +21,7 @@ await build({
     "server/subagent-host-worker.ts",
     "server/subagent-host-factory.ts",
     "server/subagent-host.ts",
+    "server/sandbox-worker.ts",
   ],
   outdir: join(output, "server"),
   outExtension: { ".js": ".mjs" },
@@ -46,7 +48,7 @@ await build({
               .split(sep)
               .join("/");
             return {
-              contents: source.replaceAll(
+              contents: adaptNicobailonSource(path, source).replaceAll(
                 "import.meta.url",
                 `new URL(${JSON.stringify("../node_modules/" + modulePath)}, import.meta.url).href`,
               ),
@@ -96,7 +98,7 @@ await build({
     js: 'import { createRequire as __panelCreateRequire } from "node:module"; const require = __panelCreateRequire(import.meta.url);',
   },
   // Jiti lazily requires its sibling Babel transform; preserve that layout.
-  external: ["vite", "jiti"],
+  external: ["vite", "jiti", "@anthropic-ai/sandbox-runtime"],
   logLevel: "info",
 });
 
@@ -148,8 +150,21 @@ async function copyPackage(name, from, optional = false) {
     await copyPackage(dependency, source, true);
 }
 await copyPackage("pi-web-access", root);
+await copyPackage("@anthropic-ai/sandbox-runtime", root);
 await copyPackage("tsx", root);
 await copyPackage("pi-subagents", root);
+// Detached upstream runners load the copied package outside the esbuild bundle.
+const nativeOutputModule = join(
+  output,
+  "node_modules/pi-subagents/src/runs/shared/single-output.js",
+);
+await writeFile(
+  nativeOutputModule,
+  adaptNicobailonSource(
+    nativeOutputModule,
+    await readFile(nativeOutputModule, "utf8"),
+  ),
+);
 for (const name of excludedSubagents) {
   await rm(join(output, "node_modules/pi-subagents/agents", `${name}.md`), {
     force: true,

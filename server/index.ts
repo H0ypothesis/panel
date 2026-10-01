@@ -7,6 +7,7 @@ import { PiRuntime } from "./runtime.ts";
 import { Scheduler } from "./scheduler.ts";
 import { Store } from "./store.ts";
 import { closeNativeWebSessions } from "./native-web-session.ts";
+import { closeSandboxes } from "./sandbox.ts";
 
 try {
   loadEnvFile(process.env.PANEL_ENV_FILE);
@@ -146,6 +147,7 @@ const shutdown = async () => {
   clearInterval(persistence);
   if (parentWatch) clearInterval(parentWatch);
   await closeNativeWebSessions();
+  await closeSandboxes();
   await store.save().catch(() => {});
   await vite?.close();
   server.closeAllConnections();

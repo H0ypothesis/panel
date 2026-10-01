@@ -1,4 +1,9 @@
-import { createPanelTools } from "./coding-tools.ts";
+import {
+  codingSandboxScope,
+  isCodingExecutionStartedNotice,
+} from "./coding-tools.ts";
+import { createRunCodingTools } from "./run-coding-tools.ts";
+import { SANDBOX_POLICY_VERSION } from "./sandbox-policy.ts";
 import { randomUUID } from "node:crypto";
 import type { AgentTool, AgentMessage } from "@earendil-works/pi-agent-core";
 import type { ToolDefinition } from "@earendil-works/pi-coding-agent";
@@ -13,6 +18,7 @@ import type { RunEnvironment } from "./runtime.ts";
 import { isWebTool } from "./web-tools.ts";
 import { WEB_RESEARCH_PROMPT } from "./native-web-contract.ts";
 import { installGenerationPolicy } from "./generation-policy.ts";
+import { SubagentExecutionEvents } from "./subagent-execution-events.ts";
 import {
   createSubagentHandoff,
   SUBAGENT_DELIVERY_PROMPT,
@@ -32,6 +38,10 @@ export async function createPanelChildSession(
     resultSources?: (
       result: unknown,
     ) => import("../shared/types.ts").ToolCall["sources"];
+    resolveResumeOutput?: (
+      id: string,
+      index?: number,
+    ) => Promise<string | undefined>;
   },
 ) {
   const {
@@ -89,6 +99,7 @@ export async function createPanelChildSession(
     }),
   );
   const wrapped = new WeakSet<object>();
+  const executionEvents = new SubagentExecutionEvents();
   function guard(tool: ToolDefinition): ToolDefinition {
     if (wrapped.has(tool)) return tool;
     const result: ToolDefinition = {
@@ -98,6 +109,20 @@ export async function createPanelChildSession(
           string,
           unknown
         >;
+        if (
+          tool.name === "subagent" &&
+          argumentsSnapshot.action === "resume" &&
+          argumentsSnapshot.output === undefined &&
+          typeof argumentsSnapshot.id === "string"
+        ) {
+          const output = await options.resolveResumeOutput?.(
+            argumentsSnapshot.id,
+            typeof argumentsSnapshot.index === "number"
+              ? argumentsSnapshot.index
+              : undefined,
+          );
+          if (output) argumentsSnapshot.output = output;
+        }
         let skillRead = false;
         if (
           tool.name === "read" &&
@@ -121,6 +146,7 @@ export async function createPanelChildSession(
           id: `${options.id}:${id}`,
           name: skillRead ? "read_skill" : tool.name,
           arguments: argumentsSnapshot,
+          sandbox: skillRead ? undefined : codingSandboxScope(tool, root),
         };
         // Preserve the exact authorized arguments even if an extension mutates
         // its original object while approval is pending.
@@ -139,6 +165,11 @@ export async function createPanelChildSession(
           const output = await options.environment.executeTool(
             call,
             async () => {
+              signal?.throwIfAborted();
+              // Genuine bash tools announce actual shell dispatch after setup
+              // and recovery, so these waits do not start the native deadline.
+              if (call.name !== "bash" || !call.sandbox)
+                executionEvents.granted(id);
               if (skillRead) {
                 const target = await realpath(String(authorized.path));
                 if (
@@ -155,6 +186,10 @@ export async function createPanelChildSession(
                 authorized as never,
                 signal,
                 (partial) => {
+                  if (isCodingExecutionStartedNotice(partial)) {
+                    executionEvents.granted(id);
+                    return;
+                  }
                   onUpdate?.(partial);
                   options.environment.onToolUpdate(call.id, {
                     status: "running",
@@ -307,8 +342,8 @@ export async function createPanelChildSession(
     return new Proxy(session, {
       get(target, key, receiver) {
         if (key === "subscribe")
-          return (listener: Parameters<typeof session.subscribe>[0]) =>
-            target.subscribe((event) => {
+          return (listener: Parameters<typeof session.subscribe>[0]) => {
+            const deliver = (event: Parameters<typeof listener>[0]) => {
               // Upstream derives the handoff from the last message_end, while Pi
               // persists each original chunk. Join only the outward final report.
               const message = event.message as AgentMessage | undefined;
@@ -317,7 +352,15 @@ export async function createPanelChildSession(
                   ? { ...event, message: projectMessages([message])[0] }
                   : event,
               );
-            });
+            };
+            const unsubscribe = target.subscribe((event) =>
+              executionEvents.receive(event, deliver),
+            );
+            return () => {
+              unsubscribe();
+              executionEvents.unsubscribe(deliver);
+            };
+          };
         return key === "messages"
           ? projectMessages(target.messages)
           : Reflect.get(target, key, receiver);
@@ -347,6 +390,10 @@ export async function persistSubagentOutput(
     id: `${id}:output-${randomUUID()}`,
     name: "write",
     arguments: { path, content },
+    sandbox: {
+      policyVersion: SANDBOX_POLICY_VERSION,
+      workingDirectory: await realpath(environment.workingDirectory),
+    },
   };
   if (
     !(await environment.beforeToolCall(
@@ -362,7 +409,11 @@ export async function persistSubagentOutput(
       async () => {
         signal.throwIfAborted();
         environment.onToolUpdate(call.id, { status: "running" });
-        return createPanelTools(environment.workingDirectory!)
+        return createRunCodingTools(
+          environment.workingDirectory!,
+          environment,
+          id,
+        )
           .find((tool) => tool.name === "write")!
           .execute(call.id, call.arguments, signal);
       },

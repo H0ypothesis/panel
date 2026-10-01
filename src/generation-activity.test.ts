@@ -186,3 +186,99 @@ test("queued and terminal nodes ignore stale tool execution data", () => {
     assert.equal(getGenerationActivity(current).phase, "idle");
   }
 });
+
+test("CUA and delegation words follow the executing tool, not merely an enabled capability", () => {
+  assert.equal(
+    getGenerationActivity(
+      node({
+        toolRequests: ["computer_use", "subagents"],
+        subagentsEnabled: true,
+      }),
+    ).phraseGroup,
+    "thinking",
+  );
+  for (const name of [
+    "computer_use_tools",
+    "computer_use_call",
+    "computer_use_release",
+  ]) {
+    const call = tool({ name });
+    const current = node({ toolCalls: [call] });
+    assert.equal(getGenerationActivity(current).phraseGroup, "computer-use");
+    call.status = "awaiting_approval";
+    assert.equal(getGenerationActivity(current).phraseGroup, "thinking");
+    call.status = "reviewing";
+    assert.equal(getGenerationActivity(current).phraseGroup, "thinking");
+  }
+  for (const name of [
+    "subagent",
+    "subagents_enable",
+    "subagent_detach",
+    "bg_wait",
+  ])
+    assert.equal(
+      getGenerationActivity(node({ toolCalls: [tool({ name })] })).phraseGroup,
+      "delegation",
+    );
+  assert.equal(
+    getGenerationActivity(node({ toolCalls: [tool({ name: "read" })] }))
+      .phraseGroup,
+    "thinking",
+  );
+});
+
+test("a completed CUA tool retains its word group until a new answer begins", () => {
+  const call = tool({ name: "computer_use_call" });
+  const current = node({
+    toolCalls: [call],
+    lastRequestUsage: { timestamp: 30, inputTokens: 100, outputTokens: 10 },
+  });
+  const execution = getGenerationActivity(current);
+  call.status = "completed";
+  call.finishedAt = 150;
+  const preparing = getGenerationActivity(current);
+  assert.equal(preparing.key, execution.key);
+  assert.equal(preparing.phraseGroup, "computer-use");
+  current.lastRequestUsage!.timestamp = 160;
+  const answering = getGenerationActivity(current);
+  assert.notEqual(answering.key, execution.key);
+  assert.equal(answering.phraseGroup, "thinking");
+});
+
+test("parent and child loaders isolate tool ownership, including resumed child executions", () => {
+  const delegate = tool({ name: "subagent" });
+  const childCall = tool({
+    id: "child-cua",
+    name: "computer_use_call",
+    subagentId: "child",
+    startedAt: 200,
+  });
+  const current = node({ toolCalls: [delegate, childCall] });
+  const parentActivity = getGenerationActivity(current);
+  assert.equal(parentActivity.phraseGroup, "delegation");
+  assert.equal(parentActivity.toolName, "subagent");
+  assert.equal(
+    getGenerationActivity(current, "child").phraseGroup,
+    "computer-use",
+  );
+  childCall.status = "awaiting_approval";
+  assert.deepEqual(getGenerationActivity(current), parentActivity);
+  assert.equal(getGenerationActivity(current, "child").phraseGroup, "subagent");
+  assert.equal(getGenerationActivity(current, "resumed-child").phase, "answer");
+  assert.equal(
+    getGenerationActivity(current, "resumed-child").phraseGroup,
+    "subagent",
+  );
+  assert.equal(
+    getGenerationActivity(node({ toolCalls: [childCall] })).phraseGroup,
+    "thinking",
+  );
+  current.toolCalls!.push(
+    tool({ id: "child-read", name: "read", subagentId: "resumed-child" }),
+  );
+  assert.equal(getGenerationActivity(current, "resumed-child").phase, "tool");
+  assert.equal(
+    getGenerationActivity(current, "resumed-child").phraseGroup,
+    "subagent",
+  );
+});

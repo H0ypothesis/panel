@@ -22,7 +22,7 @@ function keyOf(item: PendingApproval) {
 function sourceName({ node, call }: PendingApproval) {
   if (!call.subagentId) return "主代理";
   const runs = agentRuns(node.subagents);
-  const index = runs.findIndex((run) => run.id === call.subagentId);
+  const index = runs.findIndex((run) => run.runIds.includes(call.subagentId!));
   return index >= 0 ? `子代理 · ${roleName(runs[index], index)}` : "子代理";
 }
 

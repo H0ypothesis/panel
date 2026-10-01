@@ -25,6 +25,12 @@ import { subagentMarkdownComponents } from "./SubagentOutput";
 import { GenerationIndicator } from "./GenerationIndicator";
 import { getGenerationActivity } from "./generation-activity";
 import { getSubagentCurves, subagentLoadingKey } from "./subagent-loading";
+import {
+  isWorkflowRun,
+  subagentThreads,
+  subagentStatusLabel,
+} from "../shared/subagent-runs";
+export { isWorkflowRun } from "../shared/subagent-runs";
 
 const roleIcons: Record<string, typeof Search> = {
   scout: Search,
@@ -48,12 +54,8 @@ const statuses = {
   cancelled: "已停止",
 };
 
-// Native workflow records describe orchestration, not an additional model session.
-export function isWorkflowRun(run: SubagentRun) {
-  return run.agent === "workflow" && run.id.startsWith("native:");
-}
 export function agentRuns(runs: SubagentRun[] = []) {
-  return runs.filter((run) => !isWorkflowRun(run));
+  return subagentThreads(runs.filter((run) => !isWorkflowRun(run)));
 }
 export function hasSubagents(node: TurnNode) {
   return !!(
@@ -106,7 +108,7 @@ function Status({
       className={`subagent-status ${approval ? "needs-approval" : run.status}`}
     >
       <i aria-hidden="true" />
-      {approval ? "等待批准" : statuses[run.status]}
+      {approval ? "等待审批" : subagentStatusLabel(run)}
     </span>
   );
 }
@@ -150,7 +152,7 @@ export function SubagentAvatars({
           <button
             key={run.id}
             type="button"
-            title={`${roleName(run, index)} · ${statuses[run.status]}\n${taskPreview(run.task)}`}
+            title={`${roleName(run, index)} · ${subagentStatusLabel(run)}\n${taskPreview(run.task)}`}
             aria-label={`查看子代理 ${index + 1}：${taskPreview(run.task)}`}
             onPointerDown={(event) => event.stopPropagation()}
             onKeyDown={(event) => event.stopPropagation()}
@@ -209,7 +211,22 @@ export function SubagentsPanel({
   const workflows = runs.filter(isWorkflowRun);
   const loadingCurves = getSubagentCurves(node.id, children);
   const selected =
-    runs.find((run) => run.id === selectedId) ?? children[0] ?? workflows[0];
+    children.find((run) => run.runIds.includes(selectedId ?? "")) ??
+    workflows.find((run) => run.id === selectedId) ??
+    children[0] ??
+    workflows[0];
+  const selectedRunIds =
+    selected && "runIds" in selected
+      ? (selected.runIds as string[])
+      : selected
+        ? [selected.id]
+        : [];
+  const executions =
+    selected && "executions" in selected
+      ? (selected.executions as SubagentRun[])
+      : selected
+        ? [selected]
+        : [];
   const workflow = selected && isWorkflowRun(selected);
   const selectedIndex = selected
     ? children.findIndex((run) => run.id === selected.id)
@@ -257,11 +274,16 @@ export function SubagentsPanel({
         );
         return false;
       }
-      const target = runs.find((run) => run.nativeRunId === input.id);
+      const target = [...children, ...workflows].find(
+        (run) => run.nativeRunId === input.id,
+      );
       const name = target
         ? isWorkflowRun(target)
           ? "任务编排"
-          : roleName(target, children.indexOf(target))
+          : roleName(
+              target,
+              children.findIndex((run) => run.id === target.id),
+            )
         : "子代理";
       setFeedback(
         `${name}：${input.action === "stop" ? "停止请求已发送" : input.action === "interrupt" ? "暂停请求已发送" : input.tool === "subagent_detach" ? "后台运行请求已发送" : "指令已发送"}`,
@@ -279,11 +301,14 @@ export function SubagentsPanel({
       call.status === "awaiting_approval" &&
       (call.subagentId || call.name.startsWith("subagent")),
   );
-  const calls = (node.toolCalls ?? []).filter(
-    (call) => call.subagentId === selected?.id,
+  const calls = (node.toolCalls ?? []).filter((call) =>
+    selectedRunIds.includes(call.subagentId ?? ""),
   );
+  const generationActivity = selected
+    ? getGenerationActivity({ ...selected, toolCalls: calls }, selected.id)
+    : undefined;
   const otherApprovals = pendingCalls.filter(
-    (call) => !selected || call.subagentId !== selected.id,
+    (call) => !selected || !selectedRunIds.includes(call.subagentId ?? ""),
   );
   const notices = node.subagentNotices ?? [];
   const questions = notices.filter(
@@ -433,8 +458,12 @@ export function SubagentsPanel({
                         {roleName(run, index)}
                         <Status
                           run={run}
-                          approval={pendingCalls.some(
-                            (call) => call.subagentId === run.id,
+                          approval={(node.toolCalls ?? []).some(
+                            (call) =>
+                              run.runIds.includes(call.subagentId ?? "") &&
+                              ["reviewing", "awaiting_approval"].includes(
+                                call.status,
+                              ),
                           )}
                         />
                       </b>
@@ -474,8 +503,8 @@ export function SubagentsPanel({
                 <strong>{selectedName}</strong>
                 <Status
                   run={selected}
-                  approval={calls.some(
-                    (call) => call.status === "awaiting_approval",
+                  approval={calls.some((call) =>
+                    ["reviewing", "awaiting_approval"].includes(call.status),
                   )}
                 />
               </div>
@@ -594,7 +623,7 @@ export function SubagentsPanel({
                 </dl>
               </details>
             )}
-            {calls.length > 0 && (
+            {workflow && calls.length > 0 && (
               <ToolActivity
                 calls={calls}
                 workingDirectory={
@@ -604,7 +633,7 @@ export function SubagentsPanel({
                 batchApprovalAvailable={batchApprovalAvailable}
               />
             )}
-            {selected.error && (
+            {workflow && selected.error && (
               <p className="subagent-error" role="alert">
                 {selected.error}
               </p>
@@ -669,15 +698,66 @@ export function SubagentsPanel({
                     {copyError}
                   </p>
                 )}
-                <div className="subagent-output">
-                  <AssistantResponse
-                    response={selected.response}
-                    thinking={selected.thinking}
-                    status={selected.status}
-                    defaultThinkingExpanded={false}
-                    markdownComponents={subagentMarkdownComponents}
-                  />
-                </div>
+                {executions.map((execution, index) => {
+                  const executionCalls = calls
+                    .filter((call) => call.subagentId === execution.id)
+                    .sort((a, b) => a.startedAt - b.startedAt);
+                  return (
+                    <section
+                      className="subagent-execution"
+                      key={execution.id}
+                      aria-label={`第 ${index + 1} 次执行`}
+                    >
+                      {index > 0 && (
+                        <div className="subagent-resume-marker">
+                          <GitBranch size={14} />
+                          <strong>主代理恢复任务</strong>
+                          <time
+                            dateTime={new Date(
+                              execution.createdAt,
+                            ).toISOString()}
+                          >
+                            {new Date(execution.createdAt).toLocaleTimeString()}
+                          </time>
+                          <details>
+                            <summary>追加任务</summary>
+                            <p>
+                              {execution.task.match(
+                                /Follow-up:\s*([\s\S]*)/,
+                              )?.[1] ?? execution.task}
+                            </p>
+                          </details>
+                        </div>
+                      )}
+                      {executionCalls.length > 0 && (
+                        <ToolActivity
+                          calls={executionCalls}
+                          workingDirectory={
+                            execution.workingDirectory ??
+                            node.execution?.workingDirectory
+                          }
+                          onDecision={onDecision}
+                          batchApprovalAvailable={batchApprovalAvailable}
+                        />
+                      )}
+                      {execution.error && (
+                        <p className="subagent-error" role="alert">
+                          <strong>{subagentStatusLabel(execution)}：</strong>
+                          {execution.error}
+                        </p>
+                      )}
+                      <div className="subagent-output">
+                        <AssistantResponse
+                          response={execution.response}
+                          thinking={execution.thinking}
+                          status={execution.status}
+                          defaultThinkingExpanded={false}
+                          markdownComponents={subagentMarkdownComponents}
+                        />
+                      </div>
+                    </section>
+                  );
+                })}
                 {selected.status === "running" ||
                 selected.status === "queued" ? (
                   <div className="subagent-live-status">
@@ -685,18 +765,14 @@ export function SubagentsPanel({
                       key={subagentLoadingKey(selected)}
                       hasResponse={Boolean(selected.response)}
                       active={true}
-                      activityKey={
-                        getGenerationActivity({
-                          ...selected,
-                          toolCalls: calls,
-                        }).key
-                      }
+                      activityKey={generationActivity!.key}
+                      phraseGroup={generationActivity!.phraseGroup}
                       curve={loadingCurves.get(subagentLoadingKey(selected))}
                       message={
                         calls.some(
                           (call) => call.status === "awaiting_approval",
                         )
-                          ? "等待批准后继续"
+                          ? "等待审批，批准后继续"
                           : calls.some((call) => call.status === "reviewing")
                             ? "安全模型正在审核工具操作…"
                             : selected.status === "queued"

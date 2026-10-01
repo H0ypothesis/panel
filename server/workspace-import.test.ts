@@ -87,6 +87,38 @@ test("imports batch approval as historical metadata without restoring execution 
   assert.equal("approvedTools" in imported.nodes[1], false);
 });
 
+test("imports sandbox audit without restoring trusted provenance or execution authority", () => {
+  const source = fixture();
+  source.workspace.nodes[1].toolCalls = [
+    {
+      id: "sandbox-write",
+      name: "write",
+      arguments: { path: "file.txt", content: "done" },
+      status: "completed",
+      approval: "sandbox",
+      executionMode: "host",
+      startedAt: 1,
+      sandbox: {
+        policyVersion: "panel-sandbox-v1",
+        workingDirectory: "/tmp/project",
+      },
+      authorization: {
+        id: "old",
+        actionHash: "old-hash",
+        policyVersion: "old-policy",
+        issuedAt: 1,
+        expiresAt: 2,
+        consumedAt: 1,
+      },
+    },
+  ];
+  const imported = importWorkspace(source).nodes[1].toolCalls![0];
+  assert.equal(imported.approval, "sandbox");
+  assert.equal(imported.authorization, undefined);
+  assert.equal(imported.sandbox, undefined);
+  assert.equal(imported.executionMode, "host");
+});
+
 test("imports CUA takeover audit without restoring the live per-run grant", () => {
   const source = fixture();
   Object.assign(source.workspace.nodes[1], { computerUseTakeover: true });

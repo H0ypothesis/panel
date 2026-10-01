@@ -9,6 +9,7 @@ import {
   type Message,
 } from "@earendil-works/pi-ai";
 import { PiRuntime } from "./runtime.ts";
+import type { ConnectionRetry } from "../shared/types.ts";
 import { providerOutputLimit } from "./generation-policy.ts";
 
 function fixture(responses: FauxResponseStep[]) {
@@ -23,13 +24,15 @@ function fixture(responses: FauxResponseStep[]) {
   const runtime = new PiRuntime(registry);
   const controller = new AbortController();
   let messages: Message[] = [];
+  const updates: string[] = [];
+  const retries: (ConnectionRetry | undefined)[] = [];
   const run = () =>
     runtime.run(
       { model: "openai/generation", thinking: "off" },
       [],
       "finish the task",
       controller.signal,
-      () => {},
+      (text) => updates.push(text),
       undefined,
       {
         autoCompact: true,
@@ -37,10 +40,49 @@ function fixture(responses: FauxResponseStep[]) {
         onMessages: async (value) => {
           messages = value;
         },
+        onConnectionRetry: (retry) => retries.push(retry),
       },
     );
-  return { faux, registry, runtime, controller, run, messages: () => messages };
+  return {
+    faux,
+    registry,
+    runtime,
+    controller,
+    run,
+    messages: () => messages,
+    updates,
+    retries,
+  };
 }
+
+test("a dropped partial answer reconnects in place without duplicating the draft or transcript", async () => {
+  const f = fixture([
+    fauxAssistantMessage("unfinished draft", {
+      stopReason: "error",
+      errorMessage: "Connect error",
+    }),
+    (context) => {
+      assert.doesNotMatch(JSON.stringify(context), /unfinished draft/);
+      return fauxAssistantMessage("complete answer");
+    },
+  ]);
+  try {
+    const result = await f.run();
+    assert.equal(result.response, "complete answer");
+    assert.equal(f.updates.at(-1), "complete answer");
+    assert.equal(
+      result.messages.filter((message) => message.role === "assistant").length,
+      1,
+    );
+    assert.deepEqual(f.retries.filter(Boolean), [
+      { attempt: 1, maxAttempts: 5 },
+    ]);
+    assert.equal(f.retries.at(-1), undefined);
+    assert.equal(f.faux.state.callCount, 2);
+  } finally {
+    await f.runtime.close();
+  }
+});
 
 test("answer ceiling follows context while metadata and context preparation remain intact", async () => {
   const f = fixture([

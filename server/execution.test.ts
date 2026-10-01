@@ -36,6 +36,7 @@ import { Scheduler } from "./scheduler.ts";
 import { createWorkspace } from "./seed.ts";
 import { Store } from "./store.ts";
 import { TOOL_POLICY_VERSION } from "./tool-authorization.ts";
+import { buildSafetyReviewContext } from "./safety-review.ts";
 
 const config: RunConfig = { model: "openai/tools-test", thinking: "off" };
 const tool = (name: string, args: JsonObject, id: string) =>
@@ -70,6 +71,7 @@ class LocalPiRuntime extends PiRuntime {
 async function setup(
   responses: AssistantMessage[],
   mode: "ask" | "auto" = "ask",
+  sandboxed = false,
 ) {
   const directory = await realpath(
     await mkdtemp(join(tmpdir(), "panel-execution-")),
@@ -93,6 +95,34 @@ async function setup(
   faux.setResponses(responses);
   registry.setProvider(faux.provider);
   const runtime = new LocalPiRuntime(registry);
+  // Legacy approval cases represent capabilities without Panel's trusted
+  // sandbox marker, including extensions with the same tool names.
+  if (!sandboxed) {
+    const run = runtime.run.bind(runtime);
+    runtime.run = (config, history, prompt, signal, onText, execution) =>
+      run(
+        config,
+        history,
+        prompt,
+        signal,
+        onText,
+        execution && {
+          ...execution,
+          beforeToolCall: (call, prepare, toolSignal) =>
+            execution.beforeToolCall(
+              { ...call, sandbox: undefined },
+              prepare,
+              toolSignal,
+            ),
+          executeTool: (call, execute, toolSignal) =>
+            execution.executeTool(
+              { ...call, sandbox: undefined },
+              execute,
+              toolSignal,
+            ),
+        },
+      );
+  }
   const scheduler = new Scheduler(store, runtime);
   const submit = () =>
     scheduler.submit(workspace.id, {
@@ -113,13 +143,63 @@ async function setup(
     store,
     workspace,
     runtime,
+    faux,
     scheduler,
     submit,
     cleanup,
   };
 }
 
-test("actual Pi tools write, edit, execute and read code only after safety model approval", async () => {
+test("a card stays running during reconnection and keeps completed file operations", async () => {
+  const e = await setup(
+    [
+      fauxAssistantMessage(
+        [
+          { type: "text", text: "Saving the file. " },
+          fauxToolCall(
+            "write",
+            { path: "saved.txt", content: "written once" },
+            { id: "saved-write" },
+          ),
+        ],
+        { stopReason: "toolUse" },
+      ),
+      fauxAssistantMessage("unfinished draft", {
+        stopReason: "error",
+        errorMessage: "Connection error",
+      }),
+      fauxAssistantMessage("Recovered after writing"),
+    ],
+    "auto",
+    true,
+  );
+  try {
+    const node = await e.submit();
+    await until(() => Boolean(node.connectionRetry));
+    assert.equal(node.status, "running");
+    assert.deepEqual(node.connectionRetry, { attempt: 1, maxAttempts: 5 });
+    assert.equal(
+      e.store.snapshot().workspaces[0].nodes.find((item) => item.id === node.id)
+        ?.connectionRetry?.attempt,
+      1,
+    );
+    assert.equal(
+      await readFile(join(e.project, "saved.txt"), "utf8"),
+      "written once",
+    );
+    await until(() => node.status === "completed" || node.status === "failed");
+    assert.equal(node.status, "completed", node.error);
+    assert.equal(node.response, "Saving the file. Recovered after writing");
+    assert.equal(node.connectionRetry, undefined);
+    assert.equal(node.toolCalls?.length, 1);
+    assert.equal(node.toolCalls?.[0].status, "completed");
+    assert.equal(e.faux.state.callCount, 3);
+  } finally {
+    await e.cleanup();
+  }
+});
+
+test("actual sandboxed Pi tools execute without per-call review and retain single-use authorization", async () => {
   const env = await setup(
     [
       tool(
@@ -141,6 +221,7 @@ test("actual Pi tools write, edit, execute and read code only after safety model
       fauxAssistantMessage("已验证输出 5"),
     ],
     "auto",
+    true,
   );
   try {
     const node = await env.submit();
@@ -155,17 +236,16 @@ test("actual Pi tools write, edit, execute and read code only after safety model
       node.toolCalls?.every(
         (call) =>
           call.status === "completed" &&
-          call.approval === "safety_model" &&
-          call.safetyReview?.model === config.model &&
-          call.safetyReview.decision === "approve" &&
-          Boolean(call.safetyReview.reason) &&
+          call.approval === "sandbox" &&
+          call.safetyReview === undefined &&
+          Boolean(call.sandbox?.policyVersion) &&
           Boolean(call.authorization?.consumedAt) &&
           !call.authorization?.invalidatedAt,
       ),
     );
     assert.deepEqual(
       env.runtime.safetyRequests.map((request) => request.tool.name),
-      ["write", "edit", "bash", "read"],
+      [],
     );
     assert.ok(
       env.runtime.safetyRequests.every(
@@ -192,6 +272,123 @@ test("actual Pi tools write, edit, execute and read code only after safety model
       assert.ok(call.authorization.consumedAt >= call.authorization.issuedAt);
       assert.ok(call.authorization.consumedAt < call.authorization.expiresAt);
     }
+  } finally {
+    await env.cleanup();
+  }
+});
+
+test("ask mode also executes trusted workspace edits without review", async () => {
+  const env = await setup(
+    [
+      tool("write", { path: "local.txt", content: "done" }, "local"),
+      fauxAssistantMessage("完成"),
+    ],
+    "ask",
+    true,
+  );
+  try {
+    const node = await env.submit();
+    await until(() => node.status === "completed" || node.status === "failed");
+    assert.equal(node.status, "completed", node.error);
+    assert.equal(node.toolCalls![0].approval, "sandbox");
+    assert.equal(env.runtime.safetyRequests.length, 0);
+    assert.equal(
+      await readFile(join(env.project, "local.txt"), "utf8"),
+      "done",
+    );
+  } finally {
+    await env.cleanup();
+  }
+});
+
+test("sandbox network requests retain manual approval and cannot grant all destinations", async () => {
+  const command =
+    "printf once >> progress.txt; curl --max-time 3 --fail https://example.invalid || true";
+  const env = await setup(
+    [
+      tool("bash", { command }, "first"),
+      tool("bash", { command }, "again"),
+      fauxAssistantMessage("完成"),
+    ],
+    "ask",
+    true,
+  );
+  try {
+    const node = await env.submit();
+    await until(
+      () =>
+        node.toolCalls?.some(
+          (call) =>
+            call.name === "sandbox_network" &&
+            call.status === "awaiting_approval",
+        ) ?? false,
+    );
+    const network = node.toolCalls!.find(
+      (call) => call.name === "sandbox_network",
+    )!;
+    assert.equal(network.arguments.host, "example.invalid");
+    assert.equal(network.arguments.port, 443);
+    await assert.rejects(
+      env.scheduler.approve(
+        env.workspace.id,
+        node.id,
+        network.id,
+        "approve_tool",
+      ),
+      /具体目标/,
+    );
+    await env.scheduler.approve(
+      env.workspace.id,
+      node.id,
+      network.id,
+      "approve",
+    );
+    await until(() => node.status === "completed" || node.status === "failed");
+    assert.equal(node.status, "completed", node.error);
+    assert.equal(
+      node.toolCalls!.filter((call) => call.name === "sandbox_network").length,
+      1,
+    );
+    assert.equal(network.approval, "approved");
+    assert.ok(network.authorization?.consumedAt);
+    assert.equal(
+      await readFile(join(env.project, "progress.txt"), "utf8"),
+      "onceonce",
+    );
+    assert.equal(env.runtime.safetyRequests.length, 0);
+  } finally {
+    await env.cleanup();
+  }
+});
+
+test("auto mode reviews new sandbox network targets once and keeps coding calls direct", async () => {
+  const command = "curl --max-time 2 --fail https://example.invalid || true";
+  const env = await setup(
+    [
+      tool("bash", { command }, "first"),
+      tool("bash", { command }, "again"),
+      fauxAssistantMessage("完成"),
+    ],
+    "auto",
+    true,
+  );
+  try {
+    const node = await env.submit();
+    await until(() => node.status === "completed" || node.status === "failed");
+    assert.equal(node.status, "completed", node.error);
+    assert.deepEqual(
+      env.runtime.safetyRequests.map((request) => request.tool.name),
+      ["sandbox_network"],
+    );
+    assert.equal(
+      node.toolCalls!.find((call) => call.name === "sandbox_network")!.approval,
+      "safety_model",
+    );
+    assert.ok(
+      node
+        .toolCalls!.filter((call) => call.name === "bash")
+        .every((call) => call.approval === "sandbox"),
+    );
   } finally {
     await env.cleanup();
   }
@@ -284,7 +481,7 @@ test("manual approval is durable and a mode toggle does not implicitly approve a
   }
 });
 
-test("reads pass without asking; rejected writes never execute and denial reaches the model", async () => {
+test("untrusted same-name reads require approval; rejected writes never execute", async () => {
   const env = await setup([
     tool("read", { path: "existing.txt" }, "read-1"),
     tool("write", { path: "denied.txt", content: "must not exist" }, "write-1"),
@@ -293,9 +490,11 @@ test("reads pass without asking; rejected writes never execute and denial reache
   try {
     await writeFile(join(env.project, "existing.txt"), "read me");
     const node = await env.submit();
+    await until(() => node.toolCalls?.[0]?.status === "awaiting_approval");
+    await env.scheduler.approve(env.workspace.id, node.id, "read-1", "approve");
     await until(() => node.toolCalls?.[1]?.status === "awaiting_approval");
     assert.equal(node.toolCalls![0].status, "completed");
-    assert.equal(node.toolCalls![0].approval, "policy");
+    assert.equal(node.toolCalls![0].approval, "approved");
     assert.equal(env.runtime.safetyRequests.length, 0);
     await env.scheduler.approve(env.workspace.id, node.id, "write-1", "deny");
     await until(() => node.status === "completed");
@@ -614,6 +813,86 @@ test("a tool waits for later queued approval settings before deciding whether to
       "deny",
     );
     await until(() => node.status === "completed");
+  } finally {
+    await env.cleanup();
+  }
+});
+
+test("safety review receives delivered ancestor instructions and scoped decisions without inheriting unused approval", async () => {
+  const env = await setup(
+    [
+      tool("bash", { command: "node hello.cjs" }, "run-script"),
+      fauxAssistantMessage("完成"),
+    ],
+    "auto",
+  );
+  try {
+    await writeFile(join(env.project, "hello.cjs"), "console.log(2)");
+    const ancestor = env.workspace.nodes[0];
+    ancestor.prompt = "用户要求：创建并运行 hello.cjs。";
+    ancestor.runInputs = [
+      {
+        id: "delivered-constraint",
+        text: "追加要求：禁止删除任何数据。",
+        mode: "steer",
+        status: "delivered",
+        createdAt: 1,
+        deliveredAt: 2,
+      },
+      {
+        id: "undelivered-constraint",
+        text: "尚未送达的要求",
+        mode: "steer",
+        status: "queued",
+        createdAt: 3,
+      },
+    ];
+    ancestor.toolCalls = [
+      {
+        id: "approved-script",
+        name: "write",
+        arguments: { path: "hello.cjs", content: "console.log(2)" },
+        status: "completed",
+        approval: "approved",
+        workingDirectory: env.project,
+        startedAt: 1,
+      },
+      {
+        id: "rejected-deletion",
+        name: "bash",
+        arguments: { command: "rm -rf data" },
+        status: "denied",
+        approval: "denied",
+        workingDirectory: env.project,
+        startedAt: 2,
+      },
+    ];
+    const node = await env.submit();
+    await until(() => ["completed", "failed"].includes(node.status));
+    assert.equal(node.status, "completed", node.error);
+    const request = env.runtime.safetyRequests[0];
+    const context = buildSafetyReviewContext(request, 128000);
+    const data = JSON.parse(context.messages[0].content as string);
+    assert.match(data.ancestry[0].prompt, /禁止删除任何数据/);
+    assert.doesNotMatch(data.ancestry[0].prompt, /尚未送达/);
+    const grant = data.approvalHistory.find(
+      (item: any) => item.id === "approved-script",
+    );
+    assert.equal(grant.approval, "approved");
+    assert.equal(grant.scope.nodeId, ancestor.id);
+    assert.equal(grant.scope.workingDirectory, env.project);
+    assert.equal(grant.scope.fromAncestor, true);
+    assert.ok(
+      data.approvalHistory.some(
+        (item: any) =>
+          item.id === "rejected-deletion" && item.approval === "denied",
+      ),
+    );
+    // An ancestor's approval is context, not a live grant for the new card.
+    assert.equal(node.toolCalls![0].approval, "safety_model");
+    assert.equal(env.runtime.safetyRequests.length, 1);
+    assert.ok(node.toolCalls![0].authorization?.consumedAt);
+    assert.ok(node.toolCalls![0].executionStartedAt);
   } finally {
     await env.cleanup();
   }

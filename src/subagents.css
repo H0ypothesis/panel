@@ -755,3 +755,21 @@
 .subagent-output .subagent-delivery-notes ul {
   margin-bottom: 0;
 }
+.subagent-resume-marker {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin: 20px 0 12px;
+  padding-top: 14px;
+  border-top: 1px solid var(--line-subtle);
+  color: var(--text-muted);
+  font-size: 12px;
+}
+.subagent-resume-marker details {
+  width: 100%;
+}
+.subagent-resume-marker p {
+  white-space: pre-wrap;
+  line-height: 1.6;
+}

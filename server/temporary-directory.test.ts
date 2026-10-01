@@ -110,7 +110,7 @@ async function fixture(
   };
 }
 
-test("unbound Pi runs write and execute in their temporary directory only after approval", async (t) => {
+test("unbound Pi runs execute in their sandbox without per-call approval and reject outside file access", async (t) => {
   const script =
     "require('node:fs').writeFileSync('command.txt', 'executed'); console.log(process.cwd())";
   const env = await fixture(t, [
@@ -120,7 +120,7 @@ test("unbound Pi runs write and execute in their temporary directory only after 
       { command: `${quote(process.execPath)} -e ${quote(script)}` },
       "bash-1",
     ),
-    tool("write", { path: "denied.txt", content: "never" }, "write-2"),
+    tool("write", { path: "../denied.txt", content: "never" }, "write-2"),
     fauxAssistantMessage("完成获批的操作"),
   ]);
   const temporaryDirectory = join(
@@ -136,31 +136,24 @@ test("unbound Pi runs write and execute in their temporary directory only after 
   await assert.rejects(stat(temporaryDirectory), { code: "ENOENT" });
 
   const node = await env.submit();
-  await until(() => node.toolCalls?.[0]?.status === "awaiting_approval");
+  await completed(node, env.store);
   assert.equal(node.execution?.workingDirectory, temporaryDirectory);
-  await assert.rejects(readFile(join(temporaryDirectory, "paper.txt")), {
-    code: "ENOENT",
-  });
-  await env.scheduler.approve(env.workspace.id, node.id, "write-1", "approve");
-  await until(() => node.toolCalls?.[1]?.status === "awaiting_approval");
   assert.equal(
     await readFile(join(temporaryDirectory, "paper.txt"), "utf8"),
     "paper content",
   );
-  await assert.rejects(readFile(join(temporaryDirectory, "command.txt")), {
-    code: "ENOENT",
-  });
-  await env.scheduler.approve(env.workspace.id, node.id, "bash-1", "approve");
-  await until(() => node.toolCalls?.[2]?.status === "awaiting_approval");
   assert.equal(
     await readFile(join(temporaryDirectory, "command.txt"), "utf8"),
     "executed",
   );
   assert.equal(node.toolCalls![1].output?.trim(), temporaryDirectory);
-  await env.scheduler.approve(env.workspace.id, node.id, "write-2", "deny");
-  await completed(node, env.store);
-  assert.equal(node.toolCalls![2].status, "denied");
-  await assert.rejects(readFile(join(temporaryDirectory, "denied.txt")), {
+  assert.ok(
+    node.toolCalls!.every(
+      (call) => call.approval === "sandbox" && !call.safetyReview,
+    ),
+  );
+  assert.equal(node.toolCalls![2].status, "failed");
+  await assert.rejects(readFile(join(temporaryDirectory, "../denied.txt")), {
     code: "ENOENT",
   });
 
@@ -189,7 +182,7 @@ test("unbound Pi runs write and execute in their temporary directory only after 
   });
   await completed(read, restarted);
   assert.match(read.toolCalls![0].output!, /paper content/);
-  assert.equal(read.toolCalls![0].approval, "policy");
+  assert.equal(read.toolCalls![0].approval, "sandbox");
 });
 
 test("binding and clearing switch future runs while preserving temporary files and historical execution", async (t) => {
@@ -201,14 +194,12 @@ test("binding and clearing switch future runs while preserving temporary files a
   const selected = join(env.directory, "selected");
   await mkdir(selected);
   const first = await env.submit();
-  await until(() => first.toolCalls?.[0]?.status === "awaiting_approval");
   await assert.rejects(
     env.scheduler.configureWorkspace(env.workspace.id, {
       workingDirectory: selected,
     }),
     /任务结束|运行|更换工作目录/,
   );
-  await env.scheduler.approve(env.workspace.id, first.id, "write-1", "approve");
   await completed(first, env.store);
   await env.scheduler.configureWorkspace(env.workspace.id, {
     workingDirectory: selected,
@@ -219,14 +210,12 @@ test("binding and clearing switch future runs while preserving temporary files a
     fauxAssistantMessage("已保存到自选目录"),
   ]);
   const bound = await env.submit();
-  await until(() => bound.toolCalls?.[0]?.status === "awaiting_approval");
   await assert.rejects(
     env.scheduler.configureWorkspace(env.workspace.id, {
       workingDirectory: null,
     }),
     /任务结束|运行|更换工作目录/,
   );
-  await env.scheduler.approve(env.workspace.id, bound.id, "write-2", "approve");
   await completed(bound, env.store);
   assert.equal(bound.execution?.workingDirectory, selected);
   assert.equal(first.execution?.workingDirectory, temporaryDirectory);

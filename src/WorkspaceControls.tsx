@@ -232,7 +232,7 @@ export function RootDirectoryCard({
         </div>
       )}
       <p className="root-directory-hint">
-        命令在本机执行，非沙箱。分支共享文件，停止任务不会回滚修改。
+        编码命令使用本机沙盒，联网目标单独授权。分支共享文件，停止任务不会回滚修改。
       </p>
     </section>
   );

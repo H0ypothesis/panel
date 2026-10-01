@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { renderToStaticMarkup } from "react-dom/server";
 import type { SubagentRun, TurnNode } from "../shared/types";
-import { SubagentAvatars, SubagentsPanel } from "./Subagents";
+import { SubagentAvatars, SubagentsPanel, agentRuns } from "./Subagents";
 import { filterToolRequests } from "./card-reference-input";
 import { ToolRequestList } from "./ToolRequestList";
 
@@ -28,6 +28,40 @@ const node: TurnNode = {
   createdAt: 1,
   subagents: runs,
 };
+
+test("child loading uses its own word group and only switches to CUA for its own tools", () => {
+  const child = { ...runs[0], status: "running" as const, response: "" };
+  const render = (toolCalls: TurnNode["toolCalls"] = []) =>
+    renderToStaticMarkup(
+      <SubagentsPanel
+        node={{ ...node, subagents: [child, runs[1]], toolCalls }}
+        selectedId={child.id}
+        onSelect={() => {}}
+        onDecision={async () => {}}
+        batchApprovalAvailable={false}
+      />,
+    );
+  assert.match(render(), /data-phrase-group="subagent"/);
+  const cua = {
+    id: "child-cua",
+    name: "computer_use_call",
+    arguments: { tool: "click" },
+    status: "running" as const,
+    startedAt: 2,
+  };
+  assert.match(
+    render([{ ...cua, subagentId: runs[1].id }]),
+    /data-phrase-group="subagent"/,
+  );
+  assert.match(
+    render([{ ...cua, subagentId: child.id }]),
+    /data-phrase-group="computer-use"/,
+  );
+  assert.doesNotMatch(
+    render([{ ...cua, subagentId: child.id, status: "awaiting_approval" }]),
+    /data-phrase-group="computer-use"/,
+  );
+});
 
 test("@ menu searches subagents in both languages and renders a dedicated chip", () => {
   for (const query of ["SUBAGENTS", "子代理", "协作"])
@@ -137,4 +171,106 @@ test("workflow orchestration is separate from agent counts and never exposes raw
   );
   assert.doesNotMatch(orchestration, /private-diagnostic|prompt redacted/);
   assert.match(orchestration, /编排已结束/);
+});
+
+test("verified recovery stays on the original page with both executions and their tool history", () => {
+  const original: SubagentRun = {
+    ...runs[0],
+    id: "original",
+    nativeRunId: "native-1",
+    sessionFile: "/session/one.jsonl",
+    task: "Original assignment",
+    response: "First output",
+    status: "failed",
+    error: "Tool 'write' exceeded its timeout of 50ms.",
+    createdAt: 1,
+  };
+  const recovered: SubagentRun = {
+    ...original,
+    id: "recovered",
+    nativeRunId: "native-2",
+    resumedFrom: "original",
+    task: "Follow-up: Finish the report",
+    response: "Recovered output",
+    status: "completed",
+    error: undefined,
+    createdAt: 3,
+  };
+  const independent: SubagentRun = {
+    ...original,
+    id: "fresh",
+    nativeRunId: "native-3",
+    sessionFile: "/session/fresh.jsonl",
+    response: "Fresh output",
+    createdAt: 2,
+  };
+  const grouped = [original, independent, recovered];
+  assert.equal(agentRuns(grouped).length, 2);
+  const card = renderToStaticMarkup(
+    <SubagentAvatars runs={grouped} onSelect={() => {}} />,
+  );
+  assert.match(card, /2 个子代理，1 个完成/);
+  const html = renderToStaticMarkup(
+    <SubagentsPanel
+      node={{
+        ...node,
+        subagents: grouped,
+        toolCalls: [
+          {
+            id: "old-tool",
+            name: "read",
+            arguments: { path: "old.txt" },
+            subagentId: original.id,
+            status: "completed",
+            output: "old-tool-output",
+            startedAt: 2,
+          },
+          {
+            id: "new-tool",
+            name: "read",
+            arguments: { path: "new.txt" },
+            subagentId: recovered.id,
+            status: "completed",
+            output: "new-tool-output",
+            startedAt: 4,
+          },
+        ],
+      }}
+      selectedId={recovered.id}
+      onSelect={() => {}}
+      onDecision={async () => {}}
+      batchApprovalAvailable={false}
+    />,
+  );
+  assert.match(html, /Original assignment/);
+  assert.match(
+    html,
+    /First output[\s\S]*主代理恢复任务[\s\S]*Recovered output/,
+  );
+  assert.match(html, /old\.txt/);
+  assert.match(html, /new\.txt/);
+  assert.match(html, /执行超时/);
+  assert.doesNotMatch(html, /Fresh output/);
+  const unrelated = { ...recovered, sessionFile: "/session/different.jsonl" };
+  assert.equal(agentRuns([original, unrelated]).length, 2);
+});
+
+test("legacy native recovery requires both the explicit original run and the same session file", () => {
+  const original = {
+    ...runs[0],
+    nativeRunId: "native-1",
+    sessionFile: "/session/one.jsonl",
+  };
+  const recovered = {
+    ...original,
+    id: "legacy-resume",
+    nativeRunId: "native-2",
+    createdAt: 2,
+    task: "Task: You are reviving a previous subagent conversation.\nOriginal run: native-1\nFollow-up:\nFinish",
+  };
+  assert.equal(agentRuns([original, recovered]).length, 1);
+  assert.equal(
+    agentRuns([original, { ...recovered, task: "Same assignment" }]).length,
+    2,
+  );
 });

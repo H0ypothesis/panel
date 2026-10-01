@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { types } from "node:util";
 
-export const TOOL_POLICY_VERSION = "panel-tools-v6-subagents-0.73.1";
+export const TOOL_POLICY_VERSION = "panel-tools-v8-sandbox-recovery";
 
 export interface ToolAuthorizationScope {
   workspaceId: string;
@@ -10,6 +10,7 @@ export interface ToolAuthorizationScope {
   settingsVersion: number;
   approvalMode: "ask" | "auto";
   safetyModel?: string;
+  sandboxPolicyVersion?: string;
 }
 
 export interface ToolAuthorizationCall {
@@ -107,6 +108,7 @@ function actionSnapshot(
     "settingsVersion",
     "approvalMode",
     "safetyModel",
+    "sandboxPolicyVersion",
   ]);
   if (Object.keys(scopeFields).some((key) => !scopeKeys.has(key)))
     invalidInput();
@@ -131,6 +133,12 @@ function actionSnapshot(
   const approvalMode = scopeFields.approvalMode?.value;
   if (approvalMode !== "ask" && approvalMode !== "auto") invalidInput();
   const safetyModel = scopeFields.safetyModel?.value;
+  const sandboxPolicyVersion = scopeFields.sandboxPolicyVersion?.value;
+  if (
+    sandboxPolicyVersion !== undefined &&
+    (typeof sandboxPolicyVersion !== "string" || !sandboxPolicyVersion)
+  )
+    invalidInput();
   if (
     safetyModel !== undefined &&
     (typeof safetyModel !== "string" || safetyModel.length === 0)
@@ -164,6 +172,7 @@ function actionSnapshot(
             settingsVersion,
             approvalMode,
             safetyModel: safetyModel ?? null,
+            sandboxPolicyVersion: sandboxPolicyVersion ?? null,
           },
           call: {
             id: callFields.id.value,

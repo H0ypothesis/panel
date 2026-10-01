@@ -6,6 +6,7 @@ import {
   mkdtemp,
   readFile,
   readdir,
+  realpath,
   rm,
   writeFile,
 } from "node:fs/promises";
@@ -39,6 +40,7 @@ const environment = {
 let child;
 let blocker;
 let modelService;
+let recoveryTemporary;
 let output = "";
 let url;
 const delay = (milliseconds) =>
@@ -95,6 +97,24 @@ try {
   const initialUrl = url;
   assert.match(await (await fetch(url)).text(), /<div id="root">/);
   const nativeCatalog = await api("/api/subagent-profiles");
+  // Detached runners load copied native modules rather than the esbuild bundle.
+  // Verify that their managed output namespace also follows the actual child cwd.
+  const nativeOutput = await import(
+    pathToFileURL(
+      join(app, "node_modules/pi-subagents/src/runs/shared/single-output.js"),
+    ).href
+  );
+  const outputProject = join(directory, "output-project");
+  const outputWorktree = join(outputProject, ".pi/worktrees/child");
+  assert.equal(
+    nativeOutput.resolveSingleOutputPath(
+      "report.md",
+      outputProject,
+      outputWorktree,
+      join(outputProject, ".pi/subagents/artifacts/outputs/run"),
+    ),
+    join(outputWorktree, ".pi/subagents/artifacts/outputs/run/report.md"),
+  );
   assert.ok(
     nativeCatalog.profiles.some(
       (profile) =>
@@ -345,43 +365,80 @@ Return a short answer.`,
     const isParent = body.tools?.some(
       (tool) => tool.function.name === "subagent",
     );
-    const delegate =
-      isParent && !body.messages.some((message) => message.role === "tool");
+    const recoveryFixture = body.messages.some(
+      (message) =>
+        message.role === "user" &&
+        JSON.stringify(message.content).includes("desktop-recovery-fixture"),
+    );
+    const hasToolResult = body.messages.some(
+      (message) => message.role === "tool",
+    );
+    const delegate = !recoveryFixture && isParent && !hasToolResult;
     if (!isParent) childRequests++;
     if (
       body.tools?.some((tool) => tool.function.name === "native_desktop_probe")
     )
       extensionRequests++;
-    const delta = delegate
-      ? {
-          role: "assistant",
-          tool_calls: [
-            {
-              index: 0,
-              id: "delegate-desktop",
-              type: "function",
-              function: {
-                name: "subagent",
-                arguments: JSON.stringify({
-                  tasks: [
-                    { agent: "oracle", task: "local fixture one" },
-                    { agent: "desktop-probe", task: "local fixture two" },
-                  ],
-                }),
+    const delta =
+      recoveryFixture && !hasToolResult
+        ? {
+            role: "assistant",
+            tool_calls: [
+              {
+                index: 0,
+                id: "desktop-recovery-bash",
+                type: "function",
+                function: {
+                  name: "bash",
+                  arguments: JSON.stringify({
+                    command: "printf once >> recovery-once.txt",
+                  }),
+                },
               },
-            },
-          ],
-        }
-      : {
-          role: "assistant",
-          content: isParent
-            ? "bundled parent synthesis"
-            : "bundled child result",
-        };
+            ],
+          }
+        : delegate
+          ? {
+              role: "assistant",
+              tool_calls: [
+                {
+                  index: 0,
+                  id: "delegate-desktop",
+                  type: "function",
+                  function: {
+                    name: "subagent",
+                    arguments: JSON.stringify({
+                      tasks: [
+                        {
+                          agent: "oracle",
+                          task: "local fixture one",
+                          output: "fixture-one.md",
+                        },
+                        {
+                          agent: "desktop-probe",
+                          task: "local fixture two",
+                          output: "fixture-two.md",
+                        },
+                      ],
+                    }),
+                  },
+                },
+              ],
+            }
+          : {
+              role: "assistant",
+              content: isParent
+                ? "bundled parent synthesis"
+                : "bundled child result",
+            };
     response.writeHead(200, { "Content-Type": "text/event-stream" });
     for (const choice of [
       { index: 0, delta, finish_reason: null },
-      { index: 0, delta: {}, finish_reason: delegate ? "tool_calls" : "stop" },
+      {
+        index: 0,
+        delta: {},
+        finish_reason: delta.tool_calls ? "tool_calls" : "stop",
+      },
     ]) {
       response.write(
         `data: ${JSON.stringify({ id: "fixture", object: "chat.completion.chunk", created: 1, model: "desktop-test-model", choices: [choice] })}\n\n`,
@@ -438,15 +495,115 @@ Return a short answer.`,
   );
   assert.equal(subagentTurn.subagentsEnabled, true);
   assert.equal(subagentTurn.subagents.length, 2);
+  const projectArtifacts = join(
+    await realpath(project),
+    ".pi/subagents/artifacts",
+  );
   assert.ok(
     subagentTurn.subagents.every(
       (run) =>
         run.status === "completed" &&
-        run.response.includes("bundled child result"),
+        run.response.includes("bundled child result") &&
+        run.outputPath.startsWith(projectArtifacts),
     ),
     JSON.stringify(subagentTurn.subagents),
   );
+  for (const run of subagentTurn.subagents)
+    assert.match(
+      await readFile(run.outputPath, "utf8"),
+      /bundled child result/,
+    );
   assert.match(subagentTurn.response, /bundled parent synthesis/);
+  // A long Unix-socket path causes broker setup to fail before any shell starts.
+  // Exercise recovery in the actual bundle without changing installed files.
+  if (process.platform === "darwin") {
+    await stop();
+    // Keep Panel's bridge below the macOS socket-path limit, while the
+    // sandbox's additional private directory pushes its proxy over the limit.
+    const longTemporary = (recoveryTemporary = await realpath(
+      await mkdtemp(join("/private/tmp", "p-rec-" + "x".repeat(42))),
+    ));
+    await start({ TMPDIR: longTemporary });
+    await api(
+      `/api/workspaces/${workspace.id}`,
+      { approvalMode: "auto", safetyModel: "openai/desktop-test-model" },
+      "PATCH",
+    );
+    await api(`/api/workspaces/${workspace.id}/nodes`, {
+      parentId: workspace.nodes[0].id,
+      prompt: "desktop-recovery-fixture",
+      requestId: "desktop-recovery-001",
+      config: { model: "openai/desktop-test-model", thinking: "off" },
+    });
+    const waitRecovery = async (previousId) => {
+      for (let attempt = 0; attempt < 300; attempt++) {
+        const turn = (await api("/api/state")).workspaces
+          .find((item) => item.id === workspace.id)
+          .nodes.at(-1);
+        if (turn.status === "failed") throw new Error(turn.error);
+        const call = turn.toolCalls?.find(
+          (call) =>
+            call.name === "sandbox_recovery" &&
+            call.status === "awaiting_approval" &&
+            call.id !== previousId,
+        );
+        if (call) return { turn, call };
+        await delay(100);
+      }
+      throw new Error("Bundled sandbox failure did not enter manual recovery");
+    };
+    const firstRecovery = await waitRecovery();
+    assert.equal(
+      firstRecovery.call.safetyReview,
+      undefined,
+      "host recovery must never be automatically approved",
+    );
+    await assert.rejects(readFile(join(project, "recovery-once.txt")), {
+      code: "ENOENT",
+    });
+    const approvalUrl = `/api/workspaces/${workspace.id}/nodes/${firstRecovery.turn.id}/approvals/`;
+    await api(approvalUrl + firstRecovery.call.id, {
+      decision: "retry_sandbox",
+      expectedRevision: firstRecovery.turn.revision ?? 0,
+    });
+    const secondRecovery = await waitRecovery(firstRecovery.call.id);
+    await assert.rejects(readFile(join(project, "recovery-once.txt")), {
+      code: "ENOENT",
+    });
+    await api(approvalUrl + secondRecovery.call.id, {
+      decision: "approve",
+      expectedRevision: secondRecovery.turn.revision ?? 0,
+    });
+    let recovered;
+    for (let attempt = 0; attempt < 100; attempt++) {
+      recovered = (await api("/api/state")).workspaces
+        .find((item) => item.id === workspace.id)
+        .nodes.at(-1);
+      if (recovered.status === "failed") throw new Error(recovered.error);
+      if (recovered.status === "completed") break;
+      await delay(100);
+    }
+    assert.equal(recovered.status, "completed", JSON.stringify(recovered));
+    assert.equal(
+      await readFile(join(project, "recovery-once.txt"), "utf8"),
+      "once",
+    );
+    assert.equal(
+      recovered.toolCalls.find((call) => call.name === "bash").executionMode,
+      "host",
+    );
+    assert.ok(
+      recovered.toolCalls.find((call) => call.id === secondRecovery.call.id)
+        .authorization.consumedAt,
+    );
+    await stop();
+    await rm(longTemporary, { recursive: true, force: true });
+    recoveryTemporary = undefined;
+    await start();
+    console.log(
+      "PASS: bundled sandbox setup failure pauses, retries and requires single human approval before host execution",
+    );
+  }
   await new Promise((resolve) => modelService.close(resolve));
   modelService = undefined;
   console.log(
@@ -591,6 +748,93 @@ Return a short answer.`,
   console.log(
     "PASS: bundled native research worker initializes all web tools and its isolated cache",
   );
+  const sandboxProject = await realpath(
+    await mkdtemp(join(directory, "sandbox-project-")),
+  );
+  // macOS Unix socket names have a short byte limit; keep the proxy's
+  // private temporary root shallow, like the production executor does.
+  const sandboxTemporary = await realpath(
+    await mkdtemp(join(tmpdir(), "p-sbx-")),
+  );
+  const outsideFile = join(directory, "sandbox-outside.txt");
+  await writeFile(outsideFile, "original");
+  await writeFile(join(sandboxProject, ".env"), "desktop-fixture-secret");
+  const shellQuote = (value) => `'${value.replaceAll("'", "'\\''")}'`;
+  const sandboxWorker = fork(join(app, "server/sandbox-worker.mjs"), [], {
+    execPath: node,
+    execArgv: [],
+    cwd: sandboxProject,
+    env: {
+      PATH: process.env.PATH,
+      HOME: directory,
+      TMPDIR: sandboxTemporary,
+      CLAUDE_CODE_TMPDIR: sandboxTemporary,
+    },
+    stdio: ["ignore", "ignore", "pipe", "ipc"],
+  });
+  const sandboxClosed = once(sandboxWorker, "close");
+  sandboxWorker.stderr.resume();
+  const sandboxTimeout = setTimeout(
+    () => sandboxWorker.kill("SIGKILL"),
+    20_000,
+  );
+  try {
+    const reply = await new Promise((resolve, reject) => {
+      sandboxWorker.once("message", resolve);
+      sandboxWorker.once("error", reject);
+      sandboxWorker.once("close", () =>
+        reject(new Error("Bundled sandbox worker exited before preparation")),
+      );
+      sandboxWorker.send({
+        type: "prepare",
+        command: `printf sandbox > result.txt; printf private > "$TMPDIR/marker"; if printf escaped > ${shellQuote(outsideFile)}; then exit 99; fi; if cat .env > /dev/null 2>&1; then exit 98; fi`,
+        config: {
+          network: {
+            allowedDomains: [],
+            deniedDomains: [],
+            allowLocalBinding: false,
+            allowAllUnixSockets: false,
+          },
+          filesystem: {
+            denyRead: [join(sandboxProject, ".env")],
+            allowWrite: [sandboxProject, sandboxTemporary],
+            denyWrite: [
+              join(sandboxProject, ".env"),
+              "/tmp/claude",
+              "/private/tmp/claude",
+            ],
+          },
+        },
+      });
+    });
+    assert.equal(reply.type, "ready", JSON.stringify(reply));
+    execFileSync("/bin/bash", ["-c", reply.command], {
+      cwd: sandboxProject,
+      env: {
+        PATH: process.env.PATH,
+        HOME: directory,
+        TMPDIR: sandboxTemporary,
+      },
+      stdio: "pipe",
+    });
+    assert.equal(
+      await readFile(join(sandboxProject, "result.txt"), "utf8"),
+      "sandbox",
+    );
+    assert.equal(
+      await readFile(join(sandboxTemporary, "marker"), "utf8"),
+      "private",
+    );
+    assert.equal(await readFile(outsideFile, "utf8"), "original");
+  } finally {
+    clearTimeout(sandboxTimeout);
+    sandboxWorker.kill("SIGTERM");
+    await sandboxClosed;
+    await rm(sandboxTemporary, { recursive: true, force: true });
+  }
+  console.log(
+    "PASS: bundled OS sandbox executes project commands, protects credentials and blocks outside writes",
+  );
   await start({ PANEL_DESKTOP_PARENT_PID: "2147483646" });
   const exited = once(child, "close");
   const timeout = setTimeout(() => child.kill("SIGKILL"), 4000);
@@ -603,5 +847,7 @@ Return a short answer.`,
   if (child && child.exitCode === null) child.kill("SIGKILL");
   blocker?.close();
   modelService?.close();
+  if (recoveryTemporary)
+    await rm(recoveryTemporary, { recursive: true, force: true });
   await rm(directory, { recursive: true, force: true });
 }

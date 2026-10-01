@@ -1,7 +1,14 @@
 import { memo, useEffect, useRef, useState, type CSSProperties } from "react";
-import { spinnerVerbs as phrases } from "./spinner-verbs";
+import { spinnerVerbGroups, type SpinnerVerbGroup } from "./spinner-verbs";
 import { MathCurveLoader } from "./MathCurveLoader";
 import type { SubagentCurve } from "./math-curve-loaders";
+
+const announcements: Record<SpinnerVerbGroup, string> = {
+  thinking: "正在生成回答…",
+  "computer-use": "正在操作电脑…",
+  delegation: "正在协调子代理任务…",
+  subagent: "子代理正在处理任务…",
+};
 
 const TAU = Math.PI * 2;
 
@@ -113,41 +120,52 @@ export function GenerationIndicator({
   hasResponse,
   active,
   activityKey,
+  phraseGroup = "thinking",
   message,
   curve,
 }: {
   hasResponse: boolean;
   active: boolean;
   activityKey: string;
+  phraseGroup?: SpinnerVerbGroup;
   message?: string;
   curve?: SubagentCurve;
 }) {
+  const phrases = spinnerVerbGroups[phraseGroup];
   const [selection, setSelection] = useState(() => ({
     activityKey,
+    phraseGroup,
     index: Math.floor(Math.random() * phrases.length),
   }));
 
-  useEffect(() => {
-    setSelection((previous) =>
-      previous.activityKey === activityKey
-        ? previous
-        : {
-            activityKey,
-            index:
-              (previous.index +
-                1 +
-                Math.floor(Math.random() * (phrases.length - 1))) %
-              phrases.length,
-          },
-    );
-  }, [activityKey]);
+  // Pick at the activity boundary, before rendering children. Switching to a
+  // shorter pool must never read the old pool's index or flash its old word.
+  let current = selection;
+  if (
+    selection.activityKey !== activityKey ||
+    selection.phraseGroup !== phraseGroup
+  ) {
+    current = {
+      activityKey,
+      phraseGroup,
+      index:
+        selection.phraseGroup === phraseGroup
+          ? (selection.index +
+              1 +
+              Math.floor(Math.random() * (phrases.length - 1))) %
+            phrases.length
+          : Math.floor(Math.random() * phrases.length),
+    };
+    setSelection(current);
+  }
 
-  const phrase = phrases[selection.index];
+  const phrase = phrases[current.index];
   const characters = Array.from(phrase);
 
   return (
     <div
       className={`waiting-response generation-indicator${hasResponse ? " response-generating" : ""}`}
+      data-phrase-group={phraseGroup}
     >
       {curve ? (
         <MathCurveLoader curve={curve} active={active} />
@@ -156,7 +174,7 @@ export function GenerationIndicator({
       )}
       <span className="generation-copy" aria-hidden="true">
         <span
-          key={selection.activityKey}
+          key={JSON.stringify([current.activityKey, current.phraseGroup])}
           className="generation-phrase"
           style={
             {
@@ -182,7 +200,7 @@ export function GenerationIndicator({
         aria-live="polite"
         aria-atomic="true"
       >
-        {message ?? "正在生成回答…"}
+        {message ?? announcements[phraseGroup]}
       </span>
     </div>
   );

@@ -218,7 +218,9 @@ const TurnCard = memo(function TurnCard({ data }: NodeProps<TurnGraphNode>) {
                   : waitingFor
                     ? toolWaitLabel(waitingCall!)
                     : turn.status === "running"
-                      ? "生成中"
+                      ? turn.connectionRetry
+                        ? `正在重连 ${turn.connectionRetry.attempt}/${turn.connectionRetry.maxAttempts}`
+                        : "生成中"
                       : turn.status === "queued"
                         ? "排队中"
                         : turn.status === "failed"

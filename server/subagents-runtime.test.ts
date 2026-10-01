@@ -21,7 +21,7 @@ import type {
   SafetyReviewResult,
   ToolRequest,
 } from "../shared/types.ts";
-import { PiRuntime } from "./runtime.ts";
+import { PiRuntime, type RunEnvironment } from "./runtime.ts";
 import { Scheduler } from "./scheduler.ts";
 import { createWorkspace } from "./seed.ts";
 import { Store } from "./store.ts";
@@ -70,7 +70,28 @@ async function fixture(
   const registry = createModels();
   registry.setProvider(faux.provider);
   const reviews: SafetyReviewRequest[] = [];
+  let untrustedCodingTools = false;
   class TestRuntime extends PiRuntime {
+    override subagentHost(config: RunConfig, environment: RunEnvironment) {
+      if (!untrustedCodingTools) return super.subagentHost(config, environment);
+      // Exercise the original review boundary for extension-like capabilities
+      // with coding names, without giving them Panel's trusted sandbox marker.
+      return super.subagentHost(config, {
+        ...environment,
+        beforeToolCall: (call, prepare, signal) =>
+          environment.beforeToolCall(
+            { ...call, sandbox: undefined },
+            prepare,
+            signal,
+          ),
+        executeTool: (call, execute, signal) =>
+          environment.executeTool(
+            { ...call, sandbox: undefined },
+            execute,
+            signal,
+          ),
+      });
+    }
     override models() {
       return super.models().map((model) => ({ ...model, available: true }));
     }
@@ -129,6 +150,9 @@ async function fixture(
     await rm(directory, { recursive: true, force: true });
   });
   return {
+    useUntrustedCodingTools: () => {
+      untrustedCodingTools = true;
+    },
     setApproveOrchestration: (value: boolean) => {
       approveOrchestration = value;
     },
@@ -252,6 +276,7 @@ for (const mode of ["ask", "auto"] as const)
         },
         mode,
       );
+      env.useUntrustedCodingTools();
       if (mode === "auto")
         env.runtime.reviewTool = async (request) => {
           env.reviews.push(request);
@@ -692,7 +717,7 @@ for (const explicit of [false, true]) {
       env.reviews
         .filter((review) => review.tool.name !== "subagent")
         .map((review) => review.tool.name),
-      ["write", "write"],
+      [],
     );
     const childCalls = node.toolCalls!.filter((call) => call.subagentId);
     assert.equal(
@@ -702,8 +727,7 @@ for (const explicit of [false, true]) {
     );
     assert.ok(
       childCalls.every(
-        (call) =>
-          call.approval === "safety_model" && call.authorization?.consumedAt,
+        (call) => call.approval === "sandbox" && call.authorization?.consumedAt,
       ),
     );
     assert.ok(
@@ -768,6 +792,7 @@ for (const cancel of [false, true]) {
         child ? "child reports the denied operation" : "parent reports result",
       );
     });
+    env.useUntrustedCodingTools();
     const node = await env.submit();
     await until(
       () =>
@@ -990,6 +1015,7 @@ test("a detached child keeps approvals, writes and snapshots after its parent co
     }
     return fauxAssistantMessage("background done");
   });
+  env.useUntrustedCodingTools();
   const node = await env.submit();
   await until(() => node.status === "completed");
   await until(

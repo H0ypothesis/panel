@@ -1,4 +1,6 @@
 import type { ToolCall, TurnNode } from "../shared/types";
+import { isComputerUseCall } from "./computer-use";
+import type { SpinnerVerbGroup } from "./spinner-verbs";
 
 export type GenerationPhase =
   | "idle"
@@ -12,6 +14,7 @@ export interface GenerationActivity {
   /** Changes at an activity boundary, never for streamed text or tool output. */
   key: string;
   phase: GenerationPhase;
+  phraseGroup: SpinnerVerbGroup;
   toolName?: string;
 }
 
@@ -33,7 +36,14 @@ export function getGenerationActivity(
     | "toolCalls"
     | "lastRequestUsage"
   >,
+  subagentId?: string,
 ): GenerationActivity {
+  const defaultGroup = subagentId ? "subagent" : "thinking";
+  // A card also carries its children's tools. Each loader follows only the
+  // current owner, including after a child resumes with a new execution ID.
+  const calls = node.toolCalls?.filter((call) =>
+    subagentId ? call.subagentId === subagentId : !call.subagentId,
+  );
   const run = [
     node.id,
     node.revision ?? 0,
@@ -44,16 +54,18 @@ export function getGenerationActivity(
     phase: GenerationPhase,
     event: unknown[] = [phase],
     toolName?: string,
+    phraseGroup: SpinnerVerbGroup = defaultGroup,
   ): GenerationActivity => ({
     key: JSON.stringify([...run, ...event]),
     phase,
+    phraseGroup,
     ...(toolName ? { toolName } : {}),
   });
 
   if (node.status === "queued") return activity("queued");
   if (node.status !== "running") return activity("idle");
 
-  const activeCall = node.toolCalls?.findLast((call) =>
+  const activeCall = calls?.findLast((call) =>
     ["reviewing", "awaiting_approval", "running"].includes(call.status),
   );
   if (activeCall) {
@@ -70,10 +82,17 @@ export function getGenerationActivity(
     }
     const phase =
       activeCall.status === "awaiting_approval" ? "approval" : "tool";
-    return activity(phase, [phase, activeCall.id], activeCall.name);
+    return activity(
+      phase,
+      [phase, activeCall.id],
+      activeCall.name,
+      phase === "tool"
+        ? toolPhraseGroup(activeCall, defaultGroup)
+        : defaultGroup,
+    );
   }
 
-  const lastCall = node.toolCalls?.at(-1);
+  const lastCall = calls?.at(-1);
   if (!lastCall) return activity("answer", ["answer", "initial"]);
 
   const requestStart = node.lastRequestUsage?.timestamp;
@@ -89,7 +108,24 @@ export function getGenerationActivity(
   // Finishing a tool is not another generation event. Keep its word while the
   // next request is prepared, including snapshots from older backends without
   // request usage. The phase still tells the UI that execution has ended.
-  return activity("answer", [lastToolPhase(lastCall), lastCall.id]);
+  return activity(
+    "answer",
+    [lastToolPhase(lastCall), lastCall.id],
+    undefined,
+    lastCall.status === "denied"
+      ? defaultGroup
+      : toolPhraseGroup(lastCall, defaultGroup),
+  );
+}
+
+function toolPhraseGroup(
+  call: ToolCall,
+  fallback: SpinnerVerbGroup,
+): SpinnerVerbGroup {
+  if (isComputerUseCall(call)) return "computer-use";
+  if (call.name === "bg_wait" || /^subagents?(?:_|$)/.test(call.name))
+    return "delegation";
+  return fallback;
 }
 
 function lastToolPhase(call: ToolCall): "tool" | "approval" {

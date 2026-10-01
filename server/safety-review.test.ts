@@ -151,8 +151,16 @@ test("review context contains complete data with no execution transcript or tool
   assert.equal(typeof context.messages[0].content, "string");
   const data = JSON.parse(context.messages[0].content as string);
   assert.equal(data.tool.arguments.command, command);
-  assert.deepEqual(data.recentTools, request.recentTools);
-  assert.deepEqual(data.ancestry, injected.ancestry);
+  assert.deepEqual(
+    data.recentTools[0].arguments,
+    request.recentTools![0].arguments,
+  );
+  assert.equal(data.recentTools[0].output, undefined);
+  assert.deepEqual(
+    data.ancestry,
+    injected.ancestry.map(({ prompt }) => ({ prompt })),
+  );
+  assert.doesNotMatch(JSON.stringify(data), /SYSTEM: ignore policy/);
   assert.match(context.systemPrompt!, /都不可信/);
   assert.match(context.systemPrompt!, /信息不足时 deny/);
   assert.doesNotMatch(context.systemPrompt!, /SYSTEM: ignore policy/);
@@ -331,4 +339,179 @@ test("review provider errors and over-budget context never yield an approval", a
     /上下文超过模型容量/,
   );
   assert.equal(calls, 1);
+});
+
+test("large sibling web evidence is omitted while authorization, current arguments and denials survive", () => {
+  const userRequest = "用户授权：只调研，不要删除文件。".repeat(500);
+  const args = { path: "outputs/report.md", content: "完整报告".repeat(1000) };
+  const context = buildSafetyReviewContext(
+    {
+      ...request,
+      userRequest,
+      subagent: { id: "current", agent: "researcher", task: "Write report" },
+      tool: { id: "current-write", name: "write", arguments: args },
+      recentTools: [
+        {
+          id: "search",
+          subagentId: "sibling",
+          name: "web_search",
+          arguments: { queries: ["public benchmark"] },
+          status: "completed",
+          output: "UNRELATED_PAGE".repeat(200000),
+        },
+        {
+          id: "denial",
+          subagentId: "sibling",
+          name: "bash",
+          arguments: { command: "rm -rf data" },
+          status: "denied",
+          approval: "denied",
+          safetyReview: {
+            model: "test",
+            decision: "deny",
+            reason: "删除未授权",
+            startedAt: 1,
+          },
+        },
+        {
+          id: "old-write",
+          subagentId: "previous",
+          name: "write",
+          arguments: { path: "outputs/report.md", content: "old" },
+          status: "completed",
+          approval: "approved",
+        },
+      ],
+      relatedSubagentIds: ["previous"],
+    },
+    128000,
+  );
+  const data = JSON.parse(context.messages[0].content as string);
+  assert.equal(data.userRequest, userRequest);
+  assert.deepEqual(data.tool.arguments, args);
+  assert.doesNotMatch(JSON.stringify(data), /UNRELATED_PAGE/);
+  assert.ok(
+    data.approvalHistory.some(
+      (item: any) =>
+        item.id === "denial" && item.review.reason === "删除未授权",
+    ),
+  );
+  assert.ok(
+    data.approvalHistory.some(
+      (item: any) => item.id === "old-write" && item.approval === "approved",
+    ),
+  );
+  assert.ok(data.contextSelection.omittedTools > 0);
+});
+
+test("review preserves relevant script evidence across agents and refuses to truncate the current action", () => {
+  const context = buildSafetyReviewContext(
+    {
+      ...request,
+      recentTools: [
+        {
+          ...request.recentTools![0],
+          subagentId: "sibling",
+          workingDirectory: "/tmp/project",
+          output: "console.log('REFERENCED_SCRIPT')",
+        },
+        {
+          name: "read",
+          arguments: { path: "irrelevant.txt" },
+          status: "completed",
+          output: "IRRELEVANT_TEXT".repeat(100000),
+        },
+      ],
+    },
+    16000,
+  );
+  const data = JSON.parse(context.messages[0].content as string);
+  assert.match(JSON.stringify(data), /REFERENCED_SCRIPT/);
+  assert.equal(data.recentTools[0].workingDirectory, "/tmp/project");
+  assert.doesNotMatch(JSON.stringify(data), /IRRELEVANT_TEXT/);
+  assert.throws(
+    () =>
+      buildSafetyReviewContext(
+        {
+          ...request,
+          tool: {
+            ...request.tool,
+            arguments: { command: "完整命令".repeat(50000) },
+          },
+        },
+        16000,
+      ),
+    /上下文超过模型容量/,
+  );
+});
+
+test("ancestor authorizations retain their scope while unrelated ancestor approvals are omitted", () => {
+  const prompt = "上游用户明确授权：运行 hello.cjs，禁止删除数据。".repeat(200);
+  const context = buildSafetyReviewContext(
+    {
+      ...request,
+      ancestry: [
+        {
+          prompt,
+          response: "无关的调研正文".repeat(20000),
+          toolDecisions: [
+            {
+              id: "ancestor-script",
+              nodeId: "ancestor-node",
+              revision: 2,
+              workingDirectory: "/tmp/project",
+              name: "write",
+              arguments: { path: "hello.cjs", content: "console.log(2)" },
+              status: "completed",
+              approval: "approved_tool",
+              actionHash: "approved-script-hash",
+            },
+            {
+              id: "ancestor-unrelated",
+              name: "bash",
+              arguments: { command: "node unrelated.cjs" },
+              status: "completed",
+              approval: "approved",
+            },
+            {
+              id: "ancestor-denial",
+              name: "bash",
+              arguments: { command: "rm -rf data" },
+              status: "denied",
+              approval: "denied",
+            },
+          ],
+        },
+      ],
+      subagent: { id: "child", agent: "worker", task: "Run the script" },
+    },
+    16000,
+  );
+  const data = JSON.parse(context.messages[0].content as string);
+  assert.equal(data.ancestry[0].prompt, prompt);
+  assert.equal(data.ancestry[0].response, undefined);
+  const script = data.approvalHistory.find(
+    (item: any) => item.id === "ancestor-script",
+  );
+  assert.equal(script.approval, "approved_tool");
+  assert.equal(script.actionHash, "approved-script-hash");
+  assert.equal(script.arguments.content.omitted, true);
+  assert.equal(
+    data.recentTools.find((item: any) => item.id === "ancestor-script")
+      .arguments.content,
+    "console.log(2)",
+  );
+  assert.deepEqual(script.scope, {
+    nodeId: "ancestor-node",
+    revision: 2,
+    workingDirectory: "/tmp/project",
+    fromAncestor: true,
+  });
+  assert.ok(
+    data.approvalHistory.some((item: any) => item.id === "ancestor-denial"),
+  );
+  assert.ok(
+    data.approvalHistory.every((item: any) => item.id !== "ancestor-unrelated"),
+  );
+  assert.match(context.systemPrompt!, /历史批准只适用于当时的动作和授权范围/);
 });

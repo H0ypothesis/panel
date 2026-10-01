@@ -1,7 +1,8 @@
 import type { AgentTool } from "@earendil-works/pi-agent-core";
 import { realpathSync, statSync } from "node:fs";
-import { lstat, realpath } from "node:fs/promises";
-import { dirname, isAbsolute, relative, resolve, sep } from "node:path";
+import { lstat, mkdtemp, realpath, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import type { TSchema } from "typebox";
 import {
   BACKGROUND_CONTEXT,
@@ -25,6 +26,22 @@ import {
 } from "../pi/packages/agent/src/harness/types.ts";
 import type { JsonValue } from "../pi/packages/agent/src/harness/session/types.ts";
 import { createShellEnvironment } from "./shell-environment.ts";
+import { AsyncLocalStorage } from "node:async_hooks";
+import {
+  prepareSandbox,
+  prepareSandboxWithRetry,
+  type NetworkPermission,
+  type PreparedSandbox,
+  type SandboxCheck,
+  type SandboxPreparation,
+} from "./sandbox.ts";
+import { SandboxSetupError, type SandboxRecovery } from "./sandbox-errors.ts";
+import {
+  assertSandboxFilePath,
+  assertSandboxWorkspace,
+  SANDBOX_POLICY_VERSION,
+  type SandboxScope,
+} from "./sandbox-policy.ts";
 
 const DEFAULT_COMMAND_TIMEOUT = 120;
 const MAX_COMMAND_TIMEOUT = 600;
@@ -32,6 +49,40 @@ const MAX_COMMAND_TIMEOUT = 600;
 // The Pi file mutation queue is scoped to an environment. Sharing it by canonical
 // cwd serializes edits to the same file across concurrent Panel branches.
 const environments = new Map<string, WorkspaceExecutionEnv>();
+const sandboxTools = new WeakSet<object>();
+const executionNotices = new WeakSet<object>();
+/** Process-local control notice, consumed before it reaches the model. */
+export function codingExecutionStartedNotice() {
+  const notice = { content: [], details: undefined };
+  executionNotices.add(notice);
+  return notice;
+}
+export function isCodingExecutionStartedNotice(value: object) {
+  return executionNotices.has(value);
+}
+export interface CodingSandboxOptions {
+  preflight?: Promise<SandboxCheck>;
+  recover?: SandboxRecovery;
+  prepare?: SandboxPreparation;
+}
+const invocation = new AsyncLocalStorage<
+  CodingSandboxOptions & {
+    toolCallId: string;
+    executionStarted?: () => void;
+    requestNetwork?: NetworkPermission;
+  }
+>();
+
+export function codingSandboxScope(
+  tool: object | undefined,
+  cwd: string,
+): SandboxScope | undefined {
+  if (tool && sandboxTools.has(tool))
+    return {
+      policyVersion: SANDBOX_POLICY_VERSION,
+      workingDirectory: realpathSync(cwd),
+    };
+}
 
 class WorkspaceExecutionEnv extends NodeExecutionEnv {
   private readonly root: string;
@@ -41,19 +92,136 @@ class WorkspaceExecutionEnv extends NodeExecutionEnv {
     this.root = root;
   }
 
-  override exec(
+  override async exec(
     command: string,
     options: ShellExecOptions | undefined,
     context: Context,
   ) {
-    // Enforce this at the execution boundary: Pi's bash tool explicitly defaults
-    // inheritEnv to true, and NodeExecutionEnv otherwise merges in process.env.
-    // No tool-controlled environment overrides are currently supported.
-    return super.exec(
-      command,
-      { ...options, env: createShellEnvironment(), inheritEnv: false },
-      context,
-    );
+    const policy = invocation.getStore();
+    const signal = context.abortSignal;
+    let dispatched = false;
+    let attempts = 0;
+    let checked: SandboxCheck | undefined;
+    let stage: "preflight" | "initialization" = "preflight";
+    const validateRoot = async () => {
+      signal?.throwIfAborted();
+      if ((await realpath(this.root)) !== this.root)
+        throw new Error("工作目录的实际路径已改变，命令未执行。");
+      assertSandboxWorkspace(this.root);
+    };
+    const run = (
+      execution: string,
+      temporary: string,
+      assertAuthorized?: () => void,
+    ) => {
+      signal?.throwIfAborted();
+      assertAuthorized?.();
+      dispatched = true;
+      policy?.executionStarted?.();
+      return super.exec(
+        execution,
+        {
+          ...options,
+          env: {
+            ...createShellEnvironment(),
+            TMPDIR: temporary,
+            TMP: temporary,
+            TEMP: temporary,
+            npm_config_cache: resolve(temporary, "npm-cache"),
+            XDG_CACHE_HOME: resolve(temporary, "cache"),
+            PIP_CACHE_DIR: resolve(temporary, "pip-cache"),
+          },
+          inheritEnv: false,
+        },
+        context,
+      );
+    };
+    const runSandbox = async (
+      sandbox: PreparedSandbox,
+      assertAuthorized?: () => void,
+    ) => {
+      try {
+        if (!sandbox.alive())
+          throw new SandboxSetupError(
+            "worker_exit",
+            "沙盒执行器已退出，命令未执行。",
+          );
+        return await run(sandbox.command, sandbox.temporary, assertAuthorized);
+      } finally {
+        await sandbox.close();
+      }
+    };
+    const prepare = async () => {
+      await validateRoot();
+      stage = "initialization";
+      const sandbox = await prepareSandboxWithRetry(
+        policy?.prepare ?? prepareSandbox,
+        command,
+        this.root,
+        signal,
+        policy?.requestNetwork,
+        () => attempts++,
+      );
+      // A successful explicit retry repairs this run's negative preflight
+      // result, so later commands can use the sandbox without another prompt.
+      if (checked) delete checked.error;
+      return sandbox;
+    };
+    let failure: SandboxSetupError;
+    try {
+      await validateRoot();
+      checked = await policy?.preflight;
+      signal?.throwIfAborted();
+      if (checked?.error) {
+        attempts = checked.attempts;
+        throw checked.error;
+      }
+      return await runSandbox(await prepare());
+    } catch (error) {
+      signal?.throwIfAborted();
+      if (
+        dispatched ||
+        !(error instanceof SandboxSetupError) ||
+        !policy?.recover
+      )
+        throw error;
+      failure = error;
+    }
+    while (true) {
+      signal?.throwIfAborted();
+      try {
+        return await policy.recover(
+          {
+            toolCallId: policy.toolCallId,
+            command,
+            workingDirectory: this.root,
+            timeoutSeconds: options?.timeout ?? DEFAULT_COMMAND_TIMEOUT,
+            reason: failure.message,
+            attempts,
+            stage,
+          },
+          async (action, assertAuthorized) => {
+            await validateRoot();
+            if (action === "retry")
+              return runSandbox(await prepare(), assertAuthorized);
+            if (action !== "host") throw new Error("无效的沙盒恢复选择。");
+            const temporary = await realpath(
+              await mkdtemp(join(tmpdir(), "panel-host-")),
+            );
+            try {
+              return await run(command, temporary, assertAuthorized);
+            } finally {
+              await rm(temporary, { recursive: true, force: true });
+            }
+          },
+          signal,
+        );
+      } catch (error) {
+        signal?.throwIfAborted();
+        if (dispatched || !(error instanceof SandboxSetupError)) throw error;
+        failure = error;
+      }
+    }
   }
 
   private async bounded<T>(
@@ -96,6 +264,7 @@ class WorkspaceExecutionEnv extends NodeExecutionEnv {
         isAbsolute(inside)
       )
         throw new Error("文件路径超出当前工作目录。");
+      assertSandboxFilePath(this.root, canonical);
       context.abortSignal?.throwIfAborted();
       return await operation(canonical);
     } catch (error) {
@@ -144,15 +313,18 @@ class WorkspaceExecutionEnv extends NodeExecutionEnv {
     content: string | Uint8Array,
     context: Context,
   ) {
-    return this.bounded(path, context, (canonical) =>
-      super.writeFile(canonical, content, context),
-    );
+    return this.bounded(path, context, (canonical) => {
+      assertSandboxFilePath(this.root, canonical, true);
+      return super.writeFile(canonical, content, context);
+    });
   }
 }
 
 function adaptTool<TParameters extends TSchema, TDetails>(
   tool: AgentHarnessTool<ExecutionToolContext, TParameters, TDetails>,
   env: WorkspaceExecutionEnv,
+  requestNetwork?: NetworkPermission,
+  sandboxOptions?: CodingSandboxOptions,
 ): AgentTool<TParameters, TDetails> {
   return {
     ...tool,
@@ -164,33 +336,52 @@ function adaptTool<TParameters extends TSchema, TDetails>(
       // These four Pi tools do not require durable invocation replay. Keep their
       // invocation-local memo contract intact at the classic Agent boundary.
       const memos = new Map<string, JsonValue>();
-      return tool.execute(
-        id,
-        params,
-        (partial) => onUpdate?.(partial),
-        { env },
+      return invocation.run(
         {
-          invocationId: id,
-          operationId: id,
-          turnId: id,
-          async getMemo(name) {
-            return memos.get(name);
-          },
-          async setMemo(name, value) {
-            if (value === undefined) memos.delete(name);
-            else memos.set(name, value);
-          },
+          ...sandboxOptions,
+          toolCallId: id,
+          requestNetwork,
+          executionStarted: () =>
+            onUpdate?.(
+              codingExecutionStartedNotice() as unknown as Parameters<
+                NonNullable<typeof onUpdate>
+              >[0],
+            ),
         },
-        context,
+        () =>
+          tool.execute(
+            id,
+            params,
+            (partial) => onUpdate?.(partial),
+            { env },
+            {
+              invocationId: id,
+              operationId: id,
+              turnId: id,
+              async getMemo(name) {
+                return memos.get(name);
+              },
+              async setMemo(name, value) {
+                if (value === undefined) memos.delete(name);
+                else memos.set(name, value);
+              },
+            },
+            context,
+          ),
       );
     },
   };
 }
 
 /** Reuse Pi's native tools; Panel supplies containment and approval separately. */
-export function createPanelTools(cwd: string): AgentTool[] {
+export function createPanelTools(
+  cwd: string,
+  requestNetwork?: NetworkPermission,
+  sandboxOptions?: CodingSandboxOptions,
+): AgentTool[] {
   const root = realpathSync(cwd);
   if (!statSync(root).isDirectory()) throw new Error("工作目录必须是文件夹。");
+  assertSandboxWorkspace(root);
   let env = environments.get(root);
   if (!env) {
     env = new WorkspaceExecutionEnv(root);
@@ -199,7 +390,7 @@ export function createPanelTools(cwd: string): AgentTool[] {
   const bash = createBashTool();
   const limitedBash: typeof bash = {
     ...bash,
-    description: `${bash.description} The default timeout is ${DEFAULT_COMMAND_TIMEOUT} seconds; the maximum is ${MAX_COMMAND_TIMEOUT} seconds. This is a local shell, not an operating-system sandbox.`,
+    description: `${bash.description} Commands run in an OS sandbox: writes are limited to the workspace and a private temporary directory; credential access is blocked; network destinations require a separate permission. Setup failures may pause for a human to retry the sandbox or explicitly approve this exact command on the host. Never bypass this recovery flow or replay a command that has started. Default timeout: ${DEFAULT_COMMAND_TIMEOUT} seconds; maximum: ${MAX_COMMAND_TIMEOUT} seconds.`,
     parameters: {
       ...bash.parameters,
       properties: {
@@ -217,10 +408,12 @@ export function createPanelTools(cwd: string): AgentTool[] {
       return bash.execute(id, { ...params, timeout }, ...args);
     },
   };
-  return [
+  const tools = [
     adaptTool(createReadTool(), env),
     adaptTool(createWriteTool(), env),
     adaptTool(createEditTool(), env),
-    adaptTool(limitedBash, env),
+    adaptTool(limitedBash, env, requestNetwork, sandboxOptions),
   ];
+  for (const tool of tools) sandboxTools.add(tool);
+  return tools;
 }

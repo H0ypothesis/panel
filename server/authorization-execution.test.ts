@@ -128,7 +128,27 @@ async function fixture(t: TestContext) {
     approve,
     save,
     holdConsumptionSave,
+    finish: () => finish.resolve(),
   };
+}
+
+for (const outcome of ["completed", "cancelled"] as const) {
+  test(`sandbox destination grants expire when their owning run is ${outcome}`, async (t) => {
+    const env = await fixture(t);
+    assert.ok(env.execution.sandboxPermissionScope);
+    const scope = env.execution.sandboxPermissionScope();
+    if (outcome === "cancelled")
+      await env.scheduler.cancel(env.workspace.id, env.node.id);
+    else env.finish();
+    for (
+      let attempt = 0;
+      attempt < 100 && env.node.status !== outcome;
+      attempt++
+    )
+      await delay(10);
+    assert.equal(env.node.status, outcome);
+    assert.notEqual(env.execution.sandboxPermissionScope(), scope);
+  });
 }
 
 test("final execution gate persists exact authorization consumption before the file effect", async (t) => {

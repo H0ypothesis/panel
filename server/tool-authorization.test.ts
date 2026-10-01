@@ -15,6 +15,7 @@ function fixture() {
     settingsVersion: 3,
     approvalMode: "auto",
     safetyModel: "provider/safety-model",
+    sandboxPolicyVersion: "panel-sandbox-v1",
   };
   const call: ToolAuthorizationCall = {
     id: "call-1",
@@ -81,6 +82,8 @@ const changedScopes: Partial<ToolAuthorizationScope>[] = [
   { approvalMode: "ask" },
   { safetyModel: "provider/other-safety-model" },
   { safetyModel: undefined },
+  { sandboxPolicyVersion: "panel-sandbox-v2" },
+  { sandboxPolicyVersion: undefined },
 ];
 for (const change of changedScopes) {
   test(`changed scope ${Object.keys(change)[0]} invalidates and consumes a grant`, () => {

@@ -643,9 +643,10 @@ export function createApi(
           if (
             body.decision !== "approve" &&
             body.decision !== "approve_tool" &&
+            body.decision !== "retry_sandbox" &&
             body.decision !== "deny"
           )
-            throw new Error("请选择批准、批量同意或拒绝。");
+            throw new Error("请选择批准、批量同意、重试沙盒或拒绝。");
           await scheduler.approve(
             decodeURIComponent(approval[1]),
             decodeURIComponent(approval[2]),

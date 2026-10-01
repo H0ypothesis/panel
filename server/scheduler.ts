@@ -1,4 +1,5 @@
 import { ancestorPath, directParentIds } from "../shared/types.ts";
+import { subagentThreads } from "../shared/subagent-runs.ts";
 import { contextParentInput, contextParentsMatch } from "./context-parents.ts";
 import { randomUUID } from "node:crypto";
 import type { AttachmentUpload } from "../shared/attachments.ts";
@@ -48,7 +49,15 @@ import { Store } from "./store.ts";
 import { directoriesOverlap, workingDirectory } from "./directories.ts";
 import { validateApprovalSettings } from "./approval-settings.ts";
 import { isWebTool } from "./web-tools.ts";
+import {
+  SANDBOX_POLICY_VERSION,
+  SANDBOX_TOOL_NAMES,
+} from "./sandbox-policy.ts";
 import { computerUseMetadata } from "./computer-use.ts";
+import type {
+  SandboxRecoveryAction,
+  SandboxRecoveryRequest,
+} from "./sandbox-errors.ts";
 import { isCuaTakeoverOperation } from "./cua-takeover.ts";
 import { sameTarget, type CuaPreparedApproval } from "./cua-task-control.ts";
 import { toolRequestPrompt, validateToolRequests } from "./tool-requests.ts";
@@ -82,6 +91,24 @@ interface ComputerUseTakeoverGrant {
   scope?: ComputerUseScope;
 }
 export class NodeMutationConflict extends Error {}
+
+function safetyUserRequest(node: StoredNode) {
+  return [
+    attachmentPrompt(
+      toolRequestPrompt(
+        contextReferencePrompt(node.prompt, node.contextReferences),
+        node.toolRequests,
+      ),
+      node.attachmentData ?? [],
+    ),
+    ...(node.runInputs ?? [])
+      .filter((input) => input.status === "delivered")
+      .map(
+        (input) =>
+          `用户追加消息（${input.mode === "steer" ? "引导当前任务" : "完成后继续"}）：\n${input.text}`,
+      ),
+  ].join("\n\n");
+}
 
 export class Scheduler {
   private queue: Job[] = [];
@@ -123,6 +150,17 @@ export class Scheduler {
   private settingsChanges = new Map<string, Promise<void>>();
   private mutations = new Map<string, Promise<unknown>>();
   private approvalVersions = new Map<string, number>();
+  private sandboxPermissionVersions = new WeakMap<StoredNode, number>();
+  private sandboxRecoveries = new Map<
+    string,
+    {
+      workspace: StoredWorkspace;
+      node: StoredNode;
+      parent: ToolCall;
+      request: SandboxRecoveryRequest;
+      arguments: Record<string, unknown>;
+    }
+  >();
   private authorizations = new ToolAuthorizationRegistry();
   private computerUseTakeovers = new Map<string, ComputerUseTakeoverGrant>();
   private computerUseScopes = new Map<
@@ -217,6 +255,21 @@ export class Scheduler {
     };
     return {
       subagentWakeManaged: true,
+      recoverSandbox: (request, execute, signal) => {
+        assertCurrent();
+        return this.recoverSandbox(
+          workspace,
+          node,
+          request,
+          execute,
+          signal ?? this.maintenanceController.signal,
+        );
+      },
+      sandboxPermissionScope: () =>
+        JSON.stringify([
+          this.toolApprovalScope(workspace, node),
+          this.sandboxPermissionVersions.get(node) ?? 0,
+        ]),
       subagentOwner: this.subagentOwner(node),
       subagentRecords: node.subagents,
       subagentsEnabled: node.subagentsEnabled,
@@ -242,8 +295,21 @@ export class Scheduler {
           ...run,
           error: run.error ? safeError(run.error) : undefined,
         };
+        if (index >= 0 && runs[index].stopReason === "user") {
+          record.status = "cancelled";
+          record.stopReason = "user";
+          record.error = undefined;
+        }
         if (index < 0) runs.push(record);
         else runs[index] = record;
+        if (
+          !["queued", "running"].includes(node.status) &&
+          !runs.some((run) => ["queued", "running"].includes(run.status))
+        )
+          this.sandboxPermissionVersions.set(
+            node,
+            (this.sandboxPermissionVersions.get(node) ?? 0) + 1,
+          );
         this.store.touch(workspace);
         if (!["queued", "running"].includes(run.status))
           void this.store.save().catch(() => {});
@@ -295,7 +361,13 @@ export class Scheduler {
       onToolUpdate: (id, update) => {
         if (!current()) return;
         const call = node.toolCalls?.find((item) => item.id === id);
-        if (!call || ["denied", "cancelled"].includes(call.status)) return;
+        if (
+          !call ||
+          call.status === "denied" ||
+          (call.status === "cancelled" && update.stopReason !== "timeout") ||
+          (call.stopReason === "timeout" && update.stopReason !== "timeout")
+        )
+          return;
         Object.assign(call, update, {
           output:
             update.output === undefined
@@ -2690,6 +2762,7 @@ export class Scheduler {
     for (const child of node.subagents ?? [])
       if (["running", "queued"].includes(child.status)) {
         child.status = "cancelled";
+        child.stopReason = "user";
         child.finishedAt = Date.now();
       }
     if (node.status !== "running" && node.status !== "queued") {
@@ -2814,6 +2887,14 @@ export class Scheduler {
   }
 
   private interruptTools(node: StoredNode, preserveChildren = false) {
+    if (
+      !preserveChildren ||
+      !node.subagents?.some((run) => ["queued", "running"].includes(run.status))
+    )
+      this.sandboxPermissionVersions.set(
+        node,
+        (this.sandboxPermissionVersions.get(node) ?? 0) + 1,
+      );
     this.revokeComputerUseTakeover(node);
     this.computerUseScopes.delete(node.id);
     delete node.computerUseScope;
@@ -2850,7 +2931,7 @@ export class Scheduler {
   private authorizationScope(
     workspace: StoredWorkspace,
     node: StoredNode,
-    call?: Pick<ToolCall, "workingDirectory">,
+    call?: Pick<ToolCall, "workingDirectory" | "sandbox">,
   ): ToolAuthorizationScope {
     if (
       !node.execution ||
@@ -2867,6 +2948,9 @@ export class Scheduler {
       settingsVersion: this.approvalVersions.get(workspace.id) ?? 0,
       approvalMode: workspace.approvalMode ?? "ask",
       safetyModel: workspace.safetyModel,
+      ...(call?.sandbox
+        ? { sandboxPolicyVersion: call.sandbox.policyVersion }
+        : {}),
     };
   }
 
@@ -2899,7 +2983,12 @@ export class Scheduler {
     call: Pick<ToolCall, "name" | "workingDirectory">,
   ) {
     const name = call.name;
-    if (name === "computer_use_call") return false;
+    if (
+      name === "computer_use_call" ||
+      name === "sandbox_network" ||
+      name === "sandbox_recovery"
+    )
+      return false;
     const grants = this.approvedTools.get(node.id);
     const scope = grants?.get(name);
     if (!scope) return false;
@@ -2915,12 +3004,139 @@ export class Scheduler {
     call.authorization.invalidationReason = reason;
   }
 
+  private async recoverSandbox<T>(
+    workspace: StoredWorkspace,
+    node: StoredNode,
+    request: SandboxRecoveryRequest,
+    execute: (
+      action: SandboxRecoveryAction,
+      assertAuthorized: () => void,
+    ) => Promise<T>,
+    signal: AbortSignal,
+  ): Promise<T> {
+    const parent = node.toolCalls?.find(
+      (call) => call.id === request.toolCallId,
+    );
+    const assertParent = () => {
+      signal.throwIfAborted();
+      if (
+        !parent ||
+        !this.toolIsLive(node, parent) ||
+        parent.status !== "running" ||
+        parent.name !== "bash" ||
+        parent.authorization?.consumedAt === undefined ||
+        parent.authorization.invalidatedAt ||
+        !this.dispatchingTools.has(`${node.id}:${parent.id}`) ||
+        parent.sandbox?.policyVersion !== SANDBOX_POLICY_VERSION ||
+        parent.sandbox.workingDirectory !== request.workingDirectory ||
+        parent.arguments.command !== request.command ||
+        (parent.arguments.timeout ?? 120) !== request.timeoutSeconds ||
+        parent.subagentId !== request.subagentId
+      )
+        throw new Error("沙盒恢复请求没有匹配的正在执行的编码命令。");
+    };
+    assertParent();
+    const scope = this.toolApprovalScope(workspace, node, parent);
+    const call = {
+      id: `sandbox-recovery:${randomUUID()}`,
+      name: "sandbox_recovery",
+      arguments: {
+        ...request,
+        reason: safeError(request.reason),
+        authorizationScope:
+          "仅当前命令；宿主执行不受原沙盒的文件和网络限制，不授权后续命令。",
+      },
+      workingDirectory: request.workingDirectory,
+      ...(request.subagentId ? { subagentId: request.subagentId } : {}),
+    };
+    this.sandboxRecoveries.set(call.id, {
+      workspace,
+      node,
+      parent: parent!,
+      request: structuredClone(request),
+      arguments: structuredClone(call.arguments),
+    });
+    try {
+      if (!(await this.beforeToolCall(workspace, node, call, signal)))
+        throw new Error("你已拒绝沙盒恢复，原命令未执行。");
+      const recorded = node.toolCalls!.find((item) => item.id === call.id)!;
+      const action = recorded.arguments.recoveryAction;
+      if (action !== "retry" && action !== "host")
+        throw new Error("沙盒恢复缺少明确的单次选择。");
+      return await this.executeAuthorizedTool(
+        workspace,
+        node,
+        { ...call, arguments: structuredClone(recorded.arguments) },
+        signal,
+        async () => {
+          const authorization = recorded.authorization;
+          const expectedArguments = JSON.stringify({
+            ...call.arguments,
+            recoveryAction: action,
+          });
+          const assertAuthorized = () => {
+            assertParent();
+            if (
+              recorded.status !== "running" ||
+              recorded.approval !== "approved" ||
+              recorded.authorization !== authorization ||
+              authorization?.invalidatedAt ||
+              authorization?.consumedAt === undefined ||
+              Date.now() >= authorization.expiresAt ||
+              recorded.arguments.recoveryAction !== action ||
+              JSON.stringify(recorded.arguments) !== expectedArguments ||
+              scope !== this.toolApprovalScope(workspace, node, parent)
+            )
+              throw new Error("沙盒恢复授权已失效，命令未执行。");
+          };
+          assertAuthorized();
+          let shellDispatched = false;
+          const result = await execute(action, () => {
+            if (shellDispatched)
+              throw new Error("这次沙盒恢复授权已用于执行命令，不能重复使用。");
+            assertAuthorized();
+            shellDispatched = true;
+            if (action === "host") {
+              parent!.executionMode = "host";
+              this.store.touch(workspace);
+            }
+          });
+          recorded.status = "completed";
+          recorded.output =
+            action === "host"
+              ? "已按你的单次批准执行宿主命令。"
+              : "已重试沙盒并执行原命令。";
+          recorded.finishedAt = Date.now();
+          this.store.touch(workspace);
+          await this.store.save();
+          return result;
+        },
+      );
+    } catch (error) {
+      const recorded = node.toolCalls?.find((item) => item.id === call.id);
+      if (recorded && !["denied", "cancelled"].includes(recorded.status)) {
+        recorded.status = signal.aborted ? "cancelled" : "failed";
+        recorded.error = safeError(error);
+        recorded.finishedAt = Date.now();
+        this.store.touch(workspace);
+      }
+      throw error;
+    } finally {
+      this.sandboxRecoveries.delete(call.id);
+    }
+  }
+
   private async executeAuthorizedTool<T>(
     workspace: StoredWorkspace,
     node: StoredNode,
     input: Pick<
       ToolCall,
-      "id" | "name" | "arguments" | "subagentId" | "workingDirectory"
+      | "id"
+      | "name"
+      | "arguments"
+      | "subagentId"
+      | "workingDirectory"
+      | "sandbox"
     >,
     signal: AbortSignal,
     execute: () => Promise<T>,
@@ -2945,8 +3161,10 @@ export class Scheduler {
         !call.authorization ||
         call.authorization.invalidatedAt ||
         call.authorization.consumedAt !== undefined ||
+        JSON.stringify(input.sandbox) !== JSON.stringify(call.sandbox) ||
         ![
           "policy",
+          "sandbox",
           "safety_model",
           "approved",
           "approved_tool",
@@ -3065,6 +3283,7 @@ export class Scheduler {
           "执行前审批设置已改变、授权过期或保存失败，未执行工具。",
         );
       // No await between the final check and dispatch into the Pi tool adapter.
+      call.executionStartedAt = Date.now();
       dispatched = true;
       try {
         return await execute();
@@ -3181,6 +3400,26 @@ export class Scheduler {
     const batch = decision === "approve_tool";
     if (batch && call.name === "computer_use_call")
       throw new Error("电脑操作需要逐次审核具体目标和参数，不能批量批准。");
+    if (batch && call.name === "sandbox_network")
+      throw new Error("联网授权必须限定到具体目标，不能批量批准全部目标。");
+    if (batch && call.name === "sandbox_recovery")
+      throw new Error("沙盒恢复必须逐条选择，不能批量批准宿主执行。");
+    if (decision === "retry_sandbox" && call.name !== "sandbox_recovery")
+      throw new Error("只有沙盒初始化恢复请求可以重试沙盒。");
+    if (
+      call.name === "sandbox_recovery" &&
+      !this.sandboxRecoveries.has(call.id)
+    )
+      throw new Error("沙盒恢复请求已失效。");
+    if (call.name === "sandbox_recovery" && allowed) {
+      const recovery = this.sandboxRecoveries.get(call.id)!;
+      if (
+        JSON.stringify(call.arguments) !== JSON.stringify(recovery.arguments) ||
+        call.workingDirectory !== recovery.request.workingDirectory ||
+        call.subagentId !== recovery.request.subagentId
+      )
+        throw new Error("沙盒恢复参数已改变，请重新发起恢复。");
+    }
     const controller = this.active.get(nodeId);
     const batchScope = batch
       ? this.toolApprovalScope(workspace, node, call)
@@ -3200,6 +3439,9 @@ export class Scheduler {
     );
     try {
       for (const item of calls) {
+        if (item.name === "sandbox_recovery" && allowed)
+          item.arguments.recoveryAction =
+            decision === "retry_sandbox" ? "retry" : "host";
         item.approval = batch
           ? "approved_tool"
           : allowed
@@ -3234,6 +3476,8 @@ export class Scheduler {
           item.status = "awaiting_approval";
           item.approval = undefined;
           item.finishedAt = undefined;
+          if (item.name === "sandbox_recovery")
+            delete item.arguments.recoveryAction;
         }
       }
       this.store.touch(workspace);
@@ -3247,13 +3491,31 @@ export class Scheduler {
     node: StoredNode,
     input: Pick<
       ToolCall,
-      "id" | "name" | "arguments" | "subagentId" | "workingDirectory"
+      | "id"
+      | "name"
+      | "arguments"
+      | "subagentId"
+      | "workingDirectory"
+      | "sandbox"
     >,
     signal: AbortSignal,
     prepare?: (
       onWait: (reason?: string) => void,
     ) => Promise<CuaPreparedApproval | void>,
   ) {
+    if (input.name === "sandbox_recovery") {
+      const recovery = this.sandboxRecoveries.get(input.id);
+      if (
+        !recovery ||
+        recovery.workspace !== workspace ||
+        recovery.node !== node ||
+        input.sandbox ||
+        input.arguments.recoveryAction !== undefined ||
+        input.arguments.command !== recovery.request.command ||
+        input.workingDirectory !== recovery.request.workingDirectory
+      )
+        throw new Error("沙盒恢复只能由宿主为未执行的命令发起。");
+    }
     // A switch enabled during preparation/review must not approve that old call.
     const takeoverAtStart = this.currentComputerUseTakeover(workspace, node);
     while (this.settingsChanges.has(workspace.id))
@@ -3334,6 +3596,14 @@ export class Scheduler {
       }
     }
     const batchApproved = this.hasToolApproval(workspace, node, input);
+    const sandboxed =
+      !!input.sandbox &&
+      SANDBOX_TOOL_NAMES.has(input.name) &&
+      input.sandbox.policyVersion === SANDBOX_POLICY_VERSION &&
+      input.sandbox.workingDirectory ===
+        (input.workingDirectory ?? node.execution?.workingDirectory);
+    if (input.sandbox && !sandboxed)
+      throw new Error("沙盒执行范围不匹配，未执行工具。");
     // Delegation itself has no file/network side effects. Child operations
     // still enter this same authorization path individually.
     const orchestration =
@@ -3358,7 +3628,9 @@ export class Scheduler {
       cuaContext?.sensitive;
     const automatic =
       !batchApproved &&
+      !sandboxed &&
       !orchestration &&
+      input.name !== "sandbox_recovery" &&
       !sensitiveTaskAction &&
       workspace.approvalMode === "auto";
     const safetyModel = workspace.safetyModel;
@@ -3366,14 +3638,16 @@ export class Scheduler {
     Object.assign(call, {
       status: automatic
         ? "reviewing"
-        : batchApproved || input.name === "read" || orchestration
+        : sandboxed || batchApproved || orchestration
           ? "running"
           : "awaiting_approval",
-      approval: batchApproved
-        ? "approved_tool"
-        : !automatic && (input.name === "read" || orchestration)
-          ? "policy"
-          : undefined,
+      approval: sandboxed
+        ? "sandbox"
+        : batchApproved
+          ? "approved_tool"
+          : !automatic && orchestration
+            ? "policy"
+            : undefined,
       fileSnapshot: ["write", "edit", "bash"].includes(input.name)
         ? "unchanged"
         : undefined,
@@ -3404,48 +3678,65 @@ export class Scheduler {
               call.workingDirectory ?? node.execution!.workingDirectory,
             workspaceTitle: workspace.title,
             workspaceDescription: workspace.description,
-            userRequest: [
-              attachmentPrompt(
-                toolRequestPrompt(
-                  contextReferencePrompt(node.prompt, node.contextReferences),
-                  node.toolRequests,
-                ),
-                node.attachmentData ?? [],
-              ),
-              ...(node.runInputs ?? [])
-                .filter((input) => input.status === "delivered")
-                .map(
-                  (input) =>
-                    `用户追加消息（${input.mode === "steer" ? "引导当前任务" : "完成后继续"}）：\n${input.text}`,
-                ),
-            ].join("\n\n"),
+            userRequest: safetyUserRequest(node),
             ancestry: node.contextIds
               .map(
                 (id) => workspace.nodes.find((ancestor) => ancestor.id === id)!,
               )
               .filter(Boolean)
               .map((ancestor) => ({
-                prompt: attachmentPrompt(
-                  toolRequestPrompt(
-                    contextReferencePrompt(
-                      ancestor.prompt,
-                      ancestor.contextReferences,
-                    ),
-                    ancestor.toolRequests,
-                  ),
-                  ancestor.attachmentData ?? [],
-                ),
+                prompt: safetyUserRequest(ancestor),
                 response: ancestor.response,
+                toolDecisions: (ancestor.toolCalls ?? [])
+                  .filter(
+                    (item) =>
+                      item.approval ||
+                      item.safetyReview ||
+                      item.status === "denied",
+                  )
+                  .map((item) => ({
+                    id: item.id,
+                    nodeId: ancestor.id,
+                    revision: ancestor.revision ?? 0,
+                    fromAncestor: true,
+                    subagentId: item.subagentId,
+                    workingDirectory:
+                      item.workingDirectory ??
+                      ancestor.execution?.workingDirectory,
+                    name: item.name,
+                    arguments: structuredClone(item.arguments),
+                    status: item.status,
+                    approval: item.approval,
+                    safetyReview: item.safetyReview,
+                    error: item.error,
+                    actionHash: item.authorization?.actionHash,
+                    startedAt: item.startedAt,
+                  })),
               })),
             recentTools: (node.toolCalls ?? [])
               .filter((item) => item !== call)
               .map((item) => ({
+                id: item.id,
+                nodeId: node.id,
+                revision: node.revision ?? 0,
                 subagentId: item.subagentId,
+                workingDirectory:
+                  item.workingDirectory ?? node.execution!.workingDirectory,
                 name: item.name,
                 arguments: structuredClone(item.arguments),
                 status: item.status,
                 output: item.output,
+                error: item.error,
+                approval: item.approval,
+                safetyReview: item.safetyReview,
+                actionHash: item.authorization?.actionHash,
+                startedAt: item.startedAt,
               })),
+            relatedSubagentIds: child
+              ? subagentThreads(node.subagents).find((thread) =>
+                  thread.runIds.includes(child.id),
+                )?.runIds
+              : undefined,
             tool: {
               id: call.id,
               name: call.name,
@@ -3524,7 +3815,7 @@ export class Scheduler {
       // never grants execution. Keep the exact call pending for a human decision.
       return this.waitForApproval(workspace, node, call, signal);
     }
-    if (batchApproved || input.name === "read" || orchestration) {
+    if (sandboxed || batchApproved || orchestration) {
       this.issueAuthorization(workspace, node, call);
       this.store.touch(workspace);
       await this.store.save();
@@ -3619,6 +3910,7 @@ export class Scheduler {
       node.status = "running";
       if (!continuation) node.startedAt = Date.now();
       node.error = undefined;
+      delete node.connectionRetry;
       this.store.touch(workspace);
       await this.store.save();
       if (node.execution?.workingDirectory) {
@@ -3818,6 +4110,12 @@ export class Scheduler {
             node.lastRequestUsage = { ...usage };
             this.store.touch(workspace);
           },
+          onConnectionRetry: (retry) => {
+            if (node.status !== "running" || !workspace.nodes.includes(node))
+              return;
+            node.connectionRetry = retry;
+            this.store.touch(workspace);
+          },
           onMessages: async (messages) => {
             // Preserve completed raw messages on failure and cancellation as well.
             if (!workspace.nodes.includes(node)) return;
@@ -3898,6 +4196,7 @@ export class Scheduler {
       }
     } finally {
       inputControl.accepting = false;
+      delete node.connectionRetry;
       this.runInputControls.delete(node.id);
       for (const input of node.runInputs ?? [])
         if (input.status === "queued") input.status = "cancelled";

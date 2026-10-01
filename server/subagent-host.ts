@@ -9,9 +9,17 @@ import {
   readdir,
   symlink,
   rename,
+  realpath,
 } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
-import { delimiter, join } from "node:path";
+import {
+  basename,
+  delimiter,
+  isAbsolute,
+  join,
+  relative,
+  resolve,
+} from "node:path";
 import { fileURLToPath } from "node:url";
 import { Type } from "typebox";
 import type { AgentTool } from "@earendil-works/pi-agent-core";
@@ -32,6 +40,17 @@ import excluded from "./subagent-exclusions.json" with { type: "json" };
 import { createWebTools, type WebToolOptions } from "./web-tools.ts";
 import type { SubagentSettings } from "../shared/subagent-settings.ts";
 import { generationError, outputTokenBudget } from "./generation-policy.ts";
+import { recoverySource } from "../shared/subagent-runs.ts";
+import {
+  createRunCodingTools,
+  startSandboxPreflight,
+} from "./run-coding-tools.ts";
+import { createShellEnvironment } from "./shell-environment.ts";
+import { isCodingExecutionStartedNotice } from "./coding-tools.ts";
+import {
+  SANDBOX_POLICY_VERSION,
+  SANDBOX_TOOL_NAMES,
+} from "./sandbox-policy.ts";
 
 export interface NativeHostOptions {
   directory: string;
@@ -290,6 +309,9 @@ export class NativeSubagentHost {
         ...pluginConfig,
         ...savedConfig,
         ...this.options.nativeOptions,
+        // Native output instructions and persisted recovery contracts use the
+        // project's artifact directory, inside the tools' writable workspace.
+        artifactDir: "project",
         globalConcurrencyLimit: this.options.concurrency,
         scheduledRuns: {
           ...((pluginConfig.scheduledRuns as object) ?? {}),
@@ -329,13 +351,13 @@ export class NativeSubagentHost {
         ? ["--import", import.meta.resolve("tsx")]
         : [],
       env: {
-        ...process.env,
+        ...createShellEnvironment(),
         ...(workerPath.endsWith(".ts")
           ? {
               TSX_TSCONFIG_PATH: fileURLToPath(
                 new URL("../tsconfig.json", import.meta.url),
               ),
-              NODE_OPTIONS: `${process.env.NODE_OPTIONS ?? ""} --import=${JSON.stringify(import.meta.resolve("tsx"))} --import=${JSON.stringify(new URL("./subagent-source-loader.mjs", import.meta.url).href)}`,
+              NODE_OPTIONS: `--import=${JSON.stringify(import.meta.resolve("tsx"))} --import=${JSON.stringify(new URL("./subagent-source-loader.mjs", import.meta.url).href)}`,
             }
           : {}),
         PANEL_SUBAGENT_HOST_CONFIG: hostConfig,
@@ -368,7 +390,8 @@ export class NativeSubagentHost {
         for (const item of this.effects.values()) item.reject(error);
         for (const run of this.records.values())
           if (!terminal(run)) {
-            run.status = "cancelled";
+            run.status = "failed";
+            run.stopReason = "error";
             run.error = "宿主已停止，可从会话恢复。";
             run.finishedAt = Date.now();
             this.publish(run);
@@ -390,8 +413,10 @@ export class NativeSubagentHost {
         }
         const pending = message.id && this.pending.get(message.id);
         if (!pending) return;
-        if (message.update) pending.update?.(message.update);
-        else {
+        if (message.update) {
+          this.captureOutcomes(message.update);
+          pending.update?.(message.update);
+        } else {
           this.pending.delete(message.id!);
           if (message.error) pending.reject(new Error(message.error));
           else pending.resolve(message.result!);
@@ -466,6 +491,13 @@ export class NativeSubagentHost {
       if (excluded.includes(String(args.agent)))
         throw new Error("此子代理角色已卸载。");
       if (args.action === "run") delete args.action;
+      if (args.action === "resume" && args.output === undefined) {
+        const output = this.resumeOutput(
+          String(args.id),
+          typeof args.index === "number" ? args.index : undefined,
+        );
+        if (output) args.output = output;
+      }
       if (Array.isArray(args.tasks)) {
         if (args.agent || args.task || args.workflowScript || args.workflow)
           throw new Error("tasks 不能与其他执行方式同时提供。");
@@ -485,6 +517,18 @@ export class NativeSubagentHost {
         );
     }
     this.options.environment.onSubagentsEnabled?.();
+    const controlledRuns = new Set(
+      ["stop", "interrupt"].includes(String(args.action))
+        ? [...this.records.values()]
+            .filter(
+              (run) =>
+                !terminal(run) &&
+                run.nativeRunId === args.id &&
+                (args.index === undefined || run.childIndex === args.index),
+            )
+            .map((run) => run.id)
+        : [],
+    );
     return new Promise<Result>((resolve, reject) => {
       const abort = () => this.process?.send({ id, cancel: true });
       signal?.addEventListener("abort", abort, { once: true });
@@ -492,6 +536,19 @@ export class NativeSubagentHost {
       this.pending.set(id, {
         resolve: (result) => {
           finish();
+          this.captureOutcomes(result);
+          if (
+            !result.isError &&
+            ["stop", "interrupt"].includes(String(args.action))
+          )
+            for (const run of this.records.values())
+              if (controlledRuns.has(run.id)) {
+                run.stopReason =
+                  args.action === "stop" ? "user" : "interrupted";
+                if (run.status === "failed" || run.status === "cancelled")
+                  run.status = "cancelled";
+                this.publish(run);
+              }
           if (String(args.action).startsWith("schedule.") && !result.isError)
             this.options.environment.onSubagentNotice?.({
               kind: "schedule-owner",
@@ -516,11 +573,97 @@ export class NativeSubagentHost {
     });
   }
 
+  private resumeOutput(id: string, index?: number) {
+    const target = [...this.records.values()].findLast(
+      (run) =>
+        run.nativeRunId === id &&
+        (index === undefined || run.childIndex === index),
+    );
+    const output =
+      target?.outputPath ??
+      [
+        ...(target?.task ?? "").matchAll(
+          /(?:Write your findings to exactly this path:|The runtime will persist it to exactly this path:)\s*([^\n]+)/g,
+        ),
+      ]
+        .at(-1)?.[1]
+        ?.trim();
+    if (!output || !target?.workingDirectory) return undefined;
+    const addressed = resolve(target.workingDirectory, output);
+    const rel = relative(target.workingDirectory, addressed);
+    return !rel.startsWith("..") && !isAbsolute(rel)
+      ? addressed
+      : /[/\\]subagent-artifacts[/\\]/.test(addressed)
+        ? join(
+            target.workingDirectory,
+            ".pi",
+            "subagents",
+            "artifacts",
+            "outputs",
+            target.nativeRunId!,
+            basename(addressed),
+          )
+        : output;
+  }
+
+  private captureOutcomes(result: Result) {
+    const details = result.details as {
+      runId?: string;
+      results?: {
+        index?: number;
+        sessionFile?: string;
+        artifactPaths?: { metadataPath?: string };
+        error?: string;
+        timedOut?: boolean;
+        stopped?: boolean;
+        interrupted?: boolean;
+      }[];
+    };
+    for (const outcome of details?.results ?? []) {
+      const run = [...this.records.values()].findLast((item) =>
+        outcome.sessionFile
+          ? item.sessionFile === outcome.sessionFile
+          : !!item.nativeRunId &&
+            ((item.nativeRunId === details.runId &&
+              item.childIndex === (outcome.index ?? 0)) ||
+              basename(outcome.artifactPaths?.metadataPath ?? "").startsWith(
+                `${item.nativeRunId}_`,
+              )),
+      );
+      if (!run) continue;
+      if (
+        outcome.timedOut ||
+        /exceeded its timeout|timed[ -]?out/i.test(outcome.error ?? "")
+      ) {
+        run.status = "failed";
+        run.stopReason = "timeout";
+        run.error = outcome.error ?? "子代理执行超时。";
+        for (const call of this.executing.values())
+          if (call.subagentId === run.id)
+            this.options.environment.onToolUpdate(call.id, {
+              status: "failed",
+              stopReason: "timeout",
+              error: `执行超时：${run.error}`,
+            });
+      } else if (outcome.stopped || outcome.interrupted) {
+        run.status = "cancelled";
+        run.stopReason = outcome.stopped ? "user" : "interrupted";
+      } else if (outcome.error && terminal(run)) {
+        run.status = "failed";
+        run.stopReason = "error";
+        run.error = outcome.error;
+      } else continue;
+      this.publish(run);
+    }
+  }
+
   private handle: BridgeHandler = async (method, raw, requestSignal, emit) => {
     const params = raw as any;
     const signal = AbortSignal.any([requestSignal, this.lifetime.signal]);
     if (method === "bootstrap")
       return { models: this.options.registry.getModels() };
+    if (method === "run.output")
+      return this.resumeOutput(params.runId, params.index);
     if (method === "host.ui") {
       this.options.environment.onSubagentNotice?.({
         kind: "ui-request",
@@ -565,7 +708,7 @@ export class NativeSubagentHost {
         childIndex: params.index,
         parentRunId: params.parentRunId,
         depth: params.depth ?? 0,
-        workingDirectory: params.cwd,
+        workingDirectory: await realpath(params.cwd),
         sessionFile: params.sessionFile,
         tools: params.tools,
       };
@@ -576,6 +719,15 @@ export class NativeSubagentHost {
         this.records.delete(placeholder.id);
       }
       this.children.set(run.id, new AbortController());
+      startSandboxPreflight(
+        run.workingDirectory!,
+        this.options.environment,
+        run.id,
+        AbortSignal.any([
+          this.lifetime.signal,
+          this.children.get(run.id)!.signal,
+        ]),
+      );
       this.publish(run);
       this.web.set(run.id, createWebTools(this.options.webOptions));
       return { models: this.options.registry.getModels() };
@@ -617,13 +769,23 @@ export class NativeSubagentHost {
     }
     if (method === "tool.before" || method === "tool.execute") {
       const run = this.child(params.childId);
-      if (params.cwd !== run.workingDirectory || terminal(run))
+      if (
+        (await realpath(params.cwd)) !== run.workingDirectory ||
+        terminal(run)
+      )
         throw new Error("子代理执行目录或状态已改变。");
       const call = {
         ...params.call,
         subagentId: run.id,
         workingDirectory: run.workingDirectory,
       } as ToolCall;
+      if (
+        call.sandbox &&
+        (call.sandbox.policyVersion !== SANDBOX_POLICY_VERSION ||
+          call.sandbox.workingDirectory !== run.workingDirectory ||
+          !SANDBOX_TOOL_NAMES.has(call.name))
+      )
+        throw new Error("子代理沙盒策略不匹配。");
       const activeSignal = AbortSignal.any([
         signal,
         this.children.get(run.id)?.signal ?? signal,
@@ -667,6 +829,31 @@ export class NativeSubagentHost {
         activeSignal,
       );
     }
+    if (method === "coding.execute") {
+      const call = this.executing.get(params.callId);
+      if (
+        !call?.sandbox ||
+        call.subagentId !== params.childId ||
+        call.name !== params.name ||
+        JSON.stringify(call.arguments) !== JSON.stringify(params.args) ||
+        !call.workingDirectory
+      )
+        throw new Error("编码工具没有匹配的沙盒执行授权。");
+      const tool = createRunCodingTools(
+        call.workingDirectory,
+        this.options.environment,
+        call.subagentId,
+        signal,
+      ).find((tool) => tool.name === call.name);
+      if (!tool) throw new Error("编码工具不可用。");
+      return tool.execute(call.id, call.arguments, signal, (update) => {
+        emit(
+          isCodingExecutionStartedNotice(update)
+            ? { type: "coding_execution_started" }
+            : update,
+        );
+      });
+    }
     if (method === "web.execute") {
       const call = this.executing.get(params.callId);
       if (
@@ -708,15 +895,34 @@ export class NativeSubagentHost {
       }
       if (method === "child.prompt") {
         run.task = value;
+        run.outputPath = [
+          ...value.matchAll(
+            /(?:Write your findings to exactly this path:|The runtime will persist it to exactly this path:)\s*([^\n]+)/g,
+          ),
+        ]
+          .at(-1)?.[1]
+          ?.trim();
+        const source = recoverySource(run, [...this.records.values()]);
+        if (source) run.resumedFrom = source.id;
         run.status = "running";
       }
       if (method === "child.closed") {
-        run.status = value?.aborted
-          ? "cancelled"
-          : value?.error || run.error
-            ? "failed"
-            : "completed";
-        run.error = value?.error ?? run.error;
+        run.error =
+          run.stopReason === "timeout"
+            ? run.error
+            : (value?.error ?? run.error);
+        run.status =
+          run.stopReason === "user" || run.stopReason === "interrupted"
+            ? "cancelled"
+            : run.error || value?.aborted
+              ? "failed"
+              : "completed";
+        if (run.status === "failed")
+          run.stopReason = /exceeded its timeout|timed[ -]?out/i.test(
+            run.error ?? "",
+          )
+            ? "timeout"
+            : "error";
         run.finishedAt = Date.now();
         this.children.delete(run.id);
         if (run.thinking) run.thinking.active = false;
@@ -813,6 +1019,11 @@ export class NativeSubagentHost {
           // child's full report with the notification preview.
           run.response = run.response || value.output || value.summary || "";
           run.error = value.error;
+          if (/exceeded its timeout|timed[ -]?out/i.test(run.error ?? "")) {
+            run.stopReason = "timeout";
+            run.status = "failed";
+          } else if (value.state === "stopped") run.stopReason = "user";
+          else if (value.state === "paused") run.stopReason = "interrupted";
           run.finishedAt = Date.now();
           this.publish(run);
         }

@@ -588,6 +588,7 @@ function toolCalls(value: unknown, label: string, now: number): ToolCall[] {
             [
               "auto",
               "policy",
+              "sandbox",
               "safety_model",
               "cua_takeover",
               "approved",
@@ -627,6 +628,15 @@ function toolCalls(value: unknown, label: string, now: number): ToolCall[] {
               : error,
           }),
       ...(approval === undefined ? {} : { approval }),
+      ...(source.executionMode === undefined
+        ? {}
+        : {
+            executionMode: enumeration(
+              source.executionMode,
+              ["host"] as const,
+              `${label}历史执行方式`,
+            ),
+          }),
       ...(source.sources === undefined
         ? {}
         : {

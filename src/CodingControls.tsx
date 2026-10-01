@@ -53,7 +53,7 @@ export function ApprovalModeSwitch({
         aria-pressed={mode === "ask"}
         className={mode === "ask" ? "selected" : ""}
         disabled={disabled}
-        title="文件读取由只读策略放行；修改文件、执行命令或联网查询前请求你的批准"
+        title="受限编码工具在沙盒范围内自动执行；命令联网、扩展工具和电脑操作按授权范围请求批准"
         onClick={() => onChange("ask")}
       >
         <ShieldQuestion size={13} />
@@ -64,7 +64,7 @@ export function ApprovalModeSwitch({
         aria-pressed={mode === "auto"}
         className={mode === "auto" ? "selected automatic" : ""}
         disabled={disabled}
-        title="需要审批的工具操作由安全模型审核，未通过时转交你处理；CUA 已授权的常规操作可直接执行，重要操作仍需单次批准"
+        title="受限编码工具直接执行；新增联网目标和沙盒外能力由安全模型审核，未通过时转交你处理；沙盒故障后的宿主执行始终由你单次确认"
         onClick={() => onChange("auto")}
       >
         <ShieldCheck size={13} />
@@ -298,6 +298,8 @@ const toolLabels: Record<string, string> = {
   edit: "修改文件",
   write: "写入文件",
   bash: "执行命令",
+  sandbox_network: "联网目标授权",
+  sandbox_recovery: "沙盒故障恢复",
   grep: "搜索文件内容",
   find: "查找文件",
   ls: "列出文件",
@@ -318,6 +320,7 @@ const toolStatusLabels: Record<ToolCall["status"], string> = {
 const approvalLabels: Record<NonNullable<ToolCall["approval"]>, string> = {
   auto: "旧版自动放行（未经安全模型审核）",
   policy: "只读策略放行",
+  sandbox: "沙盒范围内自动执行",
   safety_model: "安全模型已批准",
   cua_takeover: "CUA 接管已放行",
   approved: "你已批准此操作",
@@ -353,6 +356,8 @@ export function toolCallLabel(call: ToolCall) {
 
 export function toolCallTarget(call: ToolCall) {
   if (isComputerUseCall(call)) return computerUseTargetLabel(call);
+  if (call.name === "sandbox_network")
+    return `${call.arguments.host}:${call.arguments.port ?? 443}`;
   const target =
     call.arguments.path ??
     call.arguments.command ??
@@ -385,8 +390,12 @@ export function ToolCallCard({
   const pending = call.status === "awaiting_approval";
   const reviewing = call.status === "reviewing";
   const computerUse = isComputerUseCall(call);
+  const recovery = call.name === "sandbox_recovery";
   const label = toolCallLabel(call);
-  const allowsBatch = call.name !== "computer_use_call";
+  const allowsBatch =
+    call.name !== "computer_use_call" &&
+    call.name !== "sandbox_network" &&
+    !recovery;
   const waitingFor = call.status === "running" ? call.waitingFor : undefined;
   const decide = async (decision: ToolApprovalDecision) => {
     setBusy(true);
@@ -417,7 +426,7 @@ export function ToolCallCard({
         <summary>
           {computerUse ? (
             <MousePointer2 size={14} />
-          ) : call.name === "bash" ? (
+          ) : call.name === "bash" || recovery ? (
             <Terminal size={14} />
           ) : ["web_search", "source_check"].includes(call.name) ? (
             <Search size={14} />
@@ -434,7 +443,11 @@ export function ToolCallCard({
             {(call.status === "running" || reviewing) && (
               <LoaderCircle size={11} className="spin" />
             )}
-            {waitingFor ? toolWaitLabel(call) : toolStatusLabels[call.status]}
+            {call.stopReason === "timeout"
+              ? "执行超时"
+              : waitingFor
+                ? toolWaitLabel(call)
+                : toolStatusLabels[call.status]}
           </span>
           <ChevronDown size={12} />
         </summary>
@@ -446,6 +459,16 @@ export function ToolCallCard({
           )}
           <span className="tool-content-label">参数 · {call.name}</span>
           <pre>{JSON.stringify(call.arguments, null, 2)}</pre>
+          {recovery && (
+            <div className="tool-safety-review error">
+              <b>{pending ? "原命令尚未执行" : "沙盒初始化故障记录"}</b>
+              <p>{String(call.arguments.reason ?? "沙盒初始化失败")}</p>
+              <span>工作目录：{call.workingDirectory}</span>
+              <p>
+                宿主执行不受原沙盒的文件和网络限制，仅限这一次命令，不授权后续命令。
+              </p>
+            </div>
+          )}
           {call.safetyReview && (
             <div className={`tool-safety-review ${call.safetyReview.decision}`}>
               <b>
@@ -498,7 +521,13 @@ export function ToolCallCard({
           )}
           {call.approval && (
             <span className="tool-approval-record">
-              {approvalLabels[call.approval]}
+              {call.executionMode === "host"
+                ? "本次命令经你单独批准在宿主执行"
+                : recovery && call.approval === "approved"
+                  ? call.arguments.recoveryAction === "retry"
+                    ? "你已选择重试沙盒"
+                    : "你已单次批准宿主执行"
+                  : approvalLabels[call.approval]}
             </span>
           )}
         </div>
@@ -512,21 +541,23 @@ export function ToolCallCard({
       {pending && (
         <div className="tool-approval-actions">
           <p>
-            {computerUse
-              ? `批准后将对${computerUseTargetLabel(call) ? `「${computerUseTargetLabel(call)}」` : "指定目标"}执行以上电脑操作，截图和界面内容会交给对话模型。`
-              : call.name === "bash"
-                ? "批准后将在本机运行以上命令。"
-                : call.name === "source_check"
-                  ? "批准后将以上论断和查询发送给 Exa，按参数获取来源原文并整理证据，结果交给对话模型核验。"
-                  : call.name === "get_search_content"
-                    ? "批准后将读取当前代理本轮已保存的联网内容，不发起新的网络请求。"
-                    : call.name === "web_search"
-                      ? "批准后将以上查询发送给 Exa，搜索结果会交给对话模型。"
-                      : call.name === "fetch_content"
-                        ? "批准后将访问以上公开网址，提取的网页或 PDF 文本会交给对话模型。"
-                        : call.name === "read"
-                          ? "批准后将读取以上文件并交给对话模型。"
-                          : "批准后将修改工作目录中的文件。"}
+            {recovery
+              ? "重试沙盒会重新初始化后执行原命令；宿主执行需要你的单次确认，即使开启自动审批也不会自动批准。"
+              : computerUse
+                ? `批准后将对${computerUseTargetLabel(call) ? `「${computerUseTargetLabel(call)}」` : "指定目标"}执行以上电脑操作，截图和界面内容会交给对话模型。`
+                : call.name === "bash"
+                  ? "批准后将在本机运行以上命令。"
+                  : call.name === "source_check"
+                    ? "批准后将以上论断和查询发送给 Exa，按参数获取来源原文并整理证据，结果交给对话模型核验。"
+                    : call.name === "get_search_content"
+                      ? "批准后将读取当前代理本轮已保存的联网内容，不发起新的网络请求。"
+                      : call.name === "web_search"
+                        ? "批准后将以上查询发送给 Exa，搜索结果会交给对话模型。"
+                        : call.name === "fetch_content"
+                          ? "批准后将访问以上公开网址，提取的网页或 PDF 文本会交给对话模型。"
+                          : call.name === "read"
+                            ? "批准后将读取以上文件并交给对话模型。"
+                            : "批准后将修改工作目录中的文件。"}
           </p>
           {allowsBatch && (
             <p className="tool-batch-hint">
@@ -549,6 +580,17 @@ export function ToolCallCard({
               <X size={13} />
               拒绝这次操作
             </button>
+            {recovery && (
+              <button
+                type="button"
+                className="tool-approve"
+                disabled={busy}
+                onClick={() => void decide("retry_sandbox")}
+              >
+                <ShieldCheck size={13} />
+                重试沙盒
+              </button>
+            )}
             <button
               type="button"
               className="tool-approve"
@@ -560,7 +602,11 @@ export function ToolCallCard({
               ) : (
                 <Check size={13} />
               )}
-              批准这次操作
+              {recovery
+                ? "仅本次在宿主执行"
+                : call.name === "sandbox_network"
+                  ? "允许本轮访问此目标"
+                  : "批准这次操作"}
             </button>
             {allowsBatch && (
               <button

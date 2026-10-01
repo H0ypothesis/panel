@@ -208,6 +208,7 @@ test("bash children cannot inherit server credentials or startup injections", as
     Object.assign(process.env, injections);
     const script = `console.log(JSON.stringify({
       inherited: ${JSON.stringify(Object.keys(injections))}.filter(key => Object.hasOwn(process.env, key)),
+      proxy: process.env.HTTPS_PROXY,
       path: process.env.PATH,
       home: process.env.HOME,
       cwd: process.cwd(),
@@ -217,7 +218,11 @@ test("bash children cannot inherit server credentials or startup injections", as
       command: `${quoted(process.execPath)} -e ${quoted(script)}`,
     });
     const child = JSON.parse(output(result));
-    assert.deepEqual(child.inherited, []);
+    assert.deepEqual(child.inherited, ["HTTPS_PROXY"]);
+    assert.notEqual(child.proxy, injections.HTTPS_PROXY);
+    assert.ok(
+      ["127.0.0.1", "localhost"].includes(new URL(child.proxy).hostname),
+    );
     assert.equal(child.path, process.env.PATH);
     assert.equal(child.home, process.env.HOME);
     assert.equal(child.cwd, await realpath(cwd));
