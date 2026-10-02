@@ -28,8 +28,6 @@ final class PanelWindow: NSWindow {
 // A transparent native view handles only the reserved titlebar strip. All other
 // hit tests reach the web view so selection and canvas gestures remain intact.
 final class PanelTitlebarView: NSView {
-    private var dragStart: (mouse: NSPoint, origin: NSPoint)?
-
     override func hitTest(_ point: NSPoint) -> NSView? {
         guard let window = window as? PanelWindow, let parent = superview,
               window.isTitlebarBackground(parent.convert(point, to: nil)) else { return nil }
@@ -40,29 +38,16 @@ final class PanelTitlebarView: NSView {
     override var mouseDownCanMoveWindow: Bool { false }
 
     override func mouseDown(with event: NSEvent) {
-        dragStart = nil
         guard let window = window else { return }
         if event.clickCount == 2 {
             window.performZoom(nil)
         } else if event.clickCount <= 1 {
-            dragStart = (window.convertPoint(toScreen: event.locationInWindow), window.frame.origin)
+            // AppKit owns tracking and movement for the entire gesture. Moving
+            // the frame again from mouseDragged can fight the native drag and
+            // feed the window's new origin back into the next pointer delta.
             window.performDrag(with: event)
         }
     }
-
-    override func mouseDragged(with event: NSEvent) {
-        // Window Server normally owns the drag after performDrag. If it leaves
-        // events with us (for example with assistive input), move the window here.
-        guard let start = dragStart, let window = window,
-              window.isMovable, !window.styleMask.contains(.fullScreen), window.attachedSheet == nil else { return }
-        let mouse = window.convertPoint(toScreen: event.locationInWindow)
-        var frame = window.frame
-        frame.origin = NSPoint(x: start.origin.x + mouse.x - start.mouse.x,
-                               y: start.origin.y + mouse.y - start.mouse.y)
-        window.setFrame(window.constrainFrameRect(frame, to: window.screen), display: true)
-    }
-
-    override func mouseUp(with event: NSEvent) { dragStart = nil }
 }
 
 // The renderer has only explicit native conveniences. No filesystem or shell API is
