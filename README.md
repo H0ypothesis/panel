@@ -9,8 +9,8 @@
 
 <!-- 发布新版时同步更新安装包链接。 -->
 <p align="center">
-  <a href="https://github.com/H0ypothesis/panel/releases/download/v0.9/Panel-mac-arm64.zip">
-    <img src="docs/assets/download-macos.svg" width="304" height="80" alt="一键下载 Panel v0.9 · Apple Silicon · macOS 13.5 及以上">
+  <a href="https://github.com/H0ypothesis/panel/releases/download/v0.9.1/Panel-mac-arm64.zip">
+    <img src="docs/assets/download-macos.svg" width="304" height="80" alt="一键下载 Panel v0.9.1 · Apple Silicon · macOS 13.5 及以上">
   </a>
 </p>
 
@@ -52,11 +52,13 @@
 3. 使用真实模型时，打开左下角 **「模型连接」→「未配置」**，填写 **API URL、API Key、Model** 并保存，配置立即生效。
 4. 新建探索，写下主题与背景；点击卡片右侧的 **`+`** 开始提问，或选中历史节点继续分支。
 
-当前公开下载版本为 **v0.9**，安装包面向 **Apple Silicon（arm64），macOS 13.5 及以上**。这是采用本地 ad-hoc 签名的预览版，尚未完成 Apple 公证；Intel 版本暂未提供下载。安装与快捷键说明见 [macOS 客户端文档](docs/MACOS.md)。
+当前公开下载版本为 **v0.9.1**，安装包面向 **Apple Silicon（arm64），macOS 13.5 及以上**。这是采用本地 ad-hoc 签名的预览版，尚未完成 Apple 公证；Intel 版本暂未提供下载。安装与快捷键说明见 [macOS 客户端文档](docs/MACOS.md)。
 
 按住顶部空白区域可拖动窗口，双击可放大到可用桌面区域，再次双击恢复原尺寸。模型配置也可通过 `⌘,` 打开。
 
 **v0.5 起支持 App 内更新**：每天自动检查 GitHub Release，发现新版后在左下角版本号旁显示「有更新」。点击即可下载、校验、替换并重启，探索和 API 配置会保留；有运行任务时需先等待完成。也可使用「Panel → 检查更新…」手动检查。
+
+v0.9.1 修复 macOS 顶部拖动窗口时的抖动问题，保留双击放大至屏幕可用区域及还原的行为。
 
 v0.9 新增系统编码沙盒，主代理和 Pi 子代理的命令写入限于当前项目及私有临时目录，联网目标单独审批；初始化异常可重试或人工批准单次宿主执行。模型临时断线最多自动重连 5 次，保留已完成工具结果，并改进子代理等待、超时、运行记录与审批界面。规则和边界见 [编码沙盒](docs/SANDBOX.md)。
 

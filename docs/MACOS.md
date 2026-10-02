@@ -6,6 +6,8 @@ Panel 现在提供可本地运行的 macOS 应用。原生外壳使用 Swift、A
 
 客户端从与 Web 版相同的 `src/`、`server/` 和 `shared/` 构建，包含画布分支输入卡片、模型上下文容量和路径占用显示，以及文件更新的 Git 记录。Git 快照沿用 Web 版的本机 Git 依赖；应用内置 Node，不内置 Git。
 
+v0.9.1 修复顶部拖动窗口时系统拖动与手动位移重复引起的抖动，统一由 AppKit 处理拖动，并保留双击放大和还原。
+
 v0.9 包含系统编码沙盒、按目标授权的命令联网、沙盒初始化恢复、模型断线重连，以及子代理等待和超时状态改进。主代理和 Pi 子代理共用编码执行器；具体执行范围见 [编码沙盒](SANDBOX.md)。
 
 ## 首次使用
@@ -32,7 +34,7 @@ v0.9 包含系统编码沙盒、按目标授权的命令联网、沙盒初始化
 
 ## 自动更新（v0.5 起）
 
-App 启动后检查 `H0ypothesis/panel` 的 GitHub Release，之后每 24 小时检查一次；关闭期间不运行后台检查，下次打开时补查。检查时间和已发现的更新会保留，升级到新版本后会重新检查。也可随时选择「Panel → 检查更新…」。
+App 启动后检查 `H0ypothesis/panel` 的 GitHub Release，之后每 24 小时检查一次；关闭期间不运行后台检查，下次打开时补查。检查时间和已发现的更新会保留，升级到新版本后会重新检查。也可随时点击 Mac 屏幕顶部菜单栏的「Panel → 检查更新…」。左下角版本号旁的更新按钮仅在有更新、操作进行中或需要重试时显示。
 
 v0.5.1 起，GitHub API 限流或连接失败时，会读取同一仓库的公开备用版本信息 `updates/macos.json`。两个来源都不可用时，后台检查保持安静，30 分钟后重试，连续失败逐步延长至 6 小时；如 GitHub 要求更长等待则遵守该时间，成功后恢复每日检查。手动检查或安装失败的气泡可点击关闭、按 Esc 收起，也会在 8 秒后自动收起；按钮保留重试入口。
 
@@ -125,16 +127,18 @@ release/build-info.json
 发布新版本并确认安装包已公开、可下载后，同步备用更新信息（标签替换为本次版本）：
 
 ```bash
-gh api repos/H0ypothesis/panel/releases/tags/v0.9 > build/published-release.json
+gh api repos/H0ypothesis/panel/releases/tags/v0.9.1 > build/published-release.json
 node scripts/update-release-feed.mjs build/published-release.json
 git add updates/macos.json
 git commit -m "chore: refresh public macOS update feed"
 git push origin main
 ```
 
-脚本只接受已发布的数字版本和带 GitHub SHA-256 摘要的本仓库安装包，保留最近 20 个版本；备用源的架构、版本、大小、下载地址与摘要验证和 API 来源相同。不要在安装包公开前更新此文件。v0.5 若因 API 限流无法自动升级，需要从 Release 手动下载一次当前版本 v0.9。
+脚本只接受已发布的数字版本和带 GitHub SHA-256 摘要的本仓库安装包，保留最近 20 个版本；备用源的架构、版本、大小、下载地址与摘要验证和 API 来源相同。不要在安装包公开前更新此文件。v0.5 若因 API 限流无法自动升级，需要从 Release 手动下载一次当前版本 v0.9.1。
 
 ## 验证记录与发布状态
+
+v0.9.1 使用 Apple Silicon `arm64`、独立 Node.js `24.19.0`，最低 macOS 13.5。已通过前后端 TypeScript 检查、16 项更新器测试、包内桌面运行时和原生子代理验证，以及 ZIP 完整性、前端与原生版本一致性和深层代码签名检查。构建源码提交为 `830e832385ba74d0114cad1a072a2bf405977473`，安装包及构建信息的 SHA-256 随 Release 提供。
 
 v0.9 实际验证使用 Apple Silicon `arm64`、独立 Node.js `24.19.0`，最低系统版本按 Node 二进制要求设为 macOS 13.5。已通过：
 
