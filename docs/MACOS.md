@@ -6,6 +6,8 @@ Panel 现在提供可本地运行的 macOS 应用。原生外壳使用 Swift、A
 
 客户端从与 Web 版相同的 `src/`、`server/` 和 `shared/` 构建，包含画布分支输入卡片、模型上下文容量和路径占用显示，以及文件更新的 Git 记录。Git 快照沿用 Web 版的本机 Git 依赖；应用内置 Node，不内置 Git。
 
+v0.9.5 新增电脑操作实时预览、思考开关与 effort 独立配置、思考参数兼容性检测，以及新建探索时选择默认模型和审批方式。原生预览的屏幕录制授权与使用方式见下文。
+
 v0.9.1 修复顶部拖动窗口时系统拖动与手动位移重复引起的抖动，统一由 AppKit 处理拖动，并保留双击放大和还原。
 
 v0.9 包含系统编码沙盒、按目标授权的命令联网、沙盒初始化恢复、模型断线重连，以及子代理等待和超时状态改进。主代理和 Pi 子代理共用编码执行器；具体执行范围见 [编码沙盒](SANDBOX.md)。
@@ -139,16 +141,18 @@ release/build-info.json
 发布新版本并确认安装包已公开、可下载后，同步备用更新信息（标签替换为本次版本）：
 
 ```bash
-gh api repos/H0ypothesis/panel/releases/tags/v0.9.1 > build/published-release.json
+gh api repos/H0ypothesis/panel/releases/tags/v0.9.5 > build/published-release.json
 node scripts/update-release-feed.mjs build/published-release.json
 git add updates/macos.json
 git commit -m "chore: refresh public macOS update feed"
 git push origin main
 ```
 
-脚本只接受已发布的数字版本和带 GitHub SHA-256 摘要的本仓库安装包，保留最近 20 个版本；备用源的架构、版本、大小、下载地址与摘要验证和 API 来源相同。不要在安装包公开前更新此文件。v0.5 若因 API 限流无法自动升级，需要从 Release 手动下载一次当前版本 v0.9.1。
+脚本只接受已发布的数字版本和带 GitHub SHA-256 摘要的本仓库安装包，保留最近 20 个版本；备用源的架构、版本、大小、下载地址与摘要验证和 API 来源相同。不要在安装包公开前更新此文件。v0.5 若因 API 限流无法自动升级，需要从 Release 手动下载一次当前版本 v0.9.5。
 
 ## 验证记录与发布状态
+
+v0.9.5 使用 Apple Silicon `arm64`、独立 Node.js `24.19.0`，最低 macOS 13.5。已通过前后端 TypeScript 检查、880 项核心测试、158 项前端测试、12 项安装测试和 16 项更新器测试，合计 1,066 项；包内桌面运行时、原生子代理、ZIP 完整性、前端与原生版本一致性、ScreenCaptureKit 链接和深层签名检查也已通过。构建源码提交为 `123af11fd1d638ea84224c5449608dd5286d40a9`，构建信息和 SHA-256 校验文件随 Release 提供。预览画面的真实采集需要用户授予屏幕录制权限，这些自动化检查不代替实际供应商和桌面交互验收。
 
 v0.9.1 使用 Apple Silicon `arm64`、独立 Node.js `24.19.0`，最低 macOS 13.5。已通过前后端 TypeScript 检查、16 项更新器测试、包内桌面运行时和原生子代理验证，以及 ZIP 完整性、前端与原生版本一致性和深层代码签名检查。构建源码提交为 `830e832385ba74d0114cad1a072a2bf405977473`，安装包及构建信息的 SHA-256 随 Release 提供。
 
