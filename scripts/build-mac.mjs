@@ -86,12 +86,15 @@ run("xcrun", [
   join(root, "build/swift-cache"),
   "desktop/macos/Panel.swift",
   "desktop/macos/Updater.swift",
+  "desktop/macos/CuaPreview.swift",
   "-o",
   join(contents, "MacOS/Panel"),
   "-framework",
   "AppKit",
   "-framework",
   "WebKit",
+  "-framework",
+  "ScreenCaptureKit",
 ]);
 run("xcrun", [
   "swift",

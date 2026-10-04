@@ -1,4 +1,5 @@
 import { version as appVersion } from "../package.json";
+import { thinkingDescription } from "../shared/thinking-controls";
 import {
   useCallback,
   useEffect,
@@ -48,7 +49,6 @@ import {
   directParentIds,
   DEFAULT_CONFIG,
   statusLabels,
-  thinkingLabels,
   type AppState,
   type ApprovalMode,
   type ContextCheckpoint,
@@ -124,6 +124,8 @@ import { RunInputComposer, RunInputHistory } from "./RunInputs";
 import type { RunInput, RunInputMode } from "../shared/types";
 import { getDesktopBridge, onDesktopAction } from "./desktop";
 import { DesktopUpdate } from "./DesktopUpdate";
+import { ComputerUsePreview } from "./ComputerUsePreview";
+import "./computer-use-preview.css";
 import {
   NodeActionsDialog,
   subtreeIds,
@@ -662,9 +664,18 @@ export function App() {
         draftKey,
         revision: selected.revision ?? 0,
         resolved:
-          Boolean(drafts[draftKey]?.config) || selected.status !== "root",
+          Boolean(drafts[draftKey]?.config) ||
+          Boolean(workspace?.defaultConfig) ||
+          selected.status !== "root",
       };
-      setConfig(drafts[draftKey]?.config ?? newBranchConfig(selected.config));
+      setConfig(
+        drafts[draftKey]?.config ??
+          newBranchConfig(
+            selected.status === "root"
+              ? (workspace?.defaultConfig ?? selected.config)
+              : selected.config,
+          ),
+      );
       detailRef.current?.scrollTo({ top: 0 });
       savePreference("node", selected.id);
     }
@@ -1453,6 +1464,8 @@ export function App() {
       selected.revision ?? 0,
       config.model,
       config.thinking,
+      config.thinkingMode,
+      config.effort,
       config.longTask === true,
     ]);
     const requestId =
@@ -1580,7 +1593,7 @@ export function App() {
       apply(
         await api<AppState>(
           `/workspaces/${workspace.id}/nodes/${selected.id}/cancel`,
-          {},
+          { expectedRevision: selected.revision ?? 0 },
         ),
       );
     } catch (reason) {
@@ -1701,7 +1714,7 @@ export function App() {
     )
       return;
     const scope = contextScope;
-    const requestKey = `${scope}:${config.model}:${config.thinking}`;
+    const requestKey = `${scope}:${config.model}:${config.thinking}:${config.thinkingMode}:${config.effort}`;
     const previousStatus = selected.preparedContextState?.status;
     if (previousStatus === "failed" || previousStatus === "cancelled")
       compactionRequestIds.current.delete(requestKey);
@@ -1838,6 +1851,7 @@ export function App() {
         </button>
         {modal === "new" ? (
           <NewWorkspace
+            models={models}
             onCreated={(result) => {
               apply(result.state);
               setWorkspaceId(result.workspaceId!);
@@ -2497,6 +2511,12 @@ export function App() {
                         void changeComputerUseTakeover(enabled, options)
                       }
                     />
+                    <ComputerUsePreview
+                      workspaceId={workspace.id}
+                      node={selected}
+                      online={online}
+                      onStop={cancel}
+                    />
                     <AttachmentList
                       attachments={selected.attachments ?? []}
                       workspaceId={workspace.id}
@@ -2519,7 +2539,7 @@ export function App() {
                       )}
                       <span className="answer-thinking">
                         <Zap size={11} />
-                        {thinkingLabels[selected.config.thinking]}
+                        {thinkingDescription(selected.config)}
                       </span>
                       <LongTaskBadge
                         config={selected.config}

@@ -1089,6 +1089,8 @@ export class Scheduler {
       !contextParentsMatch(preparation.contextParents, resolvedParents) ||
       preparation.config.model !== config.model ||
       preparation.config.thinking !== config.thinking ||
+      preparation.config.thinkingMode !== config.thinkingMode ||
+      preparation.config.effort !== config.effort ||
       !checkpointMatches(
         preparation.checkpoint!,
         context.messages,

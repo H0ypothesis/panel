@@ -18,6 +18,7 @@ import {
   parseSafetyReviewResponse,
   reviewSafetyTool,
 } from "./safety-review.ts";
+import { safetyContextTokens } from "./safety-context.ts";
 
 const request: SafetyReviewRequest = {
   model: "openai/safety-test",
@@ -180,8 +181,8 @@ test("Pi safety review uses the selected registry model in an independent single
   faux.setResponses([
     (context, options, _state, model) => {
       assert.equal(model.id, "safety-test");
-      assert.equal(options?.reasoning, undefined);
-      assert.equal(options?.maxTokens, 1024);
+      assert.equal(options?.reasoning, "low");
+      assert.equal(options?.maxTokens, 8192);
       assert.equal(options?.maxRetries, 0);
       assert.equal(options?.timeoutMs, 60000);
       assert.ok(options?.signal);
@@ -276,6 +277,7 @@ test("review selects the lowest supported thinking effort when off is unsupporte
   const registry: Pick<Models, "completeSimple"> = {
     async completeSimple(_model, _context, options) {
       assert.equal(options?.reasoning, "low");
+      assert.equal(options?.maxTokens, 8192);
       return approve;
     },
   };
@@ -286,6 +288,38 @@ test("review selects the lowest supported thinking effort when off is unsupporte
     signal(),
   );
   assert.equal(result.decision, "approve");
+});
+
+test("forced-thinking output reservation is counted before dispatch without truncating current arguments", async () => {
+  const { model } = setup();
+  const context = buildSafetyReviewContext(request, 128000);
+  const inputTokens = safetyContextTokens(
+    context.systemPrompt! + context.messages[0].content,
+  );
+  const contextWindow = inputTokens + 1024 + 256;
+  // This request fits with the former 1024-token cap, but not with forced thinking.
+  assert.doesNotThrow(() => buildSafetyReviewContext(request, contextWindow));
+  let calls = 0;
+  const registry: Pick<Models, "completeSimple"> = {
+    async completeSimple() {
+      calls++;
+      return approve;
+    },
+  };
+  await assert.rejects(
+    reviewSafetyTool(
+      registry,
+      {
+        ...model,
+        contextWindow,
+        thinkingLevelMap: { off: null, minimal: null },
+      },
+      request,
+      signal(),
+    ),
+    /上下文超过模型容量/,
+  );
+  assert.equal(calls, 0);
 });
 
 test("external cancellation prevents late review approval and aborts the provider", async () => {

@@ -1,6 +1,8 @@
 import { subagentCatalog } from "./subagent-profiles.ts";
+import { thinkingDescription } from "../shared/thinking-controls.ts";
 import { contextParentInput } from "./context-parents.ts";
 import { StateEvents } from "./state-events.ts";
+import { serveCuaPreview } from "./cua-preview.ts";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import {
   ancestorPath,
@@ -24,10 +26,11 @@ import {
 } from "../shared/attachments.ts";
 import type {
   DiscoverProviderModels,
+  ThinkingProbeInput,
   SaveProviderSettings,
 } from "../shared/provider-settings.ts";
 import { referenceNodeIds } from "./context-references.ts";
-import { validateLongTask } from "./run-config.ts";
+import { validateLongTask, workspaceDefaultConfig } from "./run-config.ts";
 
 function approvalMode(value: unknown): ApprovalMode {
   if (value !== "ask" && value !== "auto")
@@ -172,6 +175,136 @@ export function createApi(
       return true;
     }
     try {
+      const enterPreview = url.pathname.match(
+        /^\/api\/workspaces\/([^/]+)\/nodes\/([^/]+)\/computer-use\/preview\/enter$/,
+      );
+      if (request.method === "POST" && enterPreview) {
+        const workspaceId = decodeURIComponent(enterPreview[1]);
+        const nodeId = decodeURIComponent(enterPreview[2]);
+        const body = await readJson(request, 4096);
+        const revision = expectedRevision(body.expectedRevision);
+        const scopeId = field(body.scopeId, "预览目标", 256);
+        const find = () =>
+          store.data.workspaces
+            .find((workspace) => workspace.id === workspaceId)
+            ?.nodes.find((node) => node.id === nodeId);
+        const node = find();
+        if (!node) {
+          json(response, 404, { error: "任务不存在。" });
+          return true;
+        }
+        const assertCurrent = () => {
+          const live = find();
+          if (
+            !live ||
+            (live.revision ?? 0) !== revision ||
+            !["queued", "running"].includes(live.status) ||
+            live.computerUseScope?.id !== scopeId
+          )
+            throw new NodeMutationConflict("预览目标已变化，请刷新后重试。");
+        };
+        assertCurrent();
+        const source = runtime.computerUsePreviewSource?.(
+          node.computerUseScope!,
+        );
+        if (!source?.active()) {
+          json(response, 409, { error: "操作目标已释放，请刷新预览。" });
+          return true;
+        }
+        const controller = new AbortController();
+        const abort = () => controller.abort();
+        response.on("close", abort);
+        request.on("aborted", abort);
+        try {
+          await source.enter(
+            AbortSignal.any([controller.signal, AbortSignal.timeout(8000)]),
+            assertCurrent,
+          );
+          json(response, 200, { ok: true });
+        } finally {
+          response.off("close", abort);
+          request.off("aborted", abort);
+          await source.close();
+        }
+        return true;
+      }
+      const preview = url.pathname.match(
+        /^\/api\/workspaces\/([^/]+)\/nodes\/([^/]+)\/computer-use\/preview$/,
+      );
+      if (request.method === "GET" && preview) {
+        const workspaceId = decodeURIComponent(preview[1]);
+        const nodeId = decodeURIComponent(preview[2]);
+        const revisionText = url.searchParams.get("revision");
+        if (revisionText === null || !/^\d+$/.test(revisionText))
+          throw new Error("请提供当前任务版本。");
+        const revision = expectedRevision(Number(revisionText));
+        const find = () =>
+          store.data.workspaces
+            .find((workspace) => workspace.id === workspaceId)
+            ?.nodes.find((node) => node.id === nodeId);
+        const node = find();
+        if (!node) {
+          json(response, 404, { error: "任务不存在。" });
+          return true;
+        }
+        if ((node.revision ?? 0) !== revision) {
+          json(response, 409, { error: "任务已更新，请重新打开预览。" });
+          return true;
+        }
+        if (!runtime.computerUsePreviewSource) {
+          json(response, 501, { error: "当前服务不支持实时预览。" });
+          return true;
+        }
+        await serveCuaPreview(
+          request,
+          response,
+          `${workspaceId}:${nodeId}`,
+          () => {
+            const live = find();
+            const active =
+              !!live &&
+              (live.revision ?? 0) === revision &&
+              ["queued", "running"].includes(live.status);
+            const call = live?.toolCalls?.findLast(
+              (call) =>
+                call.name === "computer_use_call" &&
+                ["running", "awaiting_approval", "reviewing"].includes(
+                  call.status,
+                ),
+            );
+            const operations: Record<string, string> = {
+              get_window_state: "观察窗口",
+              get_browser_state: "观察页面",
+              click: "点击",
+              browser_click: "点击页面",
+              type_text: "输入",
+              browser_type: "输入",
+              scroll: "滚动",
+              browser_navigate: "打开页面",
+              drag: "拖动",
+              press_key: "按键",
+              hotkey: "按键",
+              browser_pointer: "移动操作光标",
+            };
+            return {
+              active,
+              scope: active ? live?.computerUseScope : undefined,
+              action: call
+                ? (call.waitingFor ??
+                  (call.status === "awaiting_approval"
+                    ? "等待批准"
+                    : call.status === "reviewing"
+                      ? "正在审核操作"
+                      : (operations[String(call.arguments.tool)] ??
+                        "正在操作")))
+                : "正在思考下一步",
+            };
+          },
+          (scope) => runtime.computerUsePreviewSource!(scope),
+          url.searchParams.get("native") === "1",
+        );
+        return true;
+      }
       if (request.method === "GET" && url.pathname === "/api/state")
         json(response, 200, store.snapshot());
       else if (request.method === "GET" && url.pathname === "/api/models")
@@ -237,16 +370,27 @@ export function createApi(
         json(response, 200, runtime.providerSettings());
       } else if (
         request.method === "POST" &&
-        /^\/api\/model-providers\/[^/]+\/models$/.test(url.pathname)
+        /^\/api\/model-providers\/[^/]+\/(models|thinking-probe)$/.test(
+          url.pathname,
+        )
       ) {
-        if (!runtime.discoverProviderModels)
-          throw new Error("当前运行时不支持获取模型列表，请更新并重启服务。");
+        const probe = url.pathname.endsWith("/thinking-probe");
+        if (
+          probe
+            ? !runtime.probeProviderThinking
+            : !runtime.discoverProviderModels
+        )
+          throw new Error(
+            probe
+              ? "当前服务不支持思考检测，请更新并重启服务。"
+              : "当前运行时不支持获取模型列表，请更新并重启服务。",
+          );
         let body: Record<string, unknown>;
         try {
           body = await readJson(request, 16_384);
         } catch {
           throw new Error(
-            "模型列表请求格式无效，请提交不超过 16 KB 的 JSON 配置。",
+            "模型设置请求格式无效，请提交不超过 16 KB 的 JSON 配置。",
           );
         }
         const controller = new AbortController();
@@ -255,11 +399,18 @@ export function createApi(
         };
         response.on?.("close", cancel);
         try {
-          const catalog = await runtime.discoverProviderModels(
-            decodeURIComponent(url.pathname.split("/")[3]),
-            body as unknown as DiscoverProviderModels,
-            controller.signal,
-          );
+          const id = decodeURIComponent(url.pathname.split("/")[3]);
+          const catalog = probe
+            ? await runtime.probeProviderThinking!(
+                id,
+                body as unknown as ThinkingProbeInput,
+                controller.signal,
+              )
+            : await runtime.discoverProviderModels!(
+                id,
+                body as unknown as DiscoverProviderModels,
+                controller.signal,
+              );
           json(response, 200, catalog);
         } finally {
           response.off?.("close", cancel);
@@ -300,6 +451,7 @@ export function createApi(
           longTasks: true,
           computerUseTakeover: true,
           computerUseTaskControl: true,
+          computerUsePreview: !!runtime.computerUsePreviewSource,
           runInputs: true,
         });
       else if (request.method === "GET" && url.pathname === "/api/directories")
@@ -346,6 +498,13 @@ export function createApi(
           field(body.title, "标题", 80),
           field(body.description ?? "", "背景", 10000, true),
         );
+        if (body.config !== undefined) {
+          workspace.defaultConfig = workspaceDefaultConfig(
+            body.config,
+            runtime.models(),
+          );
+          workspace.nodes[0].config = { ...workspace.defaultConfig };
+        }
         workspace.approvalMode = approvalMode(body.approvalMode ?? "ask");
         if (
           body.autoCompact !== undefined &&
@@ -373,9 +532,7 @@ export function createApi(
             body.workingDirectory,
           );
         scheduler.assertDirectoryAvailable(workspace.workingDirectory);
-        store.data.workspaces.unshift(workspace);
-        store.touch(workspace);
-        await store.save();
+        await store.save({ workspace, createWorkspace: true });
         json(response, 201, {
           workspaceId: workspace.id,
           state: store.snapshot(),
@@ -712,7 +869,7 @@ export function createApi(
                 .slice(1)
                 .map(
                   (node, i) =>
-                    `## ${i + 1}. ${node.prompt}\n\n模型：${node.config.model} · 思考强度：${node.config.thinking} · 状态：${node.status}\n\n${node.toolRequests?.length ? `指定工具：${node.toolRequests.map((tool) => `@${tool}`).join("、")}\n\n` : ""}${node.attachments?.length ? `附件：${node.attachments.map((file) => `${file.name.replace(/[\r\n]/g, " ")}（${file.size} 字节${file.truncated ? "，提取内容已截断" : ""}）`).join("、")}\n\n` : ""}${node.contextReferences?.length ? `引用卡片（保存时的内容快照）：\n\n${node.contextReferences.map((reference) => `> 卡片 ${reference.nodeId} · 版本 ${reference.revision}\n> 问题：${reference.prompt.replaceAll("\n", "\n> ")}\n> 回答：${reference.response.replaceAll("\n", "\n> ")}`).join("\n\n")}\n\n` : ""}${node.contextStale ? "> 上游已更新，此回答基于修改前的上下文，需重新生成。\n\n" : ""}${node.response || "（暂无回答）"}\n`,
+                    `## ${i + 1}. ${node.prompt}\n\n模型：${node.config.model} · 思考强度：${thinkingDescription(node.config)} · 状态：${node.status}\n\n${node.toolRequests?.length ? `指定工具：${node.toolRequests.map((tool) => `@${tool}`).join("、")}\n\n` : ""}${node.attachments?.length ? `附件：${node.attachments.map((file) => `${file.name.replace(/[\r\n]/g, " ")}（${file.size} 字节${file.truncated ? "，提取内容已截断" : ""}）`).join("、")}\n\n` : ""}${node.contextReferences?.length ? `引用卡片（保存时的内容快照）：\n\n${node.contextReferences.map((reference) => `> 卡片 ${reference.nodeId} · 版本 ${reference.revision}\n> 问题：${reference.prompt.replaceAll("\n", "\n> ")}\n> 回答：${reference.response.replaceAll("\n", "\n> ")}`).join("\n\n")}\n\n` : ""}${node.contextStale ? "> 上游已更新，此回答基于修改前的上下文，需重新生成。\n\n" : ""}${node.response || "（暂无回答）"}\n`,
                 )
                 .join("\n---\n\n");
             response.writeHead(200, {
@@ -797,7 +954,15 @@ export function createApi(
           nodeId &&
           suffix === "cancel"
         ) {
-          await readJson(request);
+          const body = await readJson(request);
+          if (body.expectedRevision !== undefined) {
+            const node = workspace.nodes.find((item) => item.id === nodeId);
+            if (
+              !node ||
+              (node.revision ?? 0) !== expectedRevision(body.expectedRevision)
+            )
+              throw new NodeMutationConflict("任务已更新，未停止新的运行。");
+          }
           await scheduler.cancel(workspaceId, nodeId);
           json(response, 200, store.snapshot());
         } else if (

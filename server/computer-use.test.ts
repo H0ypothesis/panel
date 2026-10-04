@@ -113,6 +113,7 @@ function schema(name: string): Tool {
         keys: { type: "array", items: { type: "string" } },
         modifiers: { type: "array", items: { type: "string" } },
         key: { type: "string" },
+        include_screenshot: { type: "boolean" },
       },
       required: nativeNames.includes(name)
         ? ["session", "pid", "window_id"]
@@ -144,6 +145,15 @@ class FakeDriver implements ComputerDriver {
       },
       listTools: async () =>
         [...nativeNames, ...browserNames, ...discoveryNames].map(schema),
+      readCursorState: async (signal) => {
+        const call = {
+          transportId: id,
+          name: "get_agent_cursor_state",
+          args: { session: id },
+        };
+        this.invocations.push(call);
+        return (await this.handler?.(call, signal))?.structuredContent;
+      },
       callTool: async (name, args, signal) => {
         const invocation = {
           transportId: id,
@@ -252,6 +262,309 @@ async function enableBrowser(run: ComputerUseRun) {
     group: "browser",
   });
 }
+
+test("preview sources require a live observed lease, use independent image-only sessions and expire on reconnect", async (t) => {
+  const { host, driver, run } = fixture(t);
+  driver.handler = (call) =>
+    call.name === "get_window_state"
+      ? {
+          structuredContent: {
+            pid: call.args.pid,
+            window_id: call.args.window_id,
+            elements: [],
+          },
+          content: [
+            { type: "image", mimeType: "image/png", data: "iVBORw0KGgo=" },
+          ],
+        }
+      : undefined;
+  const current = run();
+  await invoke(current, { tool: "get_window_state", target: windowTarget() });
+  const snapshot = (
+    current as unknown as {
+      snapshot: { scope: import("../shared/types.ts").ComputerUseScope };
+    }
+  ).snapshot;
+  const source = host.previewSource(snapshot.scope);
+  assert.ok(source);
+  const original = driver.invocations.find(
+    (call) => call.name === "get_window_state",
+  )!.transportId;
+  await source.enter(new AbortController().signal, () => {});
+  const focused = driver.invocations.at(-1)!;
+  assert.equal(focused.name, "bring_to_front");
+  assert.equal(focused.transportId, original);
+  assert.deepEqual(focused.args, { pid: 100, window_id: 1, session: original });
+  await source.capture(new AbortController().signal);
+  const capture = driver.invocations.at(-1)!;
+  assert.notEqual(capture.transportId, original);
+  assert.equal(capture.args.include_accessibility_tree, false);
+  assert.equal(capture.args.pid, 100);
+  assert.equal(capture.args.window_id, 1);
+  await source.close();
+  assert.ok(driver.closedSessions.includes(capture.transportId));
+  driver.generation++;
+  assert.equal(source.active(), false);
+  assert.equal(host.previewSource(snapshot.scope), undefined);
+  current.release();
+  assert.equal(host.previewSource(snapshot.scope), undefined);
+  await assert.rejects(
+    source.enter(new AbortController().signal, () => {}),
+    /目标已释放/,
+  );
+});
+
+test("preview focus waits for model input and refuses a lease released while queued", async (t) => {
+  const { host, driver, run } = fixture(t);
+  driver.handler = (call) =>
+    call.name === "get_window_state"
+      ? {
+          structuredContent: {
+            pid: call.args.pid,
+            window_id: call.args.window_id,
+            elements: [],
+          },
+        }
+      : undefined;
+  const current = run();
+  await invoke(current, { tool: "get_window_state", target: windowTarget() });
+  const snapshot = (
+    current as unknown as {
+      snapshot: { scope: import("../shared/types.ts").ComputerUseScope };
+    }
+  ).snapshot;
+  const source = host.previewSource(snapshot.scope)!;
+  const busy = await host.locks.acquireOperation(
+    "busy-other-task",
+    "exclusive",
+  );
+  const enter = source.enter(new AbortController().signal, () => {});
+  await pending(enter);
+  assert.equal(
+    driver.invocations.some((call) => call.name === "bring_to_front"),
+    false,
+  );
+  current.release();
+  busy();
+  host.locks.releaseOwner("busy-other-task");
+  await assert.rejects(enter, /目标已释放/);
+  assert.equal(
+    driver.invocations.some((call) => call.name === "bring_to_front"),
+    false,
+  );
+});
+
+test("preview focus rejects an old page URL even when navigation retains the task scope", async (t) => {
+  const { host, driver, run } = fixture(t);
+  const current = run();
+  await enableBrowser(current);
+  await invoke(current, { tool: "get_browser_state", target: windowTarget() });
+  let url = "https://a.example/first";
+  driver.handler = (call) =>
+    call.name === "get_browser_state"
+      ? {
+          structuredContent: {
+            status: "ok",
+            mode: "snapshot",
+            target_id: call.args.target_id,
+            tab_id: call.args.tab_id,
+            refs: [],
+            url,
+          },
+        }
+      : undefined;
+  await invoke(current, {
+    tool: "get_browser_state",
+    target: pageTarget("page-1-a"),
+  });
+  const snapshot = () =>
+    (
+      current as unknown as {
+        snapshot: { scope: import("../shared/types.ts").ComputerUseScope };
+      }
+    ).snapshot;
+  const source = host.previewSource(snapshot().scope)!;
+  url = "https://a.example/second";
+  await invoke(current, {
+    tool: "get_browser_state",
+    target: pageTarget("page-1-a"),
+  });
+  assert.equal(
+    snapshot().scope.id,
+    source.scope.id,
+    "scope covers the same tab and origin",
+  );
+  await assert.rejects(
+    source.enter(new AbortController().signal, () => {}),
+    /页面已变化/,
+  );
+  assert.equal(
+    driver.invocations.some((call) => call.name === "bring_to_front"),
+    false,
+  );
+});
+
+test("native cursor survives screenshot-free observations and model thinking, and expires with its lease", async (t) => {
+  t.mock.timers.enable({ apis: ["Date"], now: Date.now() });
+  const { host, driver, run } = fixture(t);
+  driver.handler = (call) =>
+    call.name === "get_window_state"
+      ? {
+          structuredContent: {
+            pid: call.args.pid,
+            window_id: call.args.window_id,
+            elements: [],
+          },
+        }
+      : call.name === "get_agent_cursor_state"
+        ? {
+            structuredContent: {
+              session: call.transportId,
+              enabled: true,
+              position: { x: 210, y: 120 },
+              window_bounds: { x: 10, y: 20, width: 800, height: 500 },
+              theme: { reduced_motion: "on" },
+              motion: { glide_duration_ms: 240 },
+            },
+          }
+        : undefined;
+  const current = run();
+  await invoke(current, {
+    tool: "get_window_state",
+    target: windowTarget(),
+    arguments: { include_screenshot: false },
+  });
+  const snapshot = (
+    current as unknown as {
+      snapshot: { scope: import("../shared/types.ts").ComputerUseScope };
+    }
+  ).snapshot;
+  const source = host.previewSource(snapshot.scope)!;
+  assert.equal(await source.cursor!(new AbortController().signal), undefined);
+  await invoke(current, {
+    tool: "click",
+    target: windowTarget(),
+    arguments: { x: 200, y: 100 },
+  });
+  const cursor = await source.cursor!(new AbortController().signal);
+  assert.ok(cursor);
+  assert.equal(cursor.x, 0.25);
+  assert.equal(cursor.y, 0.2);
+  assert.equal(cursor.action, "click");
+  assert.equal(cursor.pressed, true);
+  assert.equal(cursor.reducedMotion, true);
+  assert.equal(cursor.durationMs, 240);
+  t.mock.timers.tick(30_000);
+  await invoke(current, {
+    tool: "get_window_state",
+    target: windowTarget(),
+    arguments: { include_screenshot: false },
+  });
+  const idle = await source.cursor!(new AbortController().signal);
+  assert.equal(
+    idle?.x,
+    0.25,
+    "keep the last real pointer position while the target lease is active",
+  );
+  assert.equal(idle?.action, "move");
+  assert.equal(idle?.pressed, false, "idle heartbeats must not replay clicks");
+  current.release();
+  assert.equal(await source.cursor!(new AbortController().signal), undefined);
+});
+
+test("browser cursor uses dispatched main-frame coordinates and stays isolated on a shared transport", async (t) => {
+  t.mock.timers.enable({ apis: ["Date"], now: Date.now() });
+  const { host, driver, run } = fixture(t);
+  const a = run(),
+    b = run();
+  await enableBrowser(a);
+  await enableBrowser(b);
+  await invoke(a, { tool: "get_browser_state", target: windowTarget() });
+  driver.handler = (call) =>
+    call.name === "get_browser_state"
+      ? {
+          structuredContent: {
+            status: "ok",
+            mode: "snapshot",
+            target_id: call.args.target_id,
+            tab_id: call.args.tab_id,
+            refs: [],
+            url: "https://a.example/",
+          },
+        }
+      : call.name === "browser_click"
+        ? {
+            structuredContent: {
+              status: "ok",
+              target_id: call.args.target_id,
+              tab_id: call.args.tab_id,
+              frame: "main",
+              x: call.args.x,
+              y: call.args.y,
+            },
+          }
+        : undefined;
+  await invoke(a, {
+    tool: "get_browser_state",
+    target: pageTarget("page-1-a"),
+  });
+  await invoke(b, {
+    tool: "get_browser_state",
+    target: pageTarget("page-1-b"),
+  });
+  const scope = (r: ComputerUseRun) =>
+    (
+      r as unknown as {
+        snapshot: { scope: import("../shared/types.ts").ComputerUseScope };
+      }
+    ).snapshot.scope;
+  const first = host.previewSource(scope(a))!,
+    second = host.previewSource(scope(b))!;
+  await invoke(a, {
+    tool: "browser_click",
+    target: pageTarget("page-1-a"),
+    arguments: { x: 100, y: 200 },
+  });
+  await invoke(b, {
+    tool: "browser_click",
+    target: pageTarget("page-1-b"),
+    arguments: { x: 500, y: 300 },
+  });
+  assert.equal((await first.cursor!(new AbortController().signal))?.x, 100);
+  assert.equal((await second.cursor!(new AbortController().signal))?.x, 500);
+  t.mock.timers.tick(30_000);
+  const idle = await first.cursor!(new AbortController().signal);
+  assert.equal(idle?.x, 100);
+  assert.equal(idle?.action, "move");
+  assert.equal(idle?.pressed, false);
+  await invoke(a, {
+    tool: "get_browser_state",
+    target: pageTarget("page-1-a"),
+  });
+  driver.handler = (call) =>
+    call.name === "browser_click"
+      ? {
+          structuredContent: {
+            status: "ok",
+            target_id: call.args.target_id,
+            tab_id: call.args.tab_id,
+            frame: "oopif",
+            x: 10,
+            y: 20,
+          },
+        }
+      : undefined;
+  await invoke(a, {
+    tool: "browser_click",
+    target: pageTarget("page-1-a"),
+    arguments: { x: 10, y: 20 },
+  });
+  assert.equal(
+    await first.cursor!(new AbortController().signal),
+    undefined,
+    "child-frame geometry is not guessed",
+  );
+});
 
 test("same-window ownership spans observation, reasoning, and action; separate windows proceed", async (t) => {
   const { host, driver, run } = fixture(t);

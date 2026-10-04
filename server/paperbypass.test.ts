@@ -143,7 +143,10 @@ for (const { modelId, reply, contextWindow } of [
     assert.equal(model.contextWindow, contextWindow);
     assert.equal(model.supportsImages, supportsImages);
     assert.equal(model.envVar, "PAPERBYPASS_API_KEY");
-    assert.deepEqual(model.thinkingLevels, ["off"]);
+    assert.deepEqual(
+      model.thinkingLevels,
+      supportsImages ? ["low", "high", "max"] : ["off"],
+    );
     assert.equal(JSON.stringify(models).includes(dummyKey), false);
     assert.equal(
       safeError(new Error(`Unauthorized ${dummyKey}; token ${dummyKey}`)),
@@ -185,7 +188,10 @@ for (const { modelId, reply, contextWindow } of [
       "Pi reserves actual input and context safety headroom",
     );
     assert.equal(request.body.thinking, undefined);
-    assert.equal(request.body.reasoning_effort, undefined);
+    assert.equal(
+      request.body.reasoning_effort,
+      supportsImages ? "low" : undefined,
+    );
     assert.equal(JSON.stringify(request.body).includes(dummyKey), false);
     if (supportsImages) {
       const messages = request.body.messages as {

@@ -1,36 +1,33 @@
-.model-controls {
-  flex-wrap: wrap;
-}
-.model-controls > .model-select {
-  flex-basis: calc(100% - 110px);
-}
 .long-task-setting {
   display: flex;
-  flex-basis: 100%;
+  flex: 0 0 auto;
   align-items: center;
-  gap: 10px;
+  gap: 0;
   min-width: 0;
-  min-height: 26px;
+  min-height: 29px;
   color: var(--text-muted);
 }
 .model-controls .long-task-toggle {
   flex-shrink: 0;
-  gap: 6px;
-  border: 0;
-  padding: 2px 0;
-  background: transparent;
+  gap: 5px;
+  height: 29px;
+  border: 1px solid var(--line);
+  padding: 0 8px;
+  background: var(--surface-control);
   font-size: 10px;
+  white-space: nowrap;
   cursor: pointer;
 }
 .long-task-toggle input {
   appearance: none;
   position: relative;
-  width: 26px;
-  height: 15px;
+  width: 22px;
+  height: 13px;
+  flex-shrink: 0;
   margin: 0;
-  border: 1px solid var(--line-strong);
+  border: 0;
   border-radius: 10px;
-  background: var(--surface-disabled);
+  background: var(--line-strong);
   cursor: pointer;
 }
 .long-task-toggle input::after {
@@ -41,14 +38,15 @@
   width: 9px;
   height: 9px;
   border-radius: 50%;
-  background: var(--text-muted);
+  background: white;
+  box-shadow: 0 1px 2px #0002;
 }
 .long-task-toggle input:checked {
   border-color: var(--primary-background);
   background: var(--primary-background);
 }
 .long-task-toggle input:checked::after {
-  left: 13px;
+  left: 11px;
   background: var(--primary-foreground);
 }
 .long-task-toggle input:disabled {
@@ -64,6 +62,9 @@
   color: var(--text-faint);
   font-size: 9px;
   line-height: 1.5;
+}
+.long-task-hint {
+  display: none;
 }
 .long-task-badge {
   flex-shrink: 0;

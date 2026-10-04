@@ -26,6 +26,12 @@ export interface PanelDesktop {
   getUpdateState?: () => Promise<DesktopUpdateState>;
   checkForUpdates?: () => Promise<DesktopUpdateState>;
   installUpdate?: () => Promise<DesktopUpdateState>;
+  setComputerUsePreview?: (task: {
+    workspaceId: string;
+    nodeId: string;
+    revision: number;
+  }) => Promise<unknown>;
+  closeComputerUsePreview?: () => Promise<unknown>;
 }
 
 declare global {

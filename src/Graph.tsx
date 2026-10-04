@@ -1,4 +1,5 @@
 import { memo, useEffect, useMemo, useState } from "react";
+import { thinkingDescription } from "../shared/thinking-controls";
 import {
   ReactFlow,
   Background,
@@ -45,7 +46,6 @@ import {
 import {
   ancestorPath,
   layoutTree,
-  thinkingLabels,
   type TurnNode,
   type Workspace,
   type ModelOption,
@@ -360,7 +360,7 @@ const TurnCard = memo(function TurnCard({ data }: NodeProps<TurnGraphNode>) {
             </span>
             <span className="footer-dot">·</span>
             <span className="card-thinking">
-              {thinkingLabels[turn.config.thinking]}
+              {thinkingDescription(turn.config)}
             </span>
             <LongTaskBadge
               config={turn.config}

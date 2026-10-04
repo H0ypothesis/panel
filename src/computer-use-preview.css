@@ -1,0 +1,171 @@
+.computer-preview-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin: 6px 0 10px;
+  padding: 6px 9px;
+  border: 1px solid var(--line-strong);
+  border-radius: 7px;
+  background: var(--surface);
+  color: var(--text-muted);
+  font: inherit;
+  font-size: 11px;
+  cursor: pointer;
+}
+.computer-preview-toggle.selected {
+  color: var(--text-accent-strong);
+  background: var(--surface-selected);
+}
+.computer-preview-toggle:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+.computer-preview-inline-error {
+  display: block;
+  font-size: 11px;
+  color: var(--error);
+}
+.computer-preview-window {
+  position: fixed;
+  right: 24px;
+  bottom: 24px;
+  z-index: 160;
+  width: 280px;
+  height: 175px;
+  min-width: 200px;
+  min-height: 125px;
+  max-width: calc(100vw - 16px);
+  max-height: calc(100vh - 16px);
+  overflow: hidden;
+  border: 0;
+  border-radius: 12px;
+  background: #111916;
+  color: #fff;
+  box-shadow: 0 6px 24px rgb(0 0 0 / 25%);
+  cursor: grab;
+  touch-action: none;
+  user-select: none;
+}
+.computer-preview-window:active {
+  cursor: grabbing;
+}
+.computer-preview-picture {
+  width: 100%;
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.computer-preview-picture img {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  pointer-events: none;
+}
+.computer-preview-picture p {
+  margin: 20px;
+  color: #c5cfca;
+  font-size: 11px;
+  text-align: center;
+  line-height: 1.7;
+}
+
+.computer-preview-controls {
+  position: absolute;
+  inset: 0;
+  background: rgb(0 0 0 / 12%);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 120ms ease;
+}
+.computer-preview-window:hover .computer-preview-controls,
+.computer-preview-window:focus-within .computer-preview-controls {
+  opacity: 1;
+  pointer-events: auto;
+}
+.computer-preview-window:hover .computer-preview-picture p,
+.computer-preview-window:focus-within .computer-preview-picture p {
+  opacity: 0;
+}
+.computer-preview-controls button {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  color: #fff;
+  background: rgb(0 0 0 / 36%);
+  cursor: pointer;
+}
+.computer-preview-controls button:hover {
+  background: rgb(0 0 0 / 55%);
+}
+.computer-preview-controls button:focus-visible,
+.computer-preview-resize:focus-visible {
+  outline: 2px solid #fff;
+  outline-offset: 3px;
+}
+.computer-preview-actions {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  gap: 18px;
+  align-items: center;
+  justify-content: center;
+}
+.computer-preview-controls .computer-preview-enter {
+  width: 44px;
+  height: 44px;
+}
+.computer-preview-controls .computer-preview-close {
+  position: absolute;
+  top: 8px;
+  left: 8px;
+  z-index: 1;
+  width: 24px;
+  height: 24px;
+}
+.computer-preview-status {
+  position: absolute;
+  bottom: 10px;
+  left: 24px;
+  right: 24px;
+  pointer-events: none;
+  text-align: center;
+  text-shadow: 0 1px 4px #000;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-size: 10px;
+}
+.computer-preview-resize {
+  position: absolute;
+  right: 5px;
+  bottom: 5px;
+  width: 18px;
+  height: 18px;
+  cursor: nwse-resize;
+}
+.computer-preview-resize::after {
+  content: "";
+  position: absolute;
+  width: 10px;
+  height: 10px;
+  right: 2px;
+  bottom: 2px;
+  background: repeating-linear-gradient(
+    135deg,
+    transparent 0 3px,
+    rgb(255 255 255 / 70%) 3px 4px,
+    transparent 4px 6px
+  );
+  clip-path: polygon(100% 0, 100% 100%, 0 100%);
+}
+@media (prefers-reduced-motion: reduce) {
+  .computer-preview-controls {
+    transition: none;
+  }
+}

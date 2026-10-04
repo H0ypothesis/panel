@@ -34,6 +34,7 @@ export interface CuaDriverStatus {
 }
 interface DaemonHandle {
   socket: string;
+  pid?: number;
   close(): Promise<void>;
 }
 export interface CuaDriverOptions {
@@ -281,7 +282,10 @@ async function launchDaemon(
     while (Date.now() < deadline) {
       signal.throwIfAborted();
       if (daemonError) throw daemonError;
-      if (existsSync(socket)) return { socket, close };
+      if (existsSync(socket)) {
+        const pid = Number(await readFile(pidFile, "utf8").catch(() => ""));
+        if (Number.isSafeInteger(pid) && pid > 1) return { socket, pid, close };
+      }
       await delay(50, undefined, { signal });
     }
     throw new Error(
@@ -312,6 +316,17 @@ export class CuaDriverService {
     this.layout = resolveCuaDriverLayout(options);
     this.platform = options.platform ?? process.platform;
     this.requestTimeoutMs = options.requestTimeoutMs ?? 60_000;
+  }
+  previewOverlay(): { pid: number; bundlePath: string } | undefined {
+    const pid = this.daemon?.pid;
+    if (
+      this.platform === "darwin" &&
+      this.state === "ready" &&
+      !this.closing &&
+      pid &&
+      this.layout.appPath
+    )
+      return { pid, bundlePath: this.layout.appPath };
   }
   getStatus(): CuaDriverStatus {
     let installed = false;
@@ -383,9 +398,20 @@ export class CuaDriverService {
       );
   }
   async openSession(signal?: AbortSignal): Promise<CuaDriverSession> {
+    return this.newSession(signal, false);
+  }
+  async openPreviewSession(signal?: AbortSignal): Promise<CuaDriverSession> {
+    return this.newSession(signal, true);
+  }
+  private async newSession(
+    signal: AbortSignal | undefined,
+    readOnly: boolean,
+  ): Promise<CuaDriverSession> {
     signal?.throwIfAborted();
-    const session = new CuaDriverSession(this, () =>
-      this.sessions.delete(session),
+    const session = new CuaDriverSession(
+      this,
+      () => this.sessions.delete(session),
+      readOnly,
     );
     this.sessions.add(session);
     try {
@@ -542,10 +568,17 @@ export class CuaDriverSession {
   private readonly lifecycle = new AbortController();
   private tools: Tool[] = [];
   private closing?: Promise<void>;
-  private readonly inFlight = new Set<Promise<CuaToolResult>>();
+  private readonly inFlight = new Set<Promise<unknown>>();
+  private cursorBounds?: {
+    client: Client;
+    key: string;
+    at: number;
+    pending: Promise<unknown>;
+  };
   constructor(
     private readonly service: CuaDriverService,
     private readonly onClose: () => void,
+    private readonly previewOnly = false,
   ) {}
   async connect(signal?: AbortSignal): Promise<void> {
     this.lifecycle.signal.throwIfAborted();
@@ -585,7 +618,10 @@ export class CuaDriverSession {
       const opts = { signal, timeout: this.service.requestTimeoutMs };
       for (const [name, args] of [
         ["start_session", { session: this.id }],
-        ["set_agent_cursor_enabled", { session: this.id, enabled: true }],
+        [
+          "set_agent_cursor_enabled",
+          { session: this.id, enabled: !this.previewOnly },
+        ],
       ] as const) {
         const result = await client.callTool(
           { name, arguments: args },
@@ -615,11 +651,106 @@ export class CuaDriverSession {
     await this.connect(signal);
     return structuredClone(this.tools);
   }
+  /** Content-free preview reads must never reconnect, rotate refs or stop an input daemon. */
+  async readCursorState(
+    signal?: AbortSignal,
+    window?: { pid: number; windowId: number },
+  ): Promise<Record<string, unknown> | undefined> {
+    if (
+      this.previewOnly ||
+      !this.client ||
+      this.closing ||
+      !this.tools.some((tool) => tool.name === "get_agent_cursor_state")
+    )
+      return;
+    const client = this.client;
+    const generation = this.generation;
+    const pending = (async () => {
+      try {
+        const read = async (
+          name: "get_agent_cursor_state" | "list_windows",
+          args: Record<string, unknown>,
+        ) => {
+          const result = await client.callTool(
+            { name, arguments: args },
+            undefined,
+            { timeout: Math.min(750, this.service.requestTimeoutMs), signal },
+          );
+          const data = result.structuredContent;
+          return !result.isError &&
+            data &&
+            typeof data === "object" &&
+            !Array.isArray(data)
+            ? (data as Record<string, unknown>)
+            : undefined;
+        };
+        let bounds: Promise<unknown> = Promise.resolve(undefined);
+        if (window && this.tools.some((tool) => tool.name === "list_windows")) {
+          const key = `${window.pid}:${window.windowId}`;
+          // Geometry does not depend on the model requesting a screenshot. This
+          // read neither walks AX nor replaces the model's screenshot/element refs.
+          if (
+            this.cursorBounds?.client !== client ||
+            this.cursorBounds.key !== key ||
+            Date.now() - this.cursorBounds.at >= 500
+          ) {
+            this.cursorBounds = {
+              client,
+              key,
+              at: Date.now(),
+              pending: read("list_windows", { pid: window.pid })
+                .then((data) => {
+                  if (!Array.isArray(data?.windows)) return;
+                  const exact = data.windows.filter(
+                    (item) =>
+                      item &&
+                      item.pid === window.pid &&
+                      item.window_id === window.windowId,
+                  );
+                  return exact.length === 1 ? exact[0].bounds : undefined;
+                })
+                .catch(() => undefined),
+            };
+          }
+          bounds = this.cursorBounds.pending;
+        }
+        const [data, windowBounds] = await Promise.all([
+          read("get_agent_cursor_state", { session: this.id }).catch(
+            () => undefined,
+          ),
+          bounds,
+        ]);
+        if (
+          !data ||
+          signal?.aborted ||
+          this.client !== client ||
+          this.generation !== generation
+        )
+          return;
+        return window ? { ...data, window_bounds: windowBounds } : data;
+      } catch {
+        return undefined;
+      }
+    })();
+    this.inFlight.add(pending);
+    try {
+      return await pending;
+    } finally {
+      this.inFlight.delete(pending);
+    }
+  }
   async callTool(
     name: string,
     args: Record<string, unknown> = {},
     signal?: AbortSignal,
   ): Promise<CuaToolResult> {
+    if (
+      this.previewOnly &&
+      (name !== "get_window_state" ||
+        args.include_accessibility_tree !== false ||
+        args.include_screenshot !== true)
+    )
+      throw new Error("Preview sessions only accept window image capture.");
     await this.connect(signal);
     const tool = this.tools.find((tool) => tool.name === name);
     if (!tool) throw new Error(`Unknown Cua Driver tool: ${name}`);
@@ -656,7 +787,11 @@ export class CuaDriverSession {
       const result = (await client.callTool(
         { name, arguments: args },
         undefined,
-        { timeout: this.service.requestTimeoutMs },
+        {
+          timeout: this.previewOnly
+            ? Math.min(this.service.requestTimeoutMs, 2000)
+            : this.service.requestTimeoutMs,
+        },
       )) as CuaToolResult;
       if (signal.aborted) throw reason(signal);
       const refusal = result.structuredContent?.refusal as
@@ -675,6 +810,12 @@ export class CuaDriverSession {
       return result;
     } catch (error) {
       if (signal.aborted && error === signal.reason) throw error;
+      // Image-only reads cannot have delivered input. Losing a preview must
+      // never terminate the daemon which owns an unrelated model action.
+      if (this.previewOnly) {
+        await this.disconnect();
+        throw new Error("Window preview capture failed.", { cause: error });
+      }
       // Never replay a dispatched action. A transport timeout/failure gives no
       // completion proof, so stop the shared daemon before settling this call.
       await this.service.invalidateConnection();

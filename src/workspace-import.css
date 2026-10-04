@@ -119,3 +119,41 @@
 .new-workspace-form .inline-error {
   overflow-wrap: anywhere;
 }
+.workspace-create-settings {
+  min-width: 0;
+  margin: 0 0 20px;
+  padding: 14px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+}
+.workspace-create-settings legend,
+.workspace-create-model > span {
+  color: var(--text-secondary);
+  font-size: 11px;
+}
+.workspace-create-settings legend {
+  padding: 0 5px;
+}
+.workspace-create-model {
+  margin-bottom: 14px;
+}
+.workspace-create-settings .model-controls {
+  flex-wrap: wrap;
+  margin-top: 8px;
+}
+.workspace-create-settings .model-controls .model-select {
+  flex: 1 1 100%;
+}
+.workspace-create-settings .toolbar-approval-controls {
+  flex-wrap: wrap;
+  gap: 10px;
+}
+.workspace-create-settings .toolbar-safety-field {
+  flex-basis: 100%;
+}
+.workspace-create-settings-hint {
+  margin: 10px 0 0;
+  color: var(--text-muted);
+  font-size: 10px;
+  line-height: 1.8;
+}

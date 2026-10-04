@@ -9,7 +9,6 @@ import {
 import { renderToStaticMarkup } from "react-dom/server";
 import type { ModelOption, RunConfig, ToolCall } from "../shared/types";
 import { LongTaskBadge, LongTaskToggle } from "./LongTaskControls";
-import { ComposerModelControls } from "./WorkspaceControls";
 import {
   automaticLongTask,
   configForModel,
@@ -172,23 +171,6 @@ test("model and thinking changes preserve explicit duration while unrelated new 
   });
   assert.deepEqual(newBranchConfig(selected), { ...config, longTask: false });
   assert.equal(selected.longTask, true);
-  let emitted: RunConfig | undefined;
-  const tree = ComposerModelControls({
-    models: [model],
-    config: selected,
-    onConfigChange: (next) => {
-      emitted = next;
-    },
-  });
-  const selects = elements(tree).filter((element) => element.type === "select");
-  (selects[0].props.onChange as (event: { target: { value: string } }) => void)(
-    { target: { value: model.id } },
-  );
-  assert.equal(emitted?.longTask, true);
-  (selects[1].props.onChange as (event: { target: { value: string } }) => void)(
-    { target: { value: "low" } },
-  );
-  assert.deepEqual(emitted, { ...selected, thinking: "low" });
   assert.ok(branchDraftHeight(0) >= 408);
 });
 

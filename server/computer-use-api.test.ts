@@ -156,6 +156,7 @@ async function fixture(t: TestContext) {
   return {
     store,
     current,
+    runtime,
     calls,
     status,
     base,
@@ -192,6 +193,161 @@ test("computer-use status is read-only and explicit connect forwards to the runt
   const after = await f.request("/api/computer-use");
   assert.equal(((await after.json()) as ComputerUseStatus).connected, true);
   assert.equal(f.calls.connect, 1);
+});
+
+test("preview rejects stale or foreign requests, uses the current lease and ends on regeneration", async (t) => {
+  const f = await fixture(t);
+  const path = "/api/workspaces/workspace/nodes/current/computer-use/preview";
+  let resolutions = 0;
+  f.current.status = "running";
+  f.current.computerUseScope = {
+    id: "live-lease",
+    label: "当前窗口",
+    target: { kind: "window", pid: 5, windowId: 42 },
+  };
+  f.runtime.computerUsePreviewSource = (scope) => {
+    resolutions++;
+    assert.deepEqual(scope, f.current.computerUseScope);
+    return {
+      scope,
+      active: () => true,
+      enter: async () => {
+        throw new Error("streaming must never activate an app");
+      },
+      capture: async () => {
+        throw new Error("native metadata must not take driver screenshots");
+      },
+      close: async () => {},
+    };
+  };
+  for (const query of [
+    "",
+    "?revision=-1",
+    "?revision=bogus",
+    "?revision=1",
+    "?revision=9007199254740992",
+  ]) {
+    const response = await f.request(path + query);
+    assert.notEqual(response.status, 200);
+    await response.arrayBuffer();
+  }
+  const blocked = await f.request(path + "?revision=2", {
+    headers: { Origin: "https://untrusted.example" },
+  });
+  assert.equal(blocked.status, 403);
+  await blocked.arrayBuffer();
+  assert.equal(resolutions, 0);
+  const response = await f.request(
+    path + "?revision=2&native=1&pid=99&windowId=999",
+  );
+  assert.equal(response.status, 200);
+  assert.match(response.headers.get("Cache-Control") ?? "", /no-store/);
+  const reader = response.body!.getReader();
+  const first = new TextDecoder().decode((await reader.read()).value);
+  assert.match(first, /"windowId":42/);
+  assert.match(first, /"source":"native"/);
+  f.current.revision = 3;
+  let tail = "";
+  while (true) {
+    const chunk = await reader.read();
+    if (chunk.done) break;
+    tail += new TextDecoder().decode(chunk.value);
+  }
+  assert.match(tail, /"status":"ended"/);
+});
+
+test("entering a preview activates only the current task scope and rechecks it after waiting", async (t) => {
+  const f = await fixture(t);
+  f.current.status = "running";
+  const scope = {
+    id: "current-lease",
+    label: "当前应用",
+    target: { kind: "window" as const, pid: 5, windowId: 42 },
+  };
+  f.current.computerUseScope = scope;
+  let enters = 0;
+  let released = false;
+  let changeWhileWaiting = false;
+  f.runtime.computerUsePreviewSource = (target) => {
+    assert.deepEqual(target, scope);
+    return {
+      scope: target,
+      active: () => !released,
+      enter: async (_signal, assertCurrent) => {
+        if (changeWhileWaiting) f.current.revision = 3;
+        assertCurrent();
+        enters++;
+      },
+      capture: async () => {
+        throw new Error("enter must not capture");
+      },
+      close: async () => {},
+    };
+  };
+  const path =
+    "/api/workspaces/workspace/nodes/current/computer-use/preview/enter";
+  const request = (body: unknown, headers = {}) =>
+    f.request(path, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...headers },
+      body: JSON.stringify(body),
+    });
+  for (const body of [
+    {},
+    { expectedRevision: 1, scopeId: scope.id },
+    { expectedRevision: 2, scopeId: "foreign-lease" },
+  ]) {
+    const response = await request(body);
+    assert.notEqual(response.status, 200);
+    await response.arrayBuffer();
+  }
+  const body = {
+    expectedRevision: 2,
+    scopeId: scope.id,
+    pid: 999,
+    windowId: 888,
+  };
+  assert.equal(
+    (await request(body, { Origin: "https://foreign.test" })).status,
+    403,
+  );
+  assert.equal(enters, 0);
+  assert.equal((await request(body)).status, 200);
+  assert.equal(enters, 1);
+  released = true;
+  assert.equal((await request(body)).status, 409);
+  released = false;
+  changeWhileWaiting = true;
+  assert.equal((await request(body)).status, 409);
+  assert.equal(enters, 1);
+  f.current.status = "completed";
+  assert.equal(
+    (await request({ expectedRevision: 3, scopeId: scope.id })).status,
+    409,
+  );
+  assert.equal(enters, 1);
+});
+
+test("stopping from a stale preview cannot cancel a regenerated task", async (t) => {
+  const f = await fixture(t);
+  f.current.status = "running";
+  const path = "/api/workspaces/workspace/nodes/current/cancel";
+  const stale = await f.request(path, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ expectedRevision: 1 }),
+  });
+  assert.equal(stale.status, 409);
+  await stale.arrayBuffer();
+  assert.equal(f.current.status, "running");
+  const current = await f.request(path, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ expectedRevision: 2 }),
+  });
+  assert.equal(current.status, 200);
+  await current.arrayBuffer();
+  assert.equal(f.current.status, "cancelled");
 });
 
 test("cross-origin and cross-site setup never starts or grants the computer driver", async (t) => {

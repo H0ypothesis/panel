@@ -75,6 +75,7 @@ async function mount(t, configured = false, providerChanges = {}) {
     protocol: "auto",
     apiKeyConfigured: configured,
     supportsContextWindow: true,
+    thinkingFormats: ["reasoning-effort"],
     models: [{ id: "builtin", name: "Built In" }],
     ...providerChanges,
   };
@@ -92,7 +93,12 @@ async function mount(t, configured = false, providerChanges = {}) {
     if (options.method === "PUT")
       return response({ models: [{ id: "selected" }] });
     assert.equal(options.method, "POST");
-    assert.equal(url, "/api/model-providers/openai/models");
+    assert.ok(
+      [
+        "/api/model-providers/openai/models",
+        "/api/model-providers/openai/thinking-probe",
+      ].includes(url),
+    );
     return new Promise((resolve) => {
       request.resolve = (data, status) => resolve(response(data, status));
     });
@@ -400,4 +406,222 @@ test("older backends cannot silently ignore a context budget", async (t) => {
   await ui.click('button[type="submit"]');
   assert.equal(ui.requests.length, 0);
   assert.match(ui.find('[role="alert"]').textContent, /更新并重启/);
+});
+
+test("custom model effort levels use raw labels and only save when submitted", async (t) => {
+  const ui = await mount(t, true);
+  assert.match(ui.find("#provider-thinking-hint").textContent, /尚未识别/);
+  await ui.select("#provider-thinking-mode", "custom");
+  const levels = () =>
+    Array.from(
+      ui.find('[aria-label="可用思考档位"]').querySelectorAll("input"),
+      (item) => [item.value, item.checked],
+    );
+  assert.deepEqual(levels(), [
+    ["minimal", false],
+    ["low", true],
+    ["medium", true],
+    ["high", true],
+    ["xhigh", false],
+    ["max", false],
+  ]);
+  await ui.click('input[type="checkbox"][value="xhigh"]');
+  await ui.click('input[type="checkbox"][value="max"]');
+  assert.equal(ui.requests.length, 0);
+  await ui.flush();
+  await ui.deliver(ui.requests[0], {
+    models: [{ id: "builtin", name: "Built In" }],
+    truncated: false,
+  });
+  assert.ok(
+    levels()
+      .filter(([level]) => level !== "minimal")
+      .every(([, checked]) => checked),
+  );
+  await ui.click('button[type="submit"]');
+  assert.deepEqual(ui.requests.at(-1).body.thinking, {
+    format: "reasoning-effort",
+    toggle: "none",
+    levels: ["low", "medium", "high", "xhigh", "max"],
+  });
+});
+
+test("switching model or endpoint resets effort drafts and saved per-model values are restored", async (t) => {
+  const ui = await mount(t, true, {
+    thinkingFormats: ["reasoning-effort", "anthropic-effort"],
+    models: [
+      {
+        id: "builtin",
+        name: "First",
+        thinkingSource: "configured",
+        thinkingLevels: ["low", "high"],
+        thinking: { format: "reasoning-effort", levels: ["low", "high"] },
+      },
+      {
+        id: "other",
+        name: "Other",
+        thinkingSource: "configured",
+        thinkingLevels: ["low", "xhigh", "max"],
+        thinking: {
+          format: "anthropic-effort",
+          levels: ["low", "xhigh", "max"],
+        },
+      },
+    ],
+  });
+  assert.equal(ui.find("#provider-thinking-mode").value, "custom");
+  await ui.click('input[type="checkbox"][value="max"]');
+  await ui.edit("#provider-model", "other");
+  assert.equal(ui.find("#provider-thinking-format").value, "anthropic-effort");
+  assert.equal(ui.find('input[type="checkbox"][value="xhigh"]').checked, true);
+  await ui.edit("#provider-model", "builtin");
+  assert.equal(ui.find("#provider-thinking-format").value, "reasoning-effort");
+  assert.equal(ui.find('input[type="checkbox"][value="max"]').checked, false);
+  await ui.select("#provider-thinking-mode", "auto");
+  await ui.click('button[type="submit"]');
+  assert.equal(ui.requests.pop().body.thinking, null);
+  await ui.edit("#provider-model", "other");
+  await ui.edit("#provider-base-url", "https://other.test/v1");
+  assert.equal(ui.find("#provider-thinking-mode").value, "auto");
+  await ui.click('button[type="submit"]');
+  assert.equal("thinking" in ui.requests.at(-1).body, false);
+});
+
+test("empty effort choices cannot be saved", async (t) => {
+  const ui = await mount(t, true);
+  await ui.select("#provider-thinking-mode", "custom");
+  for (const level of ["low", "medium", "high"])
+    await ui.click(`input[type="checkbox"][value="${level}"]`);
+  await ui.click('button[type="submit"]');
+  assert.equal(ui.requests.length, 0);
+  assert.match(ui.find('[role="alert"]').textContent, /至少选择/);
+});
+
+test("older services disable unsupported effort configuration", async (t) => {
+  const ui = await mount(t, true, { thinkingFormats: undefined });
+  assert.equal(ui.find("#provider-thinking-mode").disabled, true);
+});
+
+test("customizing a recognized model keeps its known wire format", async (t) => {
+  const ui = await mount(t, true, {
+    thinkingFormats: ["reasoning-effort", "anthropic-effort"],
+    models: [
+      {
+        id: "builtin",
+        name: "Claude",
+        thinkingSource: "builtin",
+        thinkingFormat: "anthropic-effort",
+        thinkingLevels: ["low", "medium", "high", "xhigh", "max"],
+      },
+    ],
+  });
+  assert.match(
+    ui.find("#provider-thinking-hint").textContent,
+    /low \/ medium \/ high \/ xhigh \/ max/,
+  );
+  await ui.select("#provider-thinking-mode", "custom");
+  assert.equal(ui.find("#provider-thinking-format").value, "anthropic-effort");
+  await ui.click('button[type="submit"]');
+  assert.deepEqual(ui.requests.at(-1).body.thinking, {
+    format: "anthropic-effort",
+    toggle: "none",
+    levels: ["low", "medium", "high", "xhigh", "max"],
+  });
+});
+
+const probeResponse = (invalidStatus = "rejected") => ({
+  format: "reasoning-effort",
+  checkedAt: 1,
+  requests: 12,
+  rows: [
+    "baseline",
+    "enabled",
+    "disabled",
+    "invalid-toggle",
+    "invalid-effort",
+    "low",
+    "high",
+  ].map((option) => ({
+    option,
+    status: option.startsWith("invalid") ? invalidStatus : "accepted",
+    detail: "test response",
+  })),
+});
+const probeButton = ".thinking-probe-run";
+
+test("thinking detection is manual, applies validated options to the draft and only saves on submit", async (t) => {
+  const ui = await mount(t, true, { supportsThinkingProbe: true });
+  assert.equal(ui.requests.length, 0);
+  await ui.click(probeButton);
+  const request = ui.requests.at(-1);
+  assert.equal(request.url, "/api/model-providers/openai/thinking-probe");
+  assert.deepEqual(request.body, {
+    baseUrl: "https://saved.test/v1",
+    model: "builtin",
+    protocol: "auto",
+    format: "reasoning-effort",
+  });
+  assert.equal(ui.find('button[type="submit"]').disabled, true);
+  await ui.deliver(request, probeResponse());
+  assert.equal(ui.find('button[type="submit"]').disabled, false);
+  assert.equal(ui.find("#provider-thinking-mode").value, "auto");
+  await ui.click(".thinking-probe-results > button");
+  assert.equal(ui.find("#provider-thinking-toggle").value, "thinking-type");
+  assert.equal(ui.requests.length, 1);
+  await ui.click('button[type="submit"]');
+  assert.deepEqual(ui.requests.at(-1).body.thinking, {
+    format: "reasoning-effort",
+    levels: ["low", "high"],
+    toggle: "thinking-type",
+  });
+});
+
+test("a gateway accepting invalid probe values is flagged and cannot autofill fake capabilities", async (t) => {
+  const ui = await mount(t, true, { supportsThinkingProbe: true });
+  await ui.click(probeButton);
+  await ui.deliver(ui.requests[0], probeResponse("accepted"));
+  assert.match(ui.find(".thinking-probe-results").textContent, /可能忽略/);
+  assert.equal(
+    ui.find(".thinking-probe-results").querySelector("button"),
+    null,
+  );
+});
+
+test("changing probe credentials cancels in-flight work and ignores late results", async (t) => {
+  const ui = await mount(t, true, { supportsThinkingProbe: true });
+  await ui.click(probeButton);
+  const request = ui.requests[0];
+  await ui.edit("#provider-api-key", "new-key");
+  assert.equal(request.signal.aborted, true);
+  assert.equal(ui.find('button[type="submit"]').disabled, false);
+  await ui.deliver(request, probeResponse());
+  assert.equal(
+    ui
+      .find('section[aria-label="检测思考选项"]')
+      .querySelector(".thinking-probe-results"),
+    null,
+  );
+  await ui.click(probeButton);
+  assert.equal(ui.requests.at(-1).body.apiKey, "new-key");
+  await ui.click(".thinking-probe-stop");
+  assert.equal(ui.requests.at(-1).signal.aborted, true);
+  assert.match(
+    ui.find('section[aria-label="检测思考选项"]').textContent,
+    /检测已取消/,
+  );
+});
+
+test("thinking-type only models can save without fictitious effort levels", async (t) => {
+  const ui = await mount(t, true, {
+    thinkingFormats: ["reasoning-effort", "none"],
+  });
+  await ui.select("#provider-thinking-mode", "custom");
+  await ui.select("#provider-thinking-toggle", "thinking-type");
+  await ui.select("#provider-thinking-format", "none");
+  await ui.click('button[type="submit"]');
+  assert.deepEqual(ui.requests.at(-1).body.thinking, {
+    format: "none",
+    levels: [],
+    toggle: "thinking-type",
+  });
 });

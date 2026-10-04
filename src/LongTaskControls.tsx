@@ -38,7 +38,7 @@ export function LongTaskToggle({
             onConfigChange({ ...config, longTask: event.target.checked })
           }
         />
-        <span>长程任务</span>
+        <span>长程</span>
         {automatic && <span className="long-task-auto">自动</span>}
       </label>
       <span className="long-task-hint">

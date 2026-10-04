@@ -26,6 +26,9 @@ function fixture(
   action?: (name: string) => Promise<CallToolResult>,
   timeout = 1_000,
   stopAction?: () => Promise<void>,
+  observeAction?: () => Promise<CallToolResult>,
+  cursorAction?: () => Promise<CallToolResult>,
+  windowsAction?: () => Promise<CallToolResult>,
 ) {
   const calls: Array<{
     name: string;
@@ -41,6 +44,7 @@ function fixture(
       launches++;
       return {
         socket: "/fake/private.sock",
+        pid: 987,
         close: async () => {
           stops++;
           await stopAction?.();
@@ -61,6 +65,8 @@ function fixture(
           "start_session",
           "end_session",
           "set_agent_cursor_enabled",
+          "get_agent_cursor_state",
+          "list_windows",
         ].map((name) => ({
           name,
           inputSchema: {
@@ -74,6 +80,12 @@ function fixture(
           name: request.params.name,
           args: request.params.arguments,
         });
+        if (request.params.name === "get_window_state" && observeAction)
+          return observeAction();
+        if (request.params.name === "get_agent_cursor_state" && cursorAction)
+          return cursorAction();
+        if (request.params.name === "list_windows" && windowsAction)
+          return windowsAction();
         if (request.params.name === "click" && action)
           return action(request.params.name);
         return { content: [{ type: "text", text: "ok" }] };
@@ -119,6 +131,164 @@ test("macOS daemon uses signed app via LaunchServices with visible overlay and p
     () => resolveCuaDriverLayout({ binaryPath: "relative/path" }),
     /absolute/,
   );
+});
+
+test("preview transports disable their cursor, refuse input and cannot stop an action daemon on read timeout", async () => {
+  const capture = deferred<CallToolResult>();
+  const f = fixture(undefined, 50, undefined, () => capture.promise);
+  try {
+    const action = await f.service.openSession();
+    const preview = await f.service.openPreviewSession();
+    assert.notEqual(action.id, preview.id);
+    assert.ok(
+      f.calls.some(
+        (call) =>
+          call.name === "set_agent_cursor_enabled" &&
+          call.args?.session === preview.id &&
+          call.args?.enabled === false,
+      ),
+    );
+    await assert.rejects(
+      preview.callTool("click", { pid: 1, window_id: 2 }),
+      /only accept/,
+    );
+    await assert.rejects(
+      preview.callTool("get_window_state", { pid: 1, window_id: 2 }),
+      /only accept/,
+    );
+    const args = {
+      pid: 1,
+      window_id: 2,
+      include_accessibility_tree: false,
+      include_screenshot: true,
+    };
+    await assert.rejects(
+      preview.callTool("get_window_state", args),
+      /preview capture failed/,
+    );
+    assert.equal(
+      f.stops,
+      0,
+      "a failed image read must not kill the shared native input owner",
+    );
+    await action.callTool("click", { pid: 1, window_id: 2 });
+    capture.resolve({ content: [] });
+    await preview.close();
+    await action.close();
+  } finally {
+    capture.resolve({ content: [] });
+    await f.service.close();
+  }
+});
+
+test("a cursor preview timeout neither reconnects the model session nor invalidates the daemon", async () => {
+  const stalled = deferred<CallToolResult>();
+  const f = fixture(undefined, 50, undefined, undefined, () => stalled.promise);
+  try {
+    const session = await f.service.openSession();
+    const generation = session.generation;
+    assert.equal(await session.readCursorState(), undefined);
+    assert.equal(f.stops, 0);
+    assert.equal(f.transports, 1);
+    assert.equal(session.generation, generation);
+    await session.callTool("click", { pid: 1, window_id: 2 });
+    stalled.resolve({ content: [] });
+    await session.close();
+  } finally {
+    stalled.resolve({ content: [] });
+    await f.service.close();
+  }
+});
+
+test("native cursor obtains exact current window geometry independently of screenshot observations", async (t) => {
+  t.mock.timers.enable({ apis: ["Date"], now: Date.now() });
+  const bounds = { x: 10, y: 20, width: 800, height: 500 };
+  let windows: unknown[] = [
+    { pid: 99, window_id: 2, bounds: { ...bounds, x: 900 } },
+    { pid: 1, window_id: 3, bounds: { ...bounds, x: 1800 } },
+    { pid: 1, window_id: 2, bounds },
+  ];
+  const f = fixture(
+    undefined,
+    1000,
+    undefined,
+    undefined,
+    async () => ({
+      content: [],
+      structuredContent: { enabled: true, position: { x: 210, y: 120 } },
+    }),
+    async () => ({ content: [], structuredContent: { windows } }),
+  );
+  try {
+    const session = await f.service.openSession();
+    const target = { pid: 1, windowId: 2 };
+    assert.deepEqual(
+      (await session.readCursorState(undefined, target))?.window_bounds,
+      bounds,
+    );
+    await session.readCursorState(undefined, target);
+    assert.equal(f.calls.filter((c) => c.name === "list_windows").length, 1);
+    assert.deepEqual(f.calls.find((c) => c.name === "list_windows")?.args, {
+      pid: 1,
+    });
+    assert.equal(
+      f.calls.filter((c) => c.name === "get_window_state").length,
+      0,
+      "preview must not rotate screenshot/AX refs",
+    );
+    t.mock.timers.tick(501);
+    windows = [{ pid: 1, window_id: 2, bounds: { ...bounds, x: 100 } }];
+    assert.deepEqual(
+      (await session.readCursorState(undefined, target))?.window_bounds,
+      { ...bounds, x: 100 },
+    );
+    t.mock.timers.tick(501);
+    windows = [{ pid: 99, window_id: 2, bounds }];
+    assert.equal(
+      (await session.readCursorState(undefined, target))?.window_bounds,
+      undefined,
+      "never use another process or stale bounds",
+    );
+    windows = [{ pid: 1, window_id: 3, bounds }];
+    assert.deepEqual(
+      (await session.readCursorState(undefined, { pid: 1, windowId: 3 }))
+        ?.window_bounds,
+      bounds,
+      "target change invalidates the cache immediately",
+    );
+    assert.equal(f.stops, 0);
+    assert.equal(f.transports, 1);
+  } finally {
+    await f.service.close();
+  }
+});
+
+test("window-geometry timeouts leave the action session and daemon usable", async () => {
+  const stalled = deferred<CallToolResult>();
+  const f = fixture(
+    undefined,
+    50,
+    undefined,
+    undefined,
+    async () => ({ content: [], structuredContent: { enabled: true } }),
+    () => stalled.promise,
+  );
+  try {
+    const session = await f.service.openSession();
+    const generation = session.generation;
+    assert.equal(
+      (await session.readCursorState(undefined, { pid: 1, windowId: 2 }))
+        ?.window_bounds,
+      undefined,
+    );
+    assert.equal(f.stops, 0);
+    assert.equal(f.transports, 1);
+    assert.equal(session.generation, generation);
+    await session.callTool("click", { pid: 1, window_id: 2 });
+  } finally {
+    stalled.resolve({ content: [] });
+    await f.service.close();
+  }
 });
 
 test("runs share one daemon but have independent scoped sessions and cursor lifetimes", async () => {
@@ -293,7 +463,20 @@ test("status checks do not launch native processes or request permissions", asyn
   assert.equal(status.state, "not_installed");
   assert.equal(f.launches, 0);
   assert.equal(f.calls.length, 0);
+  assert.equal(f.service.previewOverlay(), undefined);
   await f.service.close();
+});
+
+test("native overlay identity comes only from the owned live daemon and is retired on shutdown", async () => {
+  const f = fixture();
+  assert.equal(f.service.previewOverlay(), undefined);
+  await f.service.openSession();
+  assert.deepEqual(f.service.previewOverlay(), {
+    pid: 987,
+    bundlePath: "/fake/CuaDriver.app",
+  });
+  await f.service.close();
+  assert.equal(f.service.previewOverlay(), undefined);
 });
 
 test("idle-expired sessions reconnect on the next call without replaying stale capabilities", async () => {

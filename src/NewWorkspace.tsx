@@ -7,6 +7,15 @@ import {
   Plus,
 } from "lucide-react";
 import { api, type MutationResult } from "./api";
+import {
+  DEFAULT_CONFIG,
+  type ApprovalMode,
+  type ModelOption,
+  type RunConfig,
+} from "../shared/types";
+import { thinkingConflict } from "../shared/thinking-controls";
+import { ApprovalControls, ComposerModelControls } from "./WorkspaceControls";
+import { configForModel } from "./run-config";
 import "./workspace-import.css";
 
 const MAX_IMPORT_BYTES = 100 * 1024 * 1024;
@@ -32,14 +41,20 @@ function importPreview(name: string, data: unknown): ImportFile {
 }
 
 export function NewWorkspace({
+  models,
   onCreated,
 }: {
+  models: ModelOption[];
   onCreated: (result: MutationResult) => void;
 }) {
   const [mode, setMode] = useState<"blank" | "import">("blank");
   const [source, setSource] = useState<"file" | "path">("file");
   const [title, setTitle] = useState("");
   const [description, setDescription] = useState("");
+  const [config, setConfig] = useState<RunConfig>({ ...DEFAULT_CONFIG });
+  const [modelChosen, setModelChosen] = useState(false);
+  const [approvalMode, setApprovalMode] = useState<ApprovalMode>("ask");
+  const [safetyModel, setSafetyModel] = useState("");
   const [file, setFile] = useState<ImportFile | null>(null);
   const [path, setPath] = useState("");
   const [reading, setReading] = useState(false);
@@ -47,9 +62,25 @@ export function NewWorkspace({
   const [error, setError] = useState("");
   const pending = useRef(false);
   const disabled = busy || reading;
+  const selectedModel = modelChosen
+    ? models.find((model) => model.id === config.model)
+    : (models.find((model) => model.available && model.default) ??
+      models.find((model) => model.available && !model.demo) ??
+      models.find((model) => model.available));
+  const effectiveConfig = selectedModel
+    ? configForModel(config, selectedModel)
+    : config;
+  const safetyModelRequired =
+    approvalMode === "auto" &&
+    !models.some(
+      (model) => model.id === safetyModel && model.available && !model.demo,
+    );
   const ready =
     mode === "blank"
-      ? !!title.trim()
+      ? !!title.trim() &&
+        !!selectedModel?.available &&
+        !thinkingConflict(effectiveConfig, selectedModel.thinkingControls) &&
+        !safetyModelRequired
       : source === "file"
         ? !!file
         : !!path.trim();
@@ -90,7 +121,13 @@ export function NewWorkspace({
     try {
       const result =
         mode === "blank"
-          ? await api<MutationResult>("/workspaces", { title, description })
+          ? await api<MutationResult>("/workspaces", {
+              title,
+              description,
+              config: effectiveConfig,
+              approvalMode,
+              ...(safetyModel ? { safetyModel } : {}),
+            })
           : await api<MutationResult>(
               "/workspaces/import",
               source === "file" ? { data: file!.data } : { path: path.trim() },
@@ -172,6 +209,41 @@ export function NewWorkspace({
               onChange={(event) => setDescription(event.target.value)}
             />
           </label>
+          <fieldset className="workspace-create-settings" disabled={disabled}>
+            <legend>模型与审批</legend>
+            <div className="workspace-create-model">
+              <span>执行模型与思考设置</span>
+              <ComposerModelControls
+                models={models}
+                config={effectiveConfig}
+                disabled={disabled}
+                showLongTask={false}
+                onConfigChange={(next) => {
+                  setConfig(next);
+                  setModelChosen(true);
+                  setError("");
+                }}
+              />
+            </div>
+            <ApprovalControls
+              models={models}
+              approvalMode={approvalMode}
+              safetyModel={safetyModel}
+              disabled={disabled}
+              safetyModelRequired={safetyModelRequired}
+              onApprovalModeChange={(next) => {
+                setApprovalMode(next);
+                setError("");
+              }}
+              onSafetyModelChange={(next) => {
+                setSafetyModel(next);
+                setError("");
+              }}
+            />
+            <p className="workspace-create-settings-hint">
+              执行模型用于对话与任务；自动审批由安全模型审核工具操作，审核会产生额外模型用量。
+            </p>
+          </fieldset>
         </>
       ) : (
         <>

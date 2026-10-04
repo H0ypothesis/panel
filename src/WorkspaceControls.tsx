@@ -1,10 +1,12 @@
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import { useEffect, useId, useRef, useState, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import {
   Check,
   ChevronDown,
   FolderOpen,
   LoaderCircle,
+  LockKeyhole,
+  RotateCcw,
   ShieldCheck,
   Zap,
   X,
@@ -22,6 +24,7 @@ import { modelContextLabel, modelContextTitle } from "./model-context";
 import { ComputerUseControls } from "./ComputerUseControls";
 import { LongTaskToggle } from "./LongTaskControls";
 import { configForModel } from "./run-config";
+import { thinkingConflict } from "../shared/thinking-controls";
 
 function DirectoryDialog({
   children,
@@ -274,14 +277,34 @@ export function ComposerModelControls({
   toolRequests,
   onConfigChange,
   disabled = false,
+  showLongTask = true,
 }: {
   models: ModelOption[];
   config: RunConfig;
   toolRequests?: ToolRequest[];
   onConfigChange: (config: RunConfig) => void;
   disabled?: boolean;
+  showLongTask?: boolean;
 }) {
   const selectedModel = models.find((model) => model.id === config.model);
+  const effectiveConfig = selectedModel
+    ? configForModel(config, selectedModel)
+    : config;
+  const conflict = thinkingConflict(
+    effectiveConfig,
+    selectedModel?.thinkingControls,
+  );
+  // Saved drafts may predate a model capability update (for example GLM off -> low).
+  // Keep the submitted config consistent with the options actually shown.
+  useEffect(() => {
+    if (
+      !disabled &&
+      (effectiveConfig.thinking !== config.thinking ||
+        effectiveConfig.thinkingMode !== config.thinkingMode ||
+        effectiveConfig.effort !== config.effort)
+    )
+      onConfigChange(effectiveConfig);
+  }, [config.thinking, effectiveConfig, disabled, onConfigChange]);
   return (
     <div
       className="model-controls"
@@ -315,47 +338,159 @@ export function ComposerModelControls({
         </select>
         <ChevronDown size={11} />
       </label>
-      <label className="thinking-select" title="思考深度">
-        <Zap size={12} />
-        <select
-          aria-label="思考强度"
-          value={config.thinking}
-          disabled={disabled}
-          onChange={(event) =>
-            onConfigChange({
-              ...config,
-              thinking: event.target.value as RunConfig["thinking"],
-            })
-          }
+      {selectedModel?.thinkingControls ? (
+        <div
+          className={`thinking-control-group is-${selectedModel.thinkingControls.toggle}${conflict ? " is-conflicting" : ""}`}
         >
-          {(selectedModel?.thinkingLevels ?? [config.thinking]).map((level) => (
-            <option key={level} value={level}>
-              {thinkingLabels[level]}
-            </option>
-          ))}
-        </select>
-        <ChevronDown size={11} />
-      </label>
-      <LongTaskToggle
-        config={config}
-        toolRequests={toolRequests}
-        disabled={disabled}
-        onConfigChange={onConfigChange}
-      />
+          <div
+            className="thinking-switch-control"
+            title={
+              selectedModel.thinkingControls.toggle === "unknown"
+                ? "尚未确认开关能力，可在模型设置中检测和配置。"
+                : selectedModel.thinkingControls.toggle === "required"
+                  ? "此模型必须开启思考。"
+                  : "独立控制思考开关；默认表示不发送开关参数。"
+            }
+          >
+            <button
+              type="button"
+              role="switch"
+              aria-label="思考开关"
+              aria-checked={effectiveConfig.thinkingMode === "enabled"}
+              disabled={
+                disabled ||
+                selectedModel.thinkingControls.toggle !== "supported"
+              }
+              className={`thinking-switch ${effectiveConfig.thinkingMode === "default" ? "is-default" : ""}`}
+              onClick={() =>
+                onConfigChange(
+                  configForModel(
+                    {
+                      ...effectiveConfig,
+                      thinkingMode:
+                        effectiveConfig.thinkingMode === "enabled"
+                          ? "disabled"
+                          : "enabled",
+                    },
+                    selectedModel,
+                  ),
+                )
+              }
+            >
+              <span>
+                {selectedModel.thinkingControls.toggle === "unknown"
+                  ? "服务默认"
+                  : "思考"}
+              </span>
+              <span className="thinking-switch-track">
+                <span />
+              </span>
+            </button>
+            {selectedModel.thinkingControls.toggle === "required" && (
+              <LockKeyhole
+                size={10}
+                className="thinking-locked"
+                aria-label="此模型必须开启思考"
+              />
+            )}
+            {selectedModel.thinkingControls.toggle === "supported" && (
+              <button
+                type="button"
+                className="thinking-default"
+                aria-label="恢复默认思考开关"
+                title="恢复服务默认"
+                disabled={
+                  disabled || effectiveConfig.thinkingMode === "default"
+                }
+                onClick={() =>
+                  onConfigChange(
+                    configForModel(
+                      { ...effectiveConfig, thinkingMode: "default" },
+                      selectedModel,
+                    ),
+                  )
+                }
+              >
+                <RotateCcw size={11} />
+              </button>
+            )}
+          </div>
+          <label
+            className="thinking-select"
+            hidden={!selectedModel.thinkingControls.efforts.length}
+            title={
+              conflict ??
+              "独立选择 effort，不改变思考开关；默认由服务商或原生模型适配器决定。"
+            }
+          >
+            <select
+              aria-label="effort 强度"
+              aria-invalid={Boolean(conflict)}
+              aria-description={conflict}
+              value={effectiveConfig.effort ?? "default"}
+              disabled={
+                disabled || !selectedModel.thinkingControls.efforts.length
+              }
+              onChange={(event) =>
+                onConfigChange(
+                  configForModel(
+                    {
+                      ...effectiveConfig,
+                      effort: event.target.value as RunConfig["effort"],
+                    },
+                    selectedModel,
+                  ),
+                )
+              }
+            >
+              <option value="default">默认</option>
+              {selectedModel.thinkingControls.efforts.map((level) => (
+                <option key={level} value={level}>
+                  {level}
+                </option>
+              ))}
+            </select>
+            <ChevronDown size={11} />
+          </label>
+        </div>
+      ) : (
+        <label className="thinking-select" title="思考深度">
+          <Zap size={12} />
+          <select
+            aria-label="思考强度"
+            value={effectiveConfig.thinking}
+            disabled={disabled}
+            onChange={(event) =>
+              onConfigChange({
+                ...config,
+                thinking: event.target.value as RunConfig["thinking"],
+              })
+            }
+          >
+            {(selectedModel?.thinkingLevels ?? [config.thinking]).map(
+              (level) => (
+                <option key={level} value={level}>
+                  {thinkingLabels[level]}
+                </option>
+              ),
+            )}
+          </select>
+          <ChevronDown size={11} />
+        </label>
+      )}
+      {showLongTask && (
+        <LongTaskToggle
+          config={config}
+          toolRequests={toolRequests}
+          disabled={disabled}
+          onConfigChange={onConfigChange}
+        />
+      )}
     </div>
   );
 }
 
-export function WorkbenchControls({
-  models,
-  approvalMode,
-  safetyModel,
-  onApprovalModeChange,
-  onSafetyModelChange,
-  disabled = false,
-  approvalBusy = false,
-  safetyModelRequired = false,
-}: {
+type ApprovalControlsProps = {
   models: ModelOption[];
   approvalMode: ApprovalMode;
   safetyModel: string;
@@ -364,7 +499,19 @@ export function WorkbenchControls({
   disabled?: boolean;
   approvalBusy?: boolean;
   safetyModelRequired?: boolean;
-}) {
+};
+
+export function ApprovalControls({
+  models,
+  approvalMode,
+  safetyModel,
+  onApprovalModeChange,
+  onSafetyModelChange,
+  disabled = false,
+  approvalBusy = false,
+  safetyModelRequired = false,
+}: ApprovalControlsProps) {
+  const hintId = useId();
   const safetyOptions = models.filter((model) => !model.demo);
   const selectedSafetyModel = safetyOptions.find(
     (model) => model.id === safetyModel,
@@ -374,7 +521,7 @@ export function WorkbenchControls({
     if (safetyModelRequired) safetyRef.current?.focus();
   }, [safetyModelRequired]);
   return (
-    <div className="workbench-controls" role="group" aria-label="运行设置">
+    <>
       <div className="toolbar-approval-controls">
         <ApprovalModeSwitch
           mode={approvalMode}
@@ -389,9 +536,7 @@ export function WorkbenchControls({
             ref={safetyRef}
             aria-label="选择安全模型"
             aria-invalid={safetyModelRequired || undefined}
-            aria-describedby={
-              safetyModelRequired ? "safety-model-required-hint" : undefined
-            }
+            aria-describedby={safetyModelRequired ? hintId : undefined}
             title={`${selectedSafetyModel?.name ?? "安全模型"} · ${modelContextTitle(selectedSafetyModel)}。审核需要审批的工具操作；CUA 已授权的常规操作免逐次审核。审核产生额外模型用量。`}
             value={safetyModel}
             disabled={disabled || approvalBusy}
@@ -410,16 +555,20 @@ export function WorkbenchControls({
           </select>
         </label>
       </div>
-      <ComputerUseControls disabled={disabled} />
       {safetyModelRequired && (
-        <p
-          className="toolbar-settings-hint"
-          id="safety-model-required-hint"
-          role="alert"
-        >
+        <p className="toolbar-settings-hint" id={hintId} role="alert">
           请先选择可用的安全模型，再开启自动审批。
         </p>
       )}
+    </>
+  );
+}
+
+export function WorkbenchControls(props: ApprovalControlsProps) {
+  return (
+    <div className="workbench-controls" role="group" aria-label="运行设置">
+      <ApprovalControls {...props} />
+      <ComputerUseControls disabled={props.disabled} />
     </div>
   );
 }

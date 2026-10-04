@@ -2135,18 +2135,21 @@ button {
 }
 .model-controls {
   display: flex;
-  gap: 8px;
+  flex-wrap: nowrap;
+  min-width: 0;
+  gap: 6px;
   align-items: center;
   margin-top: 10px;
 }
 .model-controls label {
   display: flex;
   align-items: center;
-  gap: 4px;
+  gap: 6px;
   border: 1px solid var(--line);
   background: var(--surface-control);
-  padding: 5px 6px;
-  border-radius: 5px;
+  padding: 0 8px;
+  height: 29px;
+  border-radius: 7px;
   min-width: 0;
   color: var(--text-muted);
   position: relative;
@@ -2159,14 +2162,16 @@ button {
   cursor: not-allowed;
   opacity: 0.5;
 }
-.model-select {
-  flex: 1;
+.model-controls .model-select {
+  flex: 1 1 0;
+  min-width: 0;
+  overflow: hidden;
 }
 .model-controls select {
   appearance: none;
   border: 0;
   background: transparent;
-  font-size: 9px;
+  font-size: 10px;
   color: var(--text-control);
   max-width: 100%;
   min-width: 0;
@@ -2174,6 +2179,7 @@ button {
   cursor: pointer;
   padding-right: 13px;
   outline: none;
+  text-overflow: ellipsis;
 }
 .model-controls label > svg:last-child {
   pointer-events: none;
@@ -2187,7 +2193,7 @@ button {
   line-height: 1;
 }
 .thinking-select {
-  width: 86px;
+  width: 82px;
   flex-shrink: 0;
 }
 .composer-footnote {
@@ -4015,4 +4021,154 @@ select optgroup {
   .theme-control select {
     max-width: 78px;
   }
+}
+.thinking-switch-control {
+  display: inline-flex;
+  align-items: center;
+  gap: 0;
+  padding: 0 4px 0 6px;
+  min-height: 27px;
+}
+.thinking-control-group {
+  display: inline-flex;
+  flex-shrink: 0;
+  align-items: center;
+  max-width: 100%;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: var(--surface-control);
+  color: var(--text-control);
+  overflow: hidden;
+}
+.model-controls .thinking-control-group .thinking-select {
+  height: 27px;
+  border: 0;
+  border-left: 1px solid var(--line);
+  border-radius: 0;
+  background: transparent;
+  width: 52px;
+  padding-left: 7px;
+}
+.model-controls .thinking-select[hidden] {
+  display: none;
+}
+.thinking-control-group .thinking-select select {
+  font-size: 10px;
+}
+.thinking-control-group:focus-within {
+  border-color: var(--focus-ring);
+}
+.thinking-control-group.is-unknown {
+  color: var(--text-muted);
+}
+.thinking-control-group.is-unknown .thinking-switch-track {
+  display: none;
+}
+.thinking-control-group.is-unknown .thinking-switch-control {
+  padding-right: 8px;
+}
+.thinking-locked {
+  color: var(--text-muted);
+  margin: 0 2px 0 3px;
+}
+.thinking-switch > svg {
+  color: var(--text-secondary);
+}
+.thinking-switch:focus-visible,
+.thinking-default:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 1px;
+  border-radius: 3px;
+}
+.thinking-default:hover:not(:disabled) {
+  color: var(--text-accent-strong);
+  background: var(--surface-hover);
+}
+.thinking-switch[aria-checked="true"] {
+  color: var(--text-accent-strong);
+}
+.thinking-switch:disabled {
+  cursor: default;
+}
+.thinking-control-group .thinking-switch:disabled {
+  opacity: 1;
+}
+.thinking-control-group:has(.thinking-switch:not(:disabled)):hover {
+  border-color: var(--line-strong);
+}
+.thinking-control-group.is-conflicting,
+.thinking-control-group.is-conflicting:hover {
+  border-color: var(--warning);
+}
+.thinking-control-group.is-conflicting .thinking-select {
+  color: var(--warning);
+}
+.thinking-control-group .thinking-default:disabled {
+  opacity: 0.3;
+}
+.thinking-control-group .thinking-select select:disabled {
+  opacity: 0.45;
+}
+.thinking-control-group.is-required .thinking-switch-track {
+  display: none;
+}
+.thinking-switch,
+.thinking-default {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  font-size: 10px;
+  padding: 3px 0;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.thinking-switch:disabled,
+.thinking-default:disabled {
+  cursor: default;
+  opacity: 0.5;
+}
+.thinking-switch-track {
+  width: 22px;
+  height: 13px;
+  border-radius: 10px;
+  background: var(--line-strong);
+  display: inline-flex;
+  align-items: center;
+  padding: 2px;
+  box-sizing: border-box;
+}
+.thinking-switch-track > span {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: white;
+  box-shadow: 0 1px 2px #0002;
+  transition: transform 0.12s ease;
+}
+.thinking-switch[aria-checked="true"] .thinking-switch-track {
+  background: var(--primary-background);
+}
+.thinking-switch[aria-checked="true"] .thinking-switch-track > span {
+  transform: translateX(9px);
+}
+.thinking-switch.is-default .thinking-switch-track {
+  background: var(--surface-muted);
+  box-shadow: inset 0 0 0 1px var(--line-strong);
+}
+.thinking-switch.is-default .thinking-switch-track > span {
+  background: var(--text-muted);
+  box-shadow: none;
+  transform: translateX(4.5px);
+}
+.thinking-default {
+  width: 21px;
+  height: 22px;
+  margin-left: 3px;
+  justify-content: center;
+  border-radius: 4px;
+  color: var(--text-muted);
 }

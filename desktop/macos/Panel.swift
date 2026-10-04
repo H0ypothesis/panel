@@ -58,6 +58,7 @@ final class PanelApp: NSObject, NSApplicationDelegate, NSWindowDelegate,
     private var container: NSView!
     private var titlebarView: PanelTitlebarView!
     private var webView: WKWebView?
+    private var computerPreview: CuaPreviewController?
     private var statusView: NSView?
     private var service: Process?
     private var serviceLog: FileHandle?
@@ -390,6 +391,8 @@ final class PanelApp: NSObject, NSApplicationDelegate, NSWindowDelegate,
     }
 
     private func stopService(completion: @escaping () -> Void) {
+        computerPreview?.close()
+        computerPreview = nil
         readinessTimer?.invalidate()
         readinessTimer = nil
         launchGeneration = UUID()
@@ -458,7 +461,9 @@ final class PanelApp: NSObject, NSApplicationDelegate, NSWindowDelegate,
             setAppearance: (theme) => window.webkit.messageHandlers.panel.postMessage({action:'set-appearance', theme}),
             getUpdateState: () => window.webkit.messageHandlers.panel.postMessage({action:'update-state'}),
             checkForUpdates: () => window.webkit.messageHandlers.panel.postMessage({action:'check-updates'}),
-            installUpdate: () => window.webkit.messageHandlers.panel.postMessage({action:'install-update'})
+            installUpdate: () => window.webkit.messageHandlers.panel.postMessage({action:'install-update'}),
+            setComputerUsePreview: (task) => window.webkit.messageHandlers.panel.postMessage({action:'computer-preview', task}),
+            closeComputerUsePreview: () => window.webkit.messageHandlers.panel.postMessage({action:'close-computer-preview'})
           }), writable: false, configurable: false });
         }
         """
@@ -481,6 +486,8 @@ final class PanelApp: NSObject, NSApplicationDelegate, NSWindowDelegate,
     }
 
     private func destroyWebView() {
+        computerPreview?.close()
+        computerPreview = nil
         cancelFilePicker()
         directoryPicker?.cancel(nil)
         directoryPicker = nil
@@ -536,6 +543,23 @@ final class PanelApp: NSObject, NSApplicationDelegate, NSWindowDelegate,
             return
         }
         switch action {
+        case "computer-preview":
+            guard let task = body["task"] as? [String: Any],
+                  let workspaceID = task["workspaceId"] as? String,
+                  let nodeID = task["nodeId"] as? String,
+                  let revision = task["revision"] as? Int, revision >= 0,
+                  [workspaceID, nodeID].allSatisfy({ $0.range(of: "^[A-Za-z0-9_-]{1,128}$", options: .regularExpression) != nil }),
+                  let serviceURL = serviceURL else { replyHandler(nil, "预览任务无效。"); return }
+            if computerPreview == nil {
+                computerPreview = CuaPreviewController(serviceURL: serviceURL, parent: window) { [weak self] in
+                    self?.webView?.evaluateJavaScript("window.dispatchEvent(new CustomEvent('panel:preview-closed'))", completionHandler: nil)
+                }
+            }
+            computerPreview?.show(workspaceID: workspaceID, nodeID: nodeID, revision: revision)
+            replyHandler(nil, nil)
+        case "close-computer-preview":
+            computerPreview?.close()
+            replyHandler(nil, nil)
         case "update-state":
             replyHandler(updater.state, nil)
         case "check-updates":

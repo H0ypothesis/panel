@@ -13,6 +13,41 @@ const envNames = [
 ] as const;
 const dummyKey = "tp-panel-local-test-key";
 
+test("MiMo independent thinking switch encodes on, off and default without effort", async (t) => {
+  const modelId = modelIds[0];
+  const requests = mockXiaomi(t, modelId, () => ({
+    deltas: [{ role: "assistant" }, { content: "Hello" }],
+    finishReason: "stop",
+  }));
+  const runtime = new PiRuntime();
+  assert.deepEqual(
+    runtime
+      .models()
+      .find((model) => model.id === `xiaomi-token-plan-cn/${modelId}`)
+      ?.thinkingControls,
+    { toggle: "supported", efforts: [] },
+  );
+  for (const thinkingMode of ["enabled", "disabled", "default"] as const) {
+    await runtime.run(
+      {
+        model: `xiaomi-token-plan-cn/${modelId}`,
+        thinking: thinkingMode === "enabled" ? "high" : "off",
+        thinkingMode,
+        effort: "default",
+      },
+      [],
+      "Hello",
+      AbortSignal.timeout(10000),
+      () => {},
+    );
+    assert.deepEqual(
+      requests.at(-1)?.thinking,
+      thinkingMode === "default" ? undefined : { type: thinkingMode },
+    );
+    assert.equal(requests.at(-1)?.reasoning_effort, undefined);
+  }
+});
+
 interface ChatRequest {
   model: string;
   stream: boolean;

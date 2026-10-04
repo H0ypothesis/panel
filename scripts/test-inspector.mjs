@@ -111,8 +111,7 @@ function fixture() {
   };
 }
 
-async function mount(t) {
-  const state = fixture();
+async function mount(t, { models, state = fixture() } = {}) {
   const diagnostics = [];
   const virtualConsole = new VirtualConsole();
   for (const event of ["error", "warn", "jsdomError"])
@@ -178,6 +177,43 @@ async function mount(t) {
   const requests = [];
   window.fetch = async (url, options = {}) => {
     requests.push({ url, ...options });
+    if (options.method === "POST" && url === "/api/workspaces") {
+      const body = JSON.parse(options.body);
+      const workspace = {
+        id: "created",
+        title: body.title,
+        description: body.description,
+        createdAt: 2,
+        updatedAt: 2,
+        example: false,
+        approvalMode: body.approvalMode,
+        safetyModel: body.safetyModel,
+        defaultConfig: body.config,
+        nodes: [
+          {
+            id: "created-root",
+            parentId: null,
+            prompt: body.title,
+            response: body.description,
+            status: "root",
+            config: body.config,
+            color: "sage",
+            position: { x: 0, y: 0 },
+            contextIds: [],
+            createdAt: 2,
+          },
+        ],
+      };
+      state.workspaces.unshift(workspace);
+      state.revision++;
+      return {
+        ok: true,
+        json: async () => ({
+          workspaceId: workspace.id,
+          state: JSON.parse(JSON.stringify(state)),
+        }),
+      };
+    }
     const inputPath = url.match(
       /^\/api\/workspaces\/([^/]+)\/nodes\/([^/]+)\/inputs$/,
     );
@@ -239,7 +275,7 @@ async function mount(t) {
     );
     const values = {
       "/api/state": state,
-      "/api/models": [
+      "/api/models": models ?? [
         {
           id: "demo/pi-demo",
           name: "Pi Demo",
@@ -323,12 +359,18 @@ async function mount(t) {
     assertTools,
     flushFrame: () =>
       act(() => new Promise((resolve) => window.setTimeout(resolve, 40))),
+    unmount: async () => {
+      await act(() => app.unmount());
+      app = undefined;
+    },
     change: async (element, value) => {
       assert.ok(element, "Expected editable element");
       const prototype =
         element.tagName === "TEXTAREA"
           ? window.HTMLTextAreaElement.prototype
-          : window.HTMLSelectElement.prototype;
+          : element.tagName === "INPUT"
+            ? window.HTMLInputElement.prototype
+            : window.HTMLSelectElement.prototype;
       Object.getOwnPropertyDescriptor(prototype, "value").set.call(
         element,
         value,
@@ -716,5 +758,136 @@ test("expired global approval reports the conflict and never approves a replacem
     ui.document.querySelector(".pending-approval-panel").textContent,
     /这次审批已失效/,
   );
+  assert.deepEqual(ui.diagnostics, []);
+});
+
+const creationModels = [
+  {
+    id: "demo/pi-demo",
+    name: "Demo",
+    provider: "demo",
+    available: true,
+    demo: true,
+    thinkingLevels: ["off"],
+    contextWindow: 128000,
+  },
+  {
+    id: "test/default",
+    name: "Default",
+    provider: "test",
+    available: true,
+    demo: false,
+    default: true,
+    thinkingLevels: ["off", "medium", "high"],
+    contextWindow: 128000,
+  },
+  {
+    id: "test/execution",
+    name: "Execution",
+    provider: "test",
+    available: true,
+    demo: false,
+    thinkingLevels: ["low", "high", "max"],
+    contextWindow: 128000,
+  },
+  {
+    id: "test/unavailable",
+    name: "Unavailable",
+    provider: "test",
+    available: false,
+    demo: false,
+    thinkingLevels: ["off"],
+    contextWindow: 128000,
+  },
+];
+
+test("new exploration submits chosen models and approval settings and uses them for the first conversation", async (t) => {
+  const ui = await mount(t, { models: creationModels });
+  await ui.click(ui.document.querySelector(".new-exploration"));
+  const form = () => ui.document.querySelector(".new-workspace-form");
+  const model = () => form().querySelector('[aria-label="选择模型"]');
+  const safety = () => form().querySelector('[aria-label="选择安全模型"]');
+  const create = () => form().querySelector(".primary-button");
+  assert.equal(model().value, "test/default");
+  assert.equal(form().querySelector('[aria-label="长程任务"]'), null);
+  await ui.change(
+    form().querySelector("input[maxlength='80']"),
+    "模型与审批测试",
+  );
+  await ui.change(model(), "test/execution");
+  assert.equal(form().querySelector('[aria-label="思考强度"]').value, "low");
+  await ui.change(form().querySelector('[aria-label="思考强度"]'), "high");
+  await ui.click(
+    [...form().querySelectorAll("button")].find((button) =>
+      button.textContent.includes("自动审批"),
+    ),
+  );
+  assert.equal(create().disabled, true);
+  assert.equal(ui.document.activeElement, safety());
+  assert.match(form().querySelector('[role="alert"]').textContent, /安全模型/);
+  assert.equal(safety().querySelector('[value="demo/pi-demo"]'), null);
+  assert.equal(
+    safety().querySelector('[value="test/unavailable"]').disabled,
+    true,
+  );
+  await ui.change(safety(), "test/default");
+  assert.equal(create().disabled, false);
+  await ui.click(create());
+  const request = ui.requests.find(
+    (item) => item.url === "/api/workspaces" && item.method === "POST",
+  );
+  assert.deepEqual(JSON.parse(request.body), {
+    title: "模型与审批测试",
+    description: "",
+    config: { model: "test/execution", thinking: "high" },
+    approvalMode: "auto",
+    safetyModel: "test/default",
+  });
+  assert.equal(form(), null);
+  assert.equal(
+    ui.inspector().querySelector('[aria-label="选择模型"]').value,
+    "test/execution",
+  );
+  assert.equal(
+    ui.inspector().querySelector('[aria-label="思考强度"]').value,
+    "high",
+  );
+  const workspace = ui.state.workspaces.find((item) => item.id === "created");
+  await ui.unmount();
+  const reopened = await mount(t, {
+    models: creationModels,
+    state: { ...ui.state, workspaces: [workspace] },
+  });
+  assert.equal(
+    reopened.inspector().querySelector('[aria-label="选择模型"]').value,
+    "test/execution",
+  );
+  assert.equal(
+    reopened.inspector().querySelector('[aria-label="思考强度"]').value,
+    "high",
+  );
+  assert.deepEqual(ui.diagnostics, []);
+  assert.deepEqual(reopened.diagnostics, []);
+});
+
+test("an explicitly selected demo model survives creation despite a real global default", async (t) => {
+  const ui = await mount(t, { models: creationModels });
+  await ui.click(ui.document.querySelector(".new-exploration"));
+  const form = ui.document.querySelector(".new-workspace-form");
+  await ui.change(form.querySelector("input[maxlength='80']"), "演示探索");
+  await ui.change(
+    form.querySelector('[aria-label="选择模型"]'),
+    "demo/pi-demo",
+  );
+  await ui.click(form.querySelector(".primary-button"));
+  assert.equal(
+    ui.inspector().querySelector('[aria-label="选择模型"]').value,
+    "demo/pi-demo",
+  );
+  const request = ui.requests.find(
+    (item) => item.url === "/api/workspaces" && item.method === "POST",
+  );
+  assert.equal(JSON.parse(request.body).approvalMode, "ask");
+  assert.equal(JSON.parse(request.body).safetyModel, undefined);
   assert.deepEqual(ui.diagnostics, []);
 });

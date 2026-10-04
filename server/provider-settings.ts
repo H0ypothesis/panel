@@ -11,6 +11,7 @@ import { join } from "node:path";
 import {
   createModels,
   createProvider,
+  getSupportedThinkingLevels,
   type Api,
   type Model,
   type Provider,
@@ -24,12 +25,24 @@ import type {
   ProviderProtocol,
   ProviderModelCatalog,
   ContextWindowSource,
+  ModelThinkingSettings,
+  ThinkingProbeResult,
 } from "../shared/provider-settings.ts";
 import { validContextWindow } from "../shared/provider-settings.ts";
 import { discoverModels } from "./model-discovery.ts";
+import { probeThinking, thinkingProbeContext } from "./thinking-probe.ts";
 import { paperbypassProvider } from "./paperbypass.ts";
 import { atriaProvider } from "./atria.ts";
 import { xiaomiTokenPlanProvider } from "./xiaomi.ts";
+import {
+  effortApi,
+  thinkingCapabilities,
+  thinkingFormats,
+  validateThinking,
+  modelThinkingControls,
+  modelThinkingProfile,
+  registerThinkingProfile,
+} from "./model-thinking.ts";
 
 export const modelProviders = [
   {
@@ -94,6 +107,7 @@ interface StoredProviderSettings {
   /** Keep prior custom IDs available to saved conversations after switching. */
   customModels: string[];
   modelContexts?: { id: string; contextWindow: number }[];
+  modelThinking?: { id: string; settings: ModelThinkingSettings }[];
 }
 
 // Keep superseded keys redacted too: a request started before a save can fail later.
@@ -232,10 +246,22 @@ export class ModelProviderSettings {
             };
           },
         );
+        if (
+          entry.modelThinking !== undefined &&
+          !Array.isArray(entry.modelThinking)
+        )
+          throw new Error("Invalid model thinking");
+        const modelThinking = (entry.modelThinking ?? []).map(
+          (item: { id?: unknown; settings?: unknown }) => ({
+            id: validateSettings({ ...value, model: item?.id }).model,
+            settings: validateThinking(item?.settings, entry.id),
+          }),
+        );
         saved.set(entry.id, {
           ...value,
           customModels: [...new Set<string>(customModels)],
           modelContexts,
+          modelThinking,
         });
       }
       await chmod(path, 0o600);
@@ -254,6 +280,58 @@ export class ModelProviderSettings {
 
   currentRegistry() {
     return this.registry;
+  }
+
+  private probes = new Set<string>();
+  async probe(
+    id: string,
+    input: unknown,
+    signal?: AbortSignal,
+  ): Promise<ThinkingProbeResult> {
+    if (this.probes.has(id))
+      throw new Error("此服务商已有检测正在进行，请稍后重试。");
+    const value = validateSettings(input);
+    const format = (input as Record<string, unknown>).format;
+    if (
+      !thinkingFormats(id).includes(format as ModelThinkingSettings["format"])
+    )
+      throw new Error("请选择支持的检测参数格式。");
+    if (id !== "openai" && value.protocol && value.protocol !== "auto")
+      throw new Error("此服务商不支持修改接口协议。");
+    const definition = modelProviders.find((provider) => provider.id === id)!;
+    const previous = this.saved.get(id);
+    if (
+      !value.apiKey &&
+      value.baseUrl !==
+        this.registry.getProvider(id)?.baseUrl?.replace(/\/+$/, "")
+    )
+      throw new Error("API URL 已改变，请填写该地址对应的 API Key 后检测。");
+    if (!value.apiKey && !this.configured(id))
+      throw new Error("请填写 API Key 后检测。");
+    // A disposable registry uses the exact draft endpoint and adapter; saving is a separate action.
+    const draft = new Map(this.saved);
+    draft.set(id, {
+      ...value,
+      apiKey: value.apiKey ?? previous?.apiKey,
+      protocol: value.protocol ?? previous?.protocol,
+      customModels: [
+        ...new Set([...(previous?.customModels ?? []), value.model]),
+      ],
+    });
+    this.probes.add(definition.id);
+    try {
+      const registry = this.buildRegistry(draft);
+      const model = registry.getModel(id, value.model)!;
+      return await probeThinking(
+        model,
+        format as ModelThinkingSettings["format"],
+        (options) =>
+          registry.completeSimple(model, thinkingProbeContext, options),
+        signal,
+      );
+    } finally {
+      this.probes.delete(id);
+    }
   }
 
   async discover(
@@ -337,14 +415,35 @@ export class ModelProviderSettings {
   list(): ProviderSettings[] {
     return modelProviders.map((definition) => {
       const provider = this.registry.getProvider(definition.id)!;
-      const models = provider
-        .getModels()
-        .map(({ id, name, contextWindow }) => ({
-          id,
-          name,
-          contextWindow,
-          contextWindowSource: this.contextWindowSource(definition.id, id),
-        }));
+      const models = provider.getModels().map((model) => {
+        const thinking = this.saved
+          .get(definition.id)
+          ?.modelThinking?.find((item) => item.id === model.id)?.settings;
+        const known = this.baseline
+          .find((item) => item.id === definition.id)
+          ?.getModels()
+          .find((item) => item.id === model.id);
+        return {
+          id: model.id,
+          name: model.name,
+          contextWindow: model.contextWindow,
+          contextWindowSource: this.contextWindowSource(
+            definition.id,
+            model.id,
+          ),
+          thinkingLevels: getSupportedThinkingLevels(model),
+          thinkingControls: modelThinkingControls(model),
+          thinkingToggle: modelThinkingProfile(model)?.toggle,
+          thinkingFormat:
+            thinking?.format ?? modelThinkingProfile(model)?.format,
+          thinking: thinking ? structuredClone(thinking) : undefined,
+          thinkingSource: (thinking
+            ? "configured"
+            : known && (definition.id !== "paperbypass" || known.reasoning)
+              ? "builtin"
+              : "fallback") as ContextWindowSource,
+        };
+      });
       const preferred = process.env.PANEL_DEFAULT_MODEL?.trim();
       const envModel = preferred?.startsWith(`${definition.id}/`)
         ? preferred.slice(definition.id.length + 1)
@@ -362,6 +461,8 @@ export class ModelProviderSettings {
               : (models[0]?.id ?? "")),
         apiKeyConfigured: this.configured(definition.id),
         supportsContextWindow: true,
+        thinkingFormats: thinkingFormats(definition.id),
+        supportsThinkingProbe: thinkingFormats(definition.id).length > 0,
         ...(definition.id === "openai"
           ? { protocol: this.saved.get(definition.id)?.protocol ?? "auto" }
           : {}),
@@ -375,6 +476,9 @@ export class ModelProviderSettings {
       const definition = modelProviders.find((item) => item.id === id);
       if (!definition) throw new Error("不支持此模型服务商。");
       const value = validateSettings(input);
+      const rawThinking = (input as Record<string, unknown>).thinking;
+      const thinking =
+        rawThinking == null ? rawThinking : validateThinking(rawThinking, id);
       const contextWindow = (input as Record<string, unknown>).contextWindow;
       if (
         contextWindow !== undefined &&
@@ -411,6 +515,14 @@ export class ModelProviderSettings {
       if (contextWindow === null) modelContexts.delete(value.model);
       else if (contextWindow !== undefined)
         modelContexts.set(value.model, contextWindow);
+      const modelThinking = new Map(
+        (previous?.baseUrl === value.baseUrl
+          ? (previous.modelThinking ?? [])
+          : []
+        ).map((item) => [item.id, item.settings]),
+      );
+      if (thinking === null) modelThinking.delete(value.model);
+      else if (thinking !== undefined) modelThinking.set(value.model, thinking);
       saved.set(id, {
         ...value,
         apiKey,
@@ -419,6 +531,10 @@ export class ModelProviderSettings {
         modelContexts: [...modelContexts].map(([id, contextWindow]) => ({
           id,
           contextWindow,
+        })),
+        modelThinking: [...modelThinking].map(([id, settings]) => ({
+          id,
+          settings,
         })),
       });
       const registry = this.buildRegistry(saved);
@@ -482,6 +598,10 @@ export class ModelProviderSettings {
         });
       }
       const key = settings.apiKey;
+      for (const item of settings.modelThinking ?? []) {
+        const model = models.find((model) => model.id === item.id);
+        if (model) Object.assign(model, thinkingCapabilities(item.settings));
+      }
       for (const { id, contextWindow } of settings.modelContexts ?? []) {
         const model = models.find((item) => item.id === id);
         if (model) model.contextWindow = contextWindow;
@@ -496,37 +616,53 @@ export class ModelProviderSettings {
           model.api = settings.protocol;
         }
       }
-      registry.setProvider(
-        createProvider({
-          ...provider,
-          baseUrl: settings.baseUrl,
-          models,
-          api:
-            provider.id === "openai"
-              ? {
-                  "openai-responses": provider,
-                  "openai-completions": openAICompletionsApi(),
-                }
-              : provider,
-          auth: key
+      const configured = createProvider({
+        ...provider,
+        baseUrl: settings.baseUrl,
+        models,
+        api:
+          provider.id === "openai"
             ? {
-                apiKey: {
-                  name: `${provider.name} API key`,
-                  resolve: async ({ signal }) => {
-                    signal.throwIfAborted();
-                    return {
-                      auth:
-                        provider.id === "paperbypass"
-                          ? { headers: { Authorization: `Bearer ${key}` } }
-                          : { apiKey: key },
-                      source: "local configuration",
-                    };
-                  },
-                },
+                "openai-responses": provider,
+                "openai-completions": openAICompletionsApi(),
               }
-            : provider.auth,
-        }),
+            : provider,
+        auth: key
+          ? {
+              apiKey: {
+                name: `${provider.name} API key`,
+                resolve: async ({ signal }) => {
+                  signal.throwIfAborted();
+                  return {
+                    auth:
+                      provider.id === "paperbypass"
+                        ? { headers: { Authorization: `Bearer ${key}` } }
+                        : { apiKey: key },
+                    source: "local configuration",
+                  };
+                },
+              },
+            }
+          : provider.auth,
+      });
+      registry.setProvider(
+        settings.modelThinking?.length
+          ? createProvider({
+              ...configured,
+              models,
+              api: effortApi(
+                configured,
+                (model) =>
+                  settings.modelThinking?.find((item) => item.id === model.id)
+                    ?.settings,
+              ),
+            })
+          : configured,
       );
+      for (const item of settings.modelThinking ?? []) {
+        const model = registry.getModel(provider.id, item.id);
+        if (model) registerThinkingProfile(model, item.settings);
+      }
     }
     return registry;
   }

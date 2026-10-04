@@ -61,7 +61,10 @@ import type {
   SaveProviderSettings,
   DiscoverProviderModels,
   ProviderModelCatalog,
+  ThinkingProbeInput,
+  ThinkingProbeResult,
 } from "../shared/provider-settings.ts";
+import { modelThinkingControls, runThinkingOptions } from "./model-thinking.ts";
 import { codingSandboxScope } from "./coding-tools.ts";
 import { createRunCodingTools } from "./run-coding-tools.ts";
 import type { SandboxRecovery } from "./sandbox-errors.ts";
@@ -72,6 +75,7 @@ import { withConnectionRetries } from "./connection-retry.ts";
 import { createWebTools, isWebTool, type WebToolOptions } from "./web-tools.ts";
 import { WEB_RESEARCH_PROMPT } from "./native-web-contract.ts";
 import { ComputerUse, COMPUTER_USE_PROMPT } from "./computer-use.ts";
+import type { CuaPreviewSource } from "./cua-preview.ts";
 import type { CuaPreparedApproval } from "./cua-task-control.ts";
 import type { ComputerUseScope } from "../shared/types.ts";
 import { validateToolRequests } from "./tool-requests.ts";
@@ -255,8 +259,16 @@ export interface Runtime {
   models(): ModelOption[];
   computerUseStatus?(): ComputerUseStatus;
   connectComputerUse?(): Promise<ComputerUseStatus>;
+  computerUsePreviewSource?(
+    scope: ComputerUseScope,
+  ): CuaPreviewSource | undefined;
   close?(): Promise<void>;
   providerSettings?(): ProviderSettings[];
+  probeProviderThinking?(
+    id: string,
+    input: ThinkingProbeInput,
+    signal?: AbortSignal,
+  ): Promise<ThinkingProbeResult>;
   discoverProviderModels?(
     id: string,
     input: DiscoverProviderModels,
@@ -310,6 +322,7 @@ async function summarizeContext(
   previousSummary: string | undefined,
   signal: AbortSignal,
   branchDescription = "",
+  runConfig?: RunConfig,
 ): Promise<{ text: string; usage?: TurnNode["usage"] }> {
   signal.throwIfAborted();
   if (model.provider === "demo") {
@@ -351,12 +364,16 @@ async function summarizeContext(
         .streamSimple(
           requestModel,
           { ...context, tools: [] },
-          {
-            ...options,
-            signal: controller.signal,
-            timeoutMs,
-            maxRetries: 0,
-          },
+          runThinkingOptions(
+            model,
+            runConfig ?? { model: `${model.provider}/${model.id}`, thinking },
+            {
+              ...options,
+              signal: controller.signal,
+              timeoutMs,
+              maxRetries: 0,
+            },
+          ),
         )
         .result();
       controller.signal.throwIfAborted();
@@ -418,6 +435,7 @@ async function summarizeMergedContext(
   previousSummary: string | undefined,
   signal: AbortSignal,
   branchDescription = "",
+  runConfig?: RunConfig,
 ): Promise<{ text: string; usage?: TurnNode["usage"] }> {
   const summarize = (input: Message[], previous: string | undefined) =>
     summarizeContext(
@@ -428,6 +446,7 @@ async function summarizeMergedContext(
       previous,
       signal,
       branchDescription,
+      runConfig,
     );
   const exceedsWindow = (error: unknown) =>
     error instanceof Error &&
@@ -516,6 +535,11 @@ export class PiRuntime implements Runtime {
   }
   connectComputerUse(): Promise<ComputerUseStatus> {
     return this.computer.connect();
+  }
+  computerUsePreviewSource(
+    scope: ComputerUseScope,
+  ): CuaPreviewSource | undefined {
+    return this.computer.previewSource(scope);
   }
   async close(): Promise<void> {
     await Promise.all(
@@ -613,6 +637,15 @@ export class PiRuntime implements Runtime {
     return this.settings.discover(id, input, signal);
   }
 
+  async probeProviderThinking(
+    id: string,
+    input: ThinkingProbeInput,
+    signal?: AbortSignal,
+  ): Promise<ThinkingProbeResult> {
+    if (!this.settings) throw new Error("模型连接设置尚未初始化。");
+    return this.settings.probe(id, input, signal);
+  }
+
   async saveProviderSettings(
     id: string,
     input: SaveProviderSettings,
@@ -651,6 +684,7 @@ export class PiRuntime implements Runtime {
             `${model.provider}/${model.id}` ===
             process.env.PANEL_DEFAULT_MODEL?.trim(),
           thinkingLevels: getSupportedThinkingLevels(model),
+          thinkingControls: modelThinkingControls(model),
           contextWindow: model.contextWindow,
           contextWindowSource:
             this.settings?.contextWindowSource(model.provider, model.id) ??
@@ -743,6 +777,7 @@ export class PiRuntime implements Runtime {
     )
       throw new Error("当前模型不支持图片输入，请选择支持图片的模型后重试。");
     const execution = provider !== "demo" ? environment : undefined;
+    runThinkingOptions(model, config);
     const webSessions: ReturnType<typeof createWebTools>[] = [];
     const newWebTools = () => {
       const tools = createWebTools(this.webOptions);
@@ -843,7 +878,11 @@ export class PiRuntime implements Runtime {
     const outputContinuation = new OutputContinuation();
     const streamAnswer = withConnectionRetries(
       withProviderOutputLimit((requestModel, context, options) =>
-        registry.streamSimple(requestModel, context, options),
+        registry.streamSimple(
+          requestModel,
+          context,
+          runThinkingOptions(model, config, options),
+        ),
       ),
       { onRetry: (retry) => contextOptions?.onConnectionRetry?.(retry) },
     );
@@ -909,6 +948,7 @@ export class PiRuntime implements Runtime {
           previousSummary,
           summarySignal,
           branchContextDescription(options),
+          config,
         ),
       onState: async (state) => {
         requestState = {
@@ -1443,6 +1483,7 @@ export class PiRuntime implements Runtime {
           previousSummary,
           summarySignal,
           branchContextDescription(options),
+          config,
         ),
       onState: options.onState,
       onCheckpoint: async (result) => {

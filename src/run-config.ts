@@ -4,6 +4,7 @@ import type {
   ToolCall,
   ToolRequest,
 } from "../shared/types";
+import { normalizeThinking } from "../shared/thinking-controls";
 
 /** Each new branch makes its own duration choice; model preferences can carry. */
 export function newBranchConfig(config: RunConfig): RunConfig {
@@ -14,15 +15,7 @@ export function configForModel(
   config: RunConfig,
   model: ModelOption,
 ): RunConfig {
-  return {
-    ...config,
-    model: model.id,
-    thinking: model.thinkingLevels.includes(config.thinking)
-      ? config.thinking
-      : model.thinkingLevels.includes("medium")
-        ? "medium"
-        : model.thinkingLevels[0],
-  };
+  return normalizeThinking(config, model);
 }
 
 /** Explicit selection or authorized capability dispatch enables long execution. */

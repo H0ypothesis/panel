@@ -1,5 +1,9 @@
 import type { Attachment } from "./attachments";
-import type { ContextWindowSource } from "./provider-settings";
+import type {
+  ContextWindowSource,
+  EffortLevel,
+  ThinkingControls,
+} from "./provider-settings";
 
 export type ThinkingLevel =
   | "off"
@@ -179,6 +183,9 @@ export interface ComputerUseStatus {
 export interface RunConfig {
   model: string;
   thinking: ThinkingLevel;
+  /** Explicit controls; absent on historical runs that used the combined selector. */
+  thinkingMode?: "default" | "enabled" | "disabled";
+  effort?: "default" | EffortLevel;
   /** Explicitly allow this card to continue beyond the normal tool-call limit. */
   longTask?: boolean;
 }
@@ -381,6 +388,8 @@ export interface Workspace {
   workingDirectory?: string;
   approvalMode?: ApprovalMode;
   safetyModel?: string;
+  /** Explicit model preferences chosen at creation; legacy roots use the global default. */
+  defaultConfig?: RunConfig;
   /** Missing on older workspaces means enabled. */
   autoCompact?: boolean;
   gitHistory?: GitHistoryEntry[];
@@ -423,6 +432,7 @@ export interface ModelOption {
   demo: boolean;
   default?: boolean;
   thinkingLevels: ThinkingLevel[];
+  thinkingControls?: ThinkingControls;
   contextWindow: number;
   contextWindowSource?: ContextWindowSource;
   supportsImages?: boolean;
@@ -430,6 +440,7 @@ export interface ModelOption {
 }
 
 export interface WebCapabilities {
+  computerUsePreview?: boolean;
   runInputs?: boolean;
   computerUseTaskControl?: boolean;
   /** Live per-card takeover for conservative computer-use operations. */
@@ -456,13 +467,13 @@ export interface WebCapabilities {
 }
 
 export const thinkingLabels: Record<ThinkingLevel, string> = {
-  off: "关闭",
-  minimal: "极低",
-  low: "轻量",
-  medium: "标准",
-  high: "深入",
-  xhigh: "极高",
-  max: "最高",
+  off: "off",
+  minimal: "minimal",
+  low: "low",
+  medium: "medium",
+  high: "high",
+  xhigh: "xhigh",
+  max: "max",
 };
 
 export const statusLabels: Record<RunStatus, string> = {

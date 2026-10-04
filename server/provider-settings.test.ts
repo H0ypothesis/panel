@@ -203,6 +203,7 @@ test("previously saved custom GLM Flash gains verified image support without los
   );
   assert.equal(glm.length, 1);
   assert.equal(glm[0].supportsImages, true);
+  assert.deepEqual(glm[0].thinkingLevels, ["low", "high", "max"]);
   assert.equal(glm[0].contextWindow, 1000000);
   assert.equal(glm[0].contextWindowSource, "configured");
   assert.ok(
@@ -531,6 +532,53 @@ test("model settings API masks secrets, enforces same origin, and excludes crede
     model: "custom/api-model",
     apiKey: "secret-api-route-key",
   };
+  let probes = 0;
+  t.mock.method(
+    runtime,
+    "probeProviderThinking",
+    async (
+      ...[id, input, signal]: Parameters<PiRuntime["probeProviderThinking"]>
+    ) => {
+      probes++;
+      assert.equal(id, "openai");
+      assert.equal(input.model, body.model);
+      assert.ok(signal instanceof AbortSignal);
+      return {
+        format: "reasoning-effort",
+        checkedAt: 1,
+        requests: 1,
+        rows: [
+          { option: "baseline", status: "inconclusive", detail: "local test" },
+        ],
+      };
+    },
+  );
+  assert.equal(
+    (
+      await call("POST", "/model-providers/openai/thinking-probe", body, {
+        origin: "https://foreign.invalid",
+      })
+    ).status,
+    403,
+  );
+  assert.equal(probes, 0);
+  const probed = await call("POST", "/model-providers/openai/thinking-probe", {
+    ...body,
+    format: "reasoning-effort",
+  });
+  assert.equal(probed.status, 200);
+  assert.equal(probed.body.requests, 1);
+  assert.equal(probes, 1);
+  assert.equal(
+    (
+      await call(
+        "POST",
+        "/model-providers/openai/thinking-probe",
+        '{"apiKey":"unsaved-probe-secret",}',
+      )
+    ).output.includes("unsaved-probe-secret"),
+    false,
+  );
   const invalidJSON = await call(
     "PUT",
     "/model-providers/openai",
