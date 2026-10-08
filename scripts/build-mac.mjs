@@ -2,6 +2,7 @@ import { execFileSync } from "node:child_process";
 import { chmod, cp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { packageMacApp } from "./package-mac.mjs";
 
 if (process.platform !== "darwin")
   throw new Error(
@@ -120,8 +121,7 @@ run("codesign", [
 run("codesign", ["--force", "--sign", "-", app]);
 run("codesign", ["--verify", "--deep", "--strict", app]);
 const archive = join(root, `release/Panel-mac-${architecture}.zip`);
-await rm(archive, { force: true });
-run("ditto", ["-c", "-k", "--sequesterRsrc", "--keepParent", app, archive]);
+await packageMacApp(app, archive, appVersion);
 await writeFile(
   join(root, "release/build-info.json"),
   JSON.stringify(

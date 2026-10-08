@@ -17,7 +17,7 @@
     "desktop:bundle": "node scripts/bundle-desktop.mjs",
     "build:mac": "npm run build && npm run desktop:bundle && node scripts/build-mac.mjs",
     "test:desktop": "node scripts/test-desktop.mjs",
-    "test:updater": "node --test scripts/test-updater.mjs scripts/test-desktop-update.mjs"
+    "test:updater": "node --test scripts/test-updater.mjs scripts/test-desktop-update.mjs scripts/test-mac-package.mjs"
   },
   "dependencies": {
     "@anthropic-ai/sandbox-runtime": "0.0.78",
