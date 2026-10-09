@@ -1,4 +1,5 @@
 export type DesktopAction = "new-workspace" | "search";
+import type { GeneratedFileTarget } from "../shared/generated-files";
 
 export interface DesktopUpdateState {
   phase:
@@ -22,6 +23,8 @@ export interface PanelDesktop {
   chooseDirectory: () => Promise<string | null>;
   openSettings: () => Promise<unknown>;
   openDataDirectory: () => Promise<unknown>;
+  openGeneratedFile?: (target: GeneratedFileTarget) => Promise<unknown>;
+  revealGeneratedFile?: (target: GeneratedFileTarget) => Promise<unknown>;
   setAppearance: (theme: "light" | "dark" | "system") => Promise<unknown>;
   getUpdateState?: () => Promise<DesktopUpdateState>;
   checkForUpdates?: () => Promise<DesktopUpdateState>;

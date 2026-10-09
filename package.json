@@ -1,6 +1,6 @@
 {
   "name": "panel-agent-workbench",
-  "version": "0.9.5",
+  "version": "0.9.6",
   "private": true,
   "type": "module",
   "scripts": {
@@ -10,7 +10,7 @@
     "setup:cua": "node scripts/setup-cua.mjs",
     "test:setup": "node --test scripts/setup-pi.test.mjs scripts/setup-cua.test.mjs",
     "test:core": "tsx --test server/*.test.ts",
-    "test:ui": "node --import tsx --test src/*.test.ts src/*.test.tsx && node --test scripts/test-inspector.mjs scripts/test-provider-settings.mjs scripts/test-directory-picker.mjs scripts/test-subagent-settings.mjs scripts/test-subagent-controls.mjs",
+    "test:ui": "node --import tsx --test src/*.test.ts src/*.test.tsx && node --test scripts/test-inspector.mjs scripts/test-provider-settings.mjs scripts/test-directory-picker.mjs scripts/test-subagent-settings.mjs scripts/test-subagent-controls.mjs scripts/test-generated-files.mjs",
     "build": "vite build",
     "format": "prettier --write src server shared vite.config.ts tsconfig*.json package.json docs/PRD.md README.md",
     "start": "NODE_ENV=production tsx server/index.ts",
@@ -30,6 +30,7 @@
     "@modelcontextprotocol/sdk": "1.30.0",
     "@xyflow/react": "12.8.5",
     "lucide-react": "0.468.0",
+    "mdast-util-from-markdown": "2.0.3",
     "pi-mcp-adapter": "3.3.0",
     "pi-subagents": "0.73.1",
     "pi-web-access": "0.34.0",

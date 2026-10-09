@@ -21,6 +21,11 @@ import { webCapabilities } from "./web-tools.ts";
 import { importWorkspace, MAX_IMPORT_BYTES } from "./workspace-import.ts";
 import { readWorkspaceImportFile } from "./workspace-import-file.ts";
 import {
+  GeneratedFileError,
+  listGeneratedFiles,
+  serveGeneratedFile,
+} from "./generated-files.ts";
+import {
   MAX_ATTACHMENT_REQUEST_BYTES,
   type AttachmentUpload,
 } from "../shared/attachments.ts";
@@ -175,6 +180,49 @@ export function createApi(
       return true;
     }
     try {
+      const generatedFile = url.pathname.match(
+        /^\/api\/workspaces\/([^/]+)\/nodes\/([^/]+)\/generated-files(?:\/([a-f0-9]{64})\/(content|native))?$/,
+      );
+      if (
+        generatedFile &&
+        request.method === (generatedFile[4] === "native" ? "POST" : "GET")
+      ) {
+        const workspace = store.data.workspaces.find(
+          (item) => item.id === decodeURIComponent(generatedFile[1]),
+        );
+        const node = workspace?.nodes.find(
+          (item) => item.id === decodeURIComponent(generatedFile[2]),
+        );
+        if (!workspace || !node)
+          throw new GeneratedFileError("回答不存在或已删除。", 404);
+        const revision = url.searchParams.get("revision");
+        if (
+          revision === null ||
+          !/^\d+$/.test(revision) ||
+          !Number.isSafeInteger(Number(revision))
+        )
+          throw new GeneratedFileError("请提供有效的回答版本。", 400);
+        if ((node.revision ?? 0) !== Number(revision))
+          throw new GeneratedFileError("回答已更新，请重新打开文件。", 409);
+        if (generatedFile[4] === "native") await readJson(request, 1024);
+        const fallback = store.temporaryDirectory(workspace);
+        if (!generatedFile[3])
+          json(response, 200, {
+            files: await listGeneratedFiles(workspace, node, fallback),
+          });
+        else
+          await serveGeneratedFile(
+            request,
+            response,
+            workspace,
+            node,
+            fallback,
+            generatedFile[3],
+            generatedFile[4] as "native" | "content",
+            url.searchParams.get("download") === "1",
+          );
+        return true;
+      }
       const enterPreview = url.pathname.match(
         /^\/api\/workspaces\/([^/]+)\/nodes\/([^/]+)\/computer-use\/preview\/enter$/,
       );
@@ -1004,9 +1052,21 @@ export function createApi(
         } else json(response, 404, { error: "接口不存在。" });
       }
     } catch (error) {
-      json(response, error instanceof NodeMutationConflict ? 409 : 400, {
-        error: safeError(error),
-      });
+      if (response.headersSent) {
+        response.destroy();
+        return true;
+      }
+      json(
+        response,
+        error instanceof GeneratedFileError
+          ? error.status
+          : error instanceof NodeMutationConflict
+            ? 409
+            : 400,
+        {
+          error: safeError(error),
+        },
+      );
     }
     return true;
   };

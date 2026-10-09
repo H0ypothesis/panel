@@ -458,6 +458,8 @@ final class PanelApp: NSObject, NSApplicationDelegate, NSWindowDelegate,
             chooseDirectory: () => window.webkit.messageHandlers.panel.postMessage({action:'choose-directory'}),
             openSettings: () => window.webkit.messageHandlers.panel.postMessage({action:'open-settings'}),
             openDataDirectory: () => window.webkit.messageHandlers.panel.postMessage({action:'open-data-directory'}),
+            openGeneratedFile: (target) => window.webkit.messageHandlers.panel.postMessage({action:'open-generated-file', target}),
+            revealGeneratedFile: (target) => window.webkit.messageHandlers.panel.postMessage({action:'reveal-generated-file', target}),
             setAppearance: (theme) => window.webkit.messageHandlers.panel.postMessage({action:'set-appearance', theme}),
             getUpdateState: () => window.webkit.messageHandlers.panel.postMessage({action:'update-state'}),
             checkForUpdates: () => window.webkit.messageHandlers.panel.postMessage({action:'check-updates'}),
@@ -543,6 +545,8 @@ final class PanelApp: NSObject, NSApplicationDelegate, NSWindowDelegate,
             return
         }
         switch action {
+        case "open-generated-file", "reveal-generated-file":
+            performGeneratedFileAction(body["target"], reveal: action == "reveal-generated-file", replyHandler: replyHandler)
         case "computer-preview":
             guard let task = body["task"] as? [String: Any],
                   let workspaceID = task["workspaceId"] as? String,
@@ -606,6 +610,64 @@ final class PanelApp: NSObject, NSApplicationDelegate, NSWindowDelegate,
         default:
             replyHandler(nil, "不支持的原生操作。")
         }
+    }
+
+    private func performGeneratedFileAction(_ value: Any?, reveal: Bool,
+        replyHandler: @escaping (Any?, String?) -> Void) {
+        guard let target = value as? [String: Any],
+              let workspaceID = target["workspaceId"] as? String,
+              let nodeID = target["nodeId"] as? String,
+              let fileID = target["fileId"] as? String,
+              let revision = target["revision"] as? Int, revision >= 0,
+              [workspaceID, nodeID].allSatisfy({ $0.range(of: "^[A-Za-z0-9_-]{1,128}$", options: .regularExpression) != nil }),
+              fileID.range(of: "^[a-f0-9]{64}$", options: .regularExpression) != nil,
+              var url = serviceURL else { replyHandler(nil, "生成文件标识无效。"); return }
+        // Resolve the opaque ID through the server; the page cannot supply an OS path.
+        for part in ["api", "workspaces", workspaceID, "nodes", nodeID, "generated-files", fileID, "native"] {
+            url.appendPathComponent(part)
+        }
+        var components = URLComponents(url: url, resolvingAgainstBaseURL: false)!
+        components.queryItems = [URLQueryItem(name: "revision", value: String(revision))]
+        var request = URLRequest(url: components.url!)
+        request.httpMethod = "POST"
+        request.httpBody = Data("{}".utf8)
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.timeoutInterval = 10
+        URLSession.shared.dataTask(with: request) { [weak self] data, response, error in
+            DispatchQueue.main.async {
+                guard let self = self else { replyHandler(nil, "客户端已关闭。"); return }
+                guard error == nil, let data = data,
+                      let response = response as? HTTPURLResponse, self.sameOrigin(response.url),
+                      let result = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+                    replyHandler(nil, "无法连接文件服务，请重试。"); return
+                }
+                guard response.statusCode == 200 else {
+                    replyHandler(nil, result["error"] as? String ?? "文件无法访问。"); return
+                }
+                guard let path = result["path"] as? String, let root = result["root"] as? String,
+                      path.hasPrefix(root + "/"),
+                      URL(fileURLWithPath: root).resolvingSymlinksInPath().path == root,
+                      URL(fileURLWithPath: path).resolvingSymlinksInPath().path == path else {
+                    replyHandler(nil, "文件路径已变化，请重新打开。"); return
+                }
+                let fileURL = URL(fileURLWithPath: path)
+                guard let values = try? fileURL.resourceValues(forKeys: [.isRegularFileKey, .isSymbolicLinkKey]),
+                      values.isRegularFile == true, values.isSymbolicLink != true else {
+                    replyHandler(nil, "文件不存在或已删除。"); return
+                }
+                if reveal {
+                    NSWorkspace.shared.activateFileViewerSelecting([fileURL])
+                } else {
+                    guard result["nativeOpenable"] as? Bool == true else {
+                        replyHandler(nil, "此文件类型请使用下载或预览。"); return
+                    }
+                    guard NSWorkspace.shared.open(fileURL) else {
+                        replyHandler(nil, "无法打开文件，请检查默认应用或下载后打开。"); return
+                    }
+                }
+                replyHandler(nil, nil)
+            }
+        }.resume()
     }
 
     func webView(_ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction,

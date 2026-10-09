@@ -214,6 +214,38 @@ async function mount(t, { models, state = fixture() } = {}) {
         }),
       };
     }
+    const createNode = url.match(/^\/api\/workspaces\/([^/]+)\/nodes$/);
+    if (options.method === "POST" && createNode) {
+      const workspace = state.workspaces.find(
+        (item) => item.id === createNode[1],
+      );
+      assert.ok(workspace, "New card must target its owning workspace");
+      const body = JSON.parse(options.body);
+      const parent = workspace.nodes.find((item) => item.id === body.parentId);
+      assert.ok(parent, "New card must have an existing parent");
+      const node = {
+        id: `created-node-${workspace.nodes.length}`,
+        parentId: parent.id,
+        prompt: body.prompt,
+        response: "Branch answer",
+        status: "completed",
+        config: body.config,
+        color: parent.color,
+        position: { x: parent.position.x + 360, y: parent.position.y },
+        contextIds: [...parent.contextIds, parent.id],
+        createdAt: 2,
+        revision: 0,
+      };
+      workspace.nodes.push(node);
+      state.revision++;
+      return {
+        ok: true,
+        json: async () => ({
+          nodeId: node.id,
+          state: JSON.parse(JSON.stringify(state)),
+        }),
+      };
+    }
     const inputPath = url.match(
       /^\/api\/workspaces\/([^/]+)\/nodes\/([^/]+)\/inputs$/,
     );
@@ -889,5 +921,89 @@ test("an explicitly selected demo model survives creation despite a real global 
   );
   assert.equal(JSON.parse(request.body).approvalMode, "ask");
   assert.equal(JSON.parse(request.body).safetyModel, undefined);
+  assert.deepEqual(ui.diagnostics, []);
+});
+
+test("branching again from an unselected root keeps the workspace's initial model and thinking settings", async (t) => {
+  const state = fixture();
+  const workspace = state.workspaces[0];
+  workspace.defaultConfig = {
+    model: "test/execution",
+    thinking: "high",
+    thinkingMode: "enabled",
+    effort: "high",
+  };
+  workspace.nodes[0].config = { ...workspace.defaultConfig };
+  workspace.nodes[1].status = "completed";
+  workspace.nodes[1].toolCalls = [];
+  workspace.nodes = workspace.nodes.slice(0, 2);
+  state.workspaces = [workspace];
+  const models = creationModels.map((model) => ({
+    ...model,
+    default: model.demo,
+    ...(model.id === "test/execution"
+      ? {
+          thinkingControls: {
+            toggle: "supported",
+            efforts: ["low", "high", "max"],
+          },
+        }
+      : {}),
+  }));
+  const ui = await mount(t, { state, models });
+  await ui.publish();
+  // The completed first card uses Pi Demo. Clicking the root's + must use the
+  // workspace preference rather than that card or the global demo default.
+  assert.equal(
+    ui.inspector().querySelector('[aria-label="选择模型"]').value,
+    "demo/pi-demo",
+  );
+  for (const prompt of ["第二张卡片", "第三张卡片"]) {
+    await ui.click(
+      ui.document.querySelector(
+        '.react-flow__node[data-id="cua-root"] .card-branch-button',
+      ),
+    );
+    const draft = ui.document.querySelector('[aria-label="新分支草稿"]');
+    assert.ok(draft);
+    assert.equal(
+      draft.querySelector('[aria-label="选择模型"]').value,
+      "test/execution",
+    );
+    assert.equal(
+      draft.querySelector('[aria-label="effort 强度"]').value,
+      "high",
+    );
+    assert.equal(
+      draft
+        .querySelector('[aria-label="思考开关"]')
+        .getAttribute("aria-checked"),
+      "true",
+    );
+    await ui.change(
+      draft.querySelector('[aria-label="卡片中的新问题"]'),
+      prompt,
+    );
+    const submit = ui.document.querySelector(".branch-draft-submit");
+    assert.equal(submit.disabled, false);
+    await ui.click(submit);
+    const request = ui.requests.findLast(
+      (item) =>
+        item.method === "POST" && item.url === "/api/workspaces/cua/nodes",
+    );
+    assert.ok(request);
+    const body = JSON.parse(request.body);
+    assert.equal(body.parentId, "cua-root");
+    assert.equal(body.prompt, prompt);
+    assert.deepEqual(body.config, {
+      ...workspace.defaultConfig,
+      longTask: false,
+    });
+    assert.equal(ui.document.querySelector('[aria-label="新分支草稿"]'), null);
+    assert.equal(
+      ui.inspector().querySelector('[aria-label="选择模型"]').value,
+      "test/execution",
+    );
+  }
   assert.deepEqual(ui.diagnostics, []);
 });

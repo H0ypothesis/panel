@@ -77,6 +77,7 @@ import { PendingApprovals, type PendingApproval } from "./PendingApprovals";
 import { agentRuns, hasSubagents, SubagentsPanel } from "./Subagents";
 import { GenerationIndicator } from "./GenerationIndicator";
 import { AssistantResponse } from "./AssistantResponse";
+import { GeneratedFiles } from "./GeneratedFiles";
 import "./assistant-response.css";
 import { Markdown } from "./Markdown";
 import { responseText } from "../shared/response-parts";
@@ -847,10 +848,12 @@ export function App() {
         id === selected?.id
           ? config
           : source.status === "root"
-            ? {
-                model: defaultModelId ?? DEFAULT_CONFIG.model,
-                thinking: defaultThinking ?? DEFAULT_CONFIG.thinking,
-              }
+            ? newBranchConfig(
+                workspace.defaultConfig ?? {
+                  model: defaultModelId ?? DEFAULT_CONFIG.model,
+                  thinking: defaultThinking ?? DEFAULT_CONFIG.thinking,
+                },
+              )
             : newBranchConfig(source.config);
       const initialModel = models.find((item) => item.id === initial.model);
       const siblings = workspace.nodes.filter((node) => node.parentId === id);
@@ -2565,6 +2568,11 @@ export function App() {
                       thinking={selected.thinking}
                       status={selected.status}
                     />
+                    <GeneratedFiles
+                      key={`${workspace.id}:${selected.id}:${selected.revision ?? 0}`}
+                      workspace={workspace}
+                      node={selected}
+                    />
                     {selected.status === "running" ||
                     selected.status === "queued" ? (
                       <GenerationIndicator
@@ -2783,6 +2791,13 @@ export function App() {
                             response={node.response}
                             thinking={node.thinking}
                             status={node.status}
+                          />
+                        )}
+                        {node.status !== "root" && (
+                          <GeneratedFiles
+                            key={`${workspace.id}:${node.id}:${node.revision ?? 0}`}
+                            workspace={workspace}
+                            node={node}
                           />
                         )}
                         <button onClick={() => locate(node.id)}>
