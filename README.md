@@ -9,8 +9,8 @@
 
 <!-- 发布新版时同步更新安装包链接。 -->
 <p align="center">
-  <a href="https://github.com/H0ypothesis/panel/releases/download/v0.9.5/Panel-mac-arm64.zip">
-    <img src="docs/assets/download-macos.svg" width="304" height="80" alt="一键下载 Panel v0.9.5 · Apple Silicon · macOS 13.5 及以上">
+  <a href="https://github.com/H0ypothesis/panel/releases/download/v0.9.6/Panel-mac-arm64.zip">
+    <img src="docs/assets/download-macos.svg" width="304" height="80" alt="一键下载 Panel v0.9.6 · Apple Silicon · macOS 13.5 及以上">
   </a>
 </p>
 
@@ -52,11 +52,13 @@
 3. 使用真实模型时，打开左下角 **「模型连接」→「未配置」**，填写 **API URL、API Key、Model** 并保存，配置立即生效。
 4. 新建探索，写下主题与背景；点击卡片右侧的 **`+`** 开始提问，或选中历史节点继续分支。
 
-当前公开下载版本为 **v0.9.5**，安装包面向 **Apple Silicon（arm64），macOS 13.5 及以上**。这是采用本地 ad-hoc 签名的预览版，尚未完成 Apple 公证；Intel 版本暂未提供下载。安装与快捷键说明见 [macOS 客户端文档](docs/MACOS.md)。
+当前公开下载版本为 **v0.9.6**，安装包面向 **Apple Silicon（arm64），macOS 13.5 及以上**。这是采用本地 ad-hoc 签名的预览版，尚未完成 Apple 公证；Intel 版本暂未提供下载。安装与快捷键说明见 [macOS 客户端文档](docs/MACOS.md)。
 
 按住顶部空白区域可拖动窗口，双击可放大到可用桌面区域，再次双击恢复原尺寸。模型配置也可通过 `⌘,` 打开。
 
 **v0.5 起支持 App 内更新**：每天自动检查 GitHub Release，发现新版后在左下角版本号旁显示「有更新」。点击即可下载、校验、替换并重启，探索和 API 配置会保留；有运行任务时需先等待完成。也可使用「Panel → 检查更新…」手动检查。
+
+v0.9.6 新增交付文件入口，明确交付的成果可查看、预览和下载；Mac 客户端支持使用默认应用打开，以及在 Finder 中定位。新建分支使用探索保存的默认模型和思考设置。安装包已通过 v0.9.1 与 v0.9.5 更新器的完整解压和签名校验。详见 [交付文件](docs/USAGE.md#交付文件)。
 
 v0.9.5 新增电脑操作实时预览，Mac 客户端通过置顶画中画显示当前目标，支持移动、缩放、刷新及停止任务。模型思考开关与 effort 档位可独立设置，并提供参数兼容性检测；新建探索时可选择默认模型、思考设置和审批方式。使用说明见 [macOS 客户端](docs/MACOS.md#电脑操作实时预览) 和 [模型配置](docs/CONFIGURATION.md)。
 
