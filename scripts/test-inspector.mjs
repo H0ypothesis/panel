@@ -847,8 +847,12 @@ test("new exploration submits chosen models and approval settings and uses them 
     "模型与审批测试",
   );
   await ui.change(model(), "test/execution");
-  assert.equal(form().querySelector('[aria-label="思考强度"]').value, "low");
-  await ui.change(form().querySelector('[aria-label="思考强度"]'), "high");
+  assert.equal(
+    form().querySelector('[aria-label="思考强度"]').textContent,
+    "low",
+  );
+  await ui.click(form().querySelector('[aria-label="思考强度"]'));
+  await ui.click(ui.document.querySelector('[aria-label="选择 high 强度"]'));
   await ui.click(
     [...form().querySelectorAll("button")].find((button) =>
       button.textContent.includes("自动审批"),
@@ -881,7 +885,7 @@ test("new exploration submits chosen models and approval settings and uses them 
     "test/execution",
   );
   assert.equal(
-    ui.inspector().querySelector('[aria-label="思考强度"]').value,
+    ui.inspector().querySelector('[aria-label="思考强度"]').textContent,
     "high",
   );
   const workspace = ui.state.workspaces.find((item) => item.id === "created");
@@ -895,7 +899,7 @@ test("new exploration submits chosen models and approval settings and uses them 
     "test/execution",
   );
   assert.equal(
-    reopened.inspector().querySelector('[aria-label="思考强度"]').value,
+    reopened.inspector().querySelector('[aria-label="思考强度"]').textContent,
     "high",
   );
   assert.deepEqual(ui.diagnostics, []);
@@ -971,7 +975,7 @@ test("branching again from an unselected root keeps the workspace's initial mode
       "test/execution",
     );
     assert.equal(
-      draft.querySelector('[aria-label="effort 强度"]').value,
+      draft.querySelector('[aria-label="effort 强度"]').textContent,
       "high",
     );
     assert.equal(

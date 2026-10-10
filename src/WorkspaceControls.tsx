@@ -8,11 +8,9 @@ import {
   LockKeyhole,
   RotateCcw,
   ShieldCheck,
-  Zap,
   X,
 } from "lucide-react";
 import {
-  thinkingLabels,
   type ApprovalMode,
   type ModelOption,
   type RunConfig,
@@ -25,6 +23,7 @@ import { ComputerUseControls } from "./ComputerUseControls";
 import { LongTaskToggle } from "./LongTaskControls";
 import { configForModel } from "./run-config";
 import { thinkingConflict } from "../shared/thinking-controls";
+import { ThinkingIntensityControl } from "./ThinkingIntensityControl";
 
 function DirectoryDialog({
   children,
@@ -415,68 +414,35 @@ export function ComposerModelControls({
               </button>
             )}
           </div>
-          <label
-            className="thinking-select"
-            hidden={!selectedModel.thinkingControls.efforts.length}
-            title={
-              conflict ??
-              "独立选择 effort，不改变思考开关；默认由服务商或原生模型适配器决定。"
-            }
-          >
-            <select
-              aria-label="effort 强度"
-              aria-invalid={Boolean(conflict)}
-              aria-description={conflict}
+          {selectedModel.thinkingControls.efforts.length > 0 && (
+            <ThinkingIntensityControl
+              key={`${selectedModel.id}:${selectedModel.thinkingControls.efforts.join(",")}`}
+              label="effort 强度"
+              title="独立选择 effort，不改变思考开关；默认由服务商或原生模型适配器决定。"
+              conflict={conflict}
+              compact
               value={effectiveConfig.effort ?? "default"}
-              disabled={
-                disabled || !selectedModel.thinkingControls.efforts.length
-              }
-              onChange={(event) =>
+              levels={["default", ...selectedModel.thinkingControls.efforts]}
+              disabled={disabled}
+              onChange={(effort) =>
                 onConfigChange(
-                  configForModel(
-                    {
-                      ...effectiveConfig,
-                      effort: event.target.value as RunConfig["effort"],
-                    },
-                    selectedModel,
-                  ),
+                  configForModel({ ...effectiveConfig, effort }, selectedModel),
                 )
               }
-            >
-              <option value="default">默认</option>
-              {selectedModel.thinkingControls.efforts.map((level) => (
-                <option key={level} value={level}>
-                  {level}
-                </option>
-              ))}
-            </select>
-            <ChevronDown size={11} />
-          </label>
+            />
+          )}
         </div>
       ) : (
-        <label className="thinking-select" title="思考深度">
-          <Zap size={12} />
-          <select
-            aria-label="思考强度"
-            value={effectiveConfig.thinking}
-            disabled={disabled}
-            onChange={(event) =>
-              onConfigChange({
-                ...config,
-                thinking: event.target.value as RunConfig["thinking"],
-              })
-            }
-          >
-            {(selectedModel?.thinkingLevels ?? [config.thinking]).map(
-              (level) => (
-                <option key={level} value={level}>
-                  {thinkingLabels[level]}
-                </option>
-              ),
-            )}
-          </select>
-          <ChevronDown size={11} />
-        </label>
+        <ThinkingIntensityControl
+          key={`${config.model}:${selectedModel?.thinkingLevels.join(",")}`}
+          label="思考强度"
+          value={effectiveConfig.thinking}
+          levels={selectedModel?.thinkingLevels ?? [config.thinking]}
+          disabled={disabled}
+          onChange={(thinking) =>
+            onConfigChange({ ...effectiveConfig, thinking })
+          }
+        />
       )}
       {showLongTask && (
         <LongTaskToggle
