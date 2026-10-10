@@ -6,6 +6,8 @@ Panel 现在提供可本地运行的 macOS 应用。原生外壳使用 Swift、A
 
 客户端从与 Web 版相同的 `src/`、`server/` 和 `shared/` 构建，包含画布分支输入卡片、模型上下文容量和路径占用显示，以及文件更新的 Git 记录。Git 快照沿用 Web 版的本机 Git 依赖；应用内置 Node，不内置 Git。
 
+v0.9.8 调整 max 档位的像素效果，移除卡片和滑杆的整体光晕，让闪烁像素的颜色与发光保持一致。思考强度滑杆、键盘调整、主题和减少动态效果设置继续可用；三段数字版本可由已有 App 的更新器正常识别。
+
 v0.9.7 更新思考强度和 effort 选择器，点击按钮后在浮层卡片中拖动滑杆，松开后保存档位，也可点击档位或使用方向键、Home/End 调整。Esc 关闭并恢复按钮焦点；可用档位随模型变化，max 动效支持深浅主题与减少动态效果设置。
 
 v0.9.6 新增交付文件入口，可通过默认应用打开成果文件，或在 Finder 中显示；回答和搜索结果中的文件可预览、下载并刷新当前状态，详见 [交付文件](USAGE.md#交付文件)。新建分支使用探索保存的默认模型和思考设置。
@@ -147,16 +149,18 @@ ZIP 不携带资源分支和扩展属性，避免生成大量 `__MACOSX` 条目�
 发布新版本并确认安装包已公开、可下载后，同步备用更新信息（标签替换为本次版本）：
 
 ```bash
-gh api repos/H0ypothesis/panel/releases/tags/v0.9.7 > build/published-release.json
+gh api repos/H0ypothesis/panel/releases/tags/v0.9.8 > build/published-release.json
 node scripts/update-release-feed.mjs build/published-release.json
 git add updates/macos.json
 git commit -m "chore: refresh public macOS update feed"
 git push origin main
 ```
 
-脚本只接受已发布的数字版本和带 GitHub SHA-256 摘要的本仓库安装包，保留最近 20 个版本；备用源的架构、版本、大小、下载地址与摘要验证和 API 来源相同。不要在安装包公开前更新此文件。v0.5 若因 API 限流无法自动升级，需要从 Release 手动下载一次当前版本 v0.9.7。
+脚本只接受已发布的数字版本和带 GitHub SHA-256 摘要的本仓库安装包，保留最近 20 个版本；备用源的架构、版本、大小、下载地址与摘要验证和 API 来源相同。不要在安装包公开前更新此文件。v0.5 若因 API 限流无法自动升级，需要从 Release 手动下载一次当前版本 v0.9.8。
 
 ## 验证记录与发布状态
+
+v0.9.8 使用 Apple Silicon `arm64`、独立 Node.js `24.19.0`，最低 macOS 13.5。已通过前后端 TypeScript 检查、895 项核心测试、168 项前端测试、12 项安装测试和 17 项更新器与打包测试，共 1,092 项；包内桌面运行时、原生子代理、ZIP CRC 与条目计数、前端与原生版本一致性，以及 v0.9.1、v0.9.6 和 v0.9.7 内置更新器的完整解压与深层签名验证也已通过。本次 ZIP 共 46,265 个条目，不携带资源分支元数据。构建源码提交为 `8f59a8f0ff70c59e93d6311f0cf1165a818c7059`，构建信息和 SHA-256 校验文件随 Release 提供。
 
 v0.9.7 使用 Apple Silicon `arm64`、独立 Node.js `24.19.0`，最低 macOS 13.5。已通过前后端 TypeScript 检查、895 项核心测试、168 项前端测试、12 项安装测试和 17 项更新器与打包测试，共 1,092 项；包内桌面运行时、原生子代理、ZIP CRC 与条目计数、前端与原生版本一致性，以及 v0.9.1 和 v0.9.6 内置更新器的完整解压与深层签名验证也已通过。本次 ZIP 共 46,265 个条目，不携带资源分支元数据。构建源码提交为 `afe0329c071a30587e75a64be1554cba2367edec`，构建信息和 SHA-256 校验文件随 Release 提供。
 
