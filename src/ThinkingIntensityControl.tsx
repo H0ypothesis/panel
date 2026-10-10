@@ -80,15 +80,7 @@ const mosaic = Array.from({ length: 64 * 5 }, (_, index) => {
 
 const IntensityPixels = memo(function IntensityPixels() {
   return (
-    <div
-      className="intensity-pixels"
-      style={
-        {
-          "--pixel-flow-duration": `${pixelFlowSeconds}s`,
-          "--pixel-bloom-delay": `${-pixelFlowSeconds * 0.66}s`,
-        } as CSSProperties
-      }
-    >
+    <div className="intensity-pixels">
       {mosaic.map((style, key) => (
         <i key={key} style={style}>
           <span />
